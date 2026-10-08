@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: MIT
+
+// AX model tests: the first command lists and where they point, the PBs' links in main memory, the order in which AX
+// hands out voices and steals them by priority, the copy of a voice's changes into its PB, and the voices that a frame
+// drops when they would push it over its DSP cycles.
+
+#include <cstdint>
+#include <cstdio>
+#include <exception>
+#include <vector>
+
+#include "ax/pb.h"
+#include "ax/system.h"
+#include "ax/voice.h"
+#include "check.h"
+#include "common/bytes.h"
+#include "dsp/main_memory.h"
+
+namespace
+{
+
+using namespace wsf;
+
+uint32_t Cached(PAddr address)
+{
+    return ToCached(address);
+}
+
+// The words of a command list, up to its END.
+std::vector<uint16_t> ReadCommandList(const MainMemory& memory, uint32_t address)
+{
+    std::vector<uint16_t> words;
+    for (PAddr at = ToPhysical(address); words.size() < ax::layout::kCommandListSize / 2; at += 2)
+    {
+        words.push_back(LoadBe16(memory.At(at, 2)));
+        if (words.size() == 1 && words[0] == 14)
+        {
+            break;
+        }
+    }
+
+    return words;
+}
+
+void CheckCommandList(const MainMemory& memory, uint32_t list, PAddr output, PAddr remote_offset)
+{
+    const std::vector<uint16_t> words = ReadCommandList(memory, list);
+    const auto word32 = [&words](std::size_t i)
+    {
+        return uint32_t{words[i]} << 16 | words[i + 1];
+    };
+
+    Check(words.size() >= 32, "the command list's length");
+    if (words.size() < 32)
+    {
+        return;
+    }
+
+    Check(words[0] == 0 && word32(1) == Cached(ax::layout::kStudio), "SETUP and the depop block");
+    Check(words[3] == 1 && word32(4) == Cached(ax::layout::kSurroundBuffer), "ADD_TO_LR and the surround buffer");
+    Check(words[6] == 4 && word32(7) == Cached(ax::layout::kPbs), "PROCESS and the PBs");
+    Check(words[9] == 10 && words[10] == 32768 && words[11] == 10 && word32(12) == Cached(ax::layout::kCompressorTable),
+          "COMPRESSOR, its threshold, release and table");
+    Check(words[14] == 13, "WM_OUTPUT");
+    for (int i = 0; i < 4; i++)
+    {
+        Check(word32(15 + i * 2) == Cached(ax::layout::kRemoteBuffers + i * 360 + remote_offset),
+              "a Wii Remote's buffer");
+    }
+    Check(words[23] == 11 && words[24] == 0x8000 && word32(25) == Cached(ax::layout::kSurroundBuffer) &&
+              word32(27) == Cached(output),
+          "OUTPUT, the master volume and the buffers");
+    Check(words[29] == 14, "END");
+}
+
+void TestInit()
+{
+    MainMemory memory;
+    ax::System ax(memory);
+    ax.Init();
+
+    // The first command list fills the second output buffer. The microcode receives it with the first frame.
+    CheckCommandList(memory, Cached(ax::layout::kCommandLists), ax::layout::kOutputBuffers + 384, 0);
+    for (uint32_t i = 0; i < ax::kVoiceCount; i++)
+    {
+        const ax::Pb pb = ax::LoadPb(memory.At(ax::layout::kPbs + i * 0x140, ax::kPbSize));
+        const uint32_t next = i == ax::kVoiceCount - 1 ? 0 : Cached(ax::layout::kPbs + (i + 1) * 0x140);
+        Check(ax::Join(pb.next_hi, pb.next_lo) == next &&
+                  ax::Join(pb.curr_hi, pb.curr_lo) == Cached(ax::layout::kPbs + i * 0x140),
+              "a PB's links");
+    }
+
+    const ax::Frame first = ax.StartFrame();
+    Check(first.command_list == Cached(ax::layout::kCommandLists) && first.output == ax::layout::kOutputBuffers + 384,
+          "the first frame's command list");
+    ax.FinishFrame();
+    const ax::Frame second = ax.StartFrame();
+    Check(
+        second.command_list == Cached(ax::layout::kCommandLists + 0x80) && second.output == ax::layout::kOutputBuffers,
+        "the second frame's command list");
+    CheckCommandList(memory, second.command_list, ax::layout::kOutputBuffers, 18 * 2);
+}
+
+void TestAllocation()
+{
+    MainMemory memory;
+    ax::System ax(memory);
+    ax.Init();
+
+    // Free voices come from the top of a stack that starts with the last voice.
+    std::vector<ax::Voice*> voices;
+    std::vector<uint32_t> dropped;
+    const auto on_drop = [&dropped](ax::Voice* voice)
+    {
+        dropped.push_back(voice->index);
+    };
+
+    for (int i = 0; i < ax::kVoiceCount; i++)
+    {
+        voices.push_back(ax.AcquireVoice(16, on_drop));
+    }
+
+    Check(voices[0]->index == 95 && voices[1]->index == 94 && voices[95]->index == 0, "the order of free voices");
+    Check(ax.AcquireVoice(16, on_drop) == nullptr && dropped.empty(), "no voice for an equal priority");
+
+    // A higher priority steals the oldest voice of the lowest priority below it. The voice's owner is notified first.
+    ax.SetVoicePriority(voices[5], 15);
+    ax::Voice* taken = ax.AcquireVoice(17, on_drop);
+    Check(taken == voices[5] && dropped.size() == 1 && dropped[0] == voices[5]->index && taken->priority == 17,
+          "a voice taken from a lower priority");
+    taken = ax.AcquireVoice(17, on_drop);
+    Check(taken == voices[0] && dropped.size() == 2, "the oldest voice taken first");
+
+    // A freed voice is the next one handed out.
+    ax.FreeVoice(voices[40]);
+    Check(ax.AcquireVoice(1, on_drop) == voices[40], "a freed voice reused");
+}
+
+void TestSync()
+{
+    MainMemory memory;
+    ax::System ax(memory);
+    ax.Init();
+
+    ax::Voice* voice = ax.AcquireVoice(16, nullptr);
+    ax::PbAddr address;
+    address.format = static_cast<uint16_t>(ax::SampleFormat::kPcm16);
+    address.end_address_lo = 0x1234;
+    address.current_address_hi = 0x0800;
+    voice->SetAddr(address);
+    voice->pb.mix.l = 0x4000;
+    voice->pb.SetMixerCtrl(ax::mixer::kL);
+    voice->sync |= ax::sync::kMix | ax::sync::kMixerCtrl;
+    voice->SetState(ax::VoiceState::kRun);
+    ax.StartFrame();
+
+    const ax::Pb pb = ax::LoadPb(memory.At(ax::layout::kPbs + voice->index * 0x140, ax::kPbSize));
+    Check(pb.state == 1 && pb.mix.l == 0x4000 && pb.MixerCtrl() == ax::mixer::kL && pb.addr.end_address_lo == 0x1234 &&
+              pb.addr.current_address_hi == 0x0800 && pb.adpcm.gain == 0x800,
+          "a voice's changes in its PB");
+    Check(voice->sync == 0, "the changes cleared once copied");
+
+    // Fields that the CPU hasn't changed get the microcode's values back in the CPU's copy.
+    uint8_t* bytes = memory.At(ax::layout::kPbs + voice->index * 0x140, ax::kPbSize);
+    StoreBe16(bytes + 0x6e + 0xc, 0x0801);
+    StoreBe16(bytes + 0x10, 0);
+    ax.FinishFrame();
+    ax.StartFrame();
+    Check(voice->pb.addr.current_address_hi == 0x0801 && !voice->IsRunning(), "the microcode's changes read back");
+}
+
+void TestCycleBudget()
+{
+    MainMemory memory;
+    ax::System ax(memory);
+    ax.Init();
+
+    // Every voice runs with the polyphase converter at 2x and a full mix. AX drops the ones that don't fit.
+    std::vector<uint32_t> dropped;
+    const auto on_drop = [&dropped](ax::Voice* voice)
+    {
+        dropped.push_back(voice->index);
+    };
+
+    for (int i = 0; i < ax::kVoiceCount; i++)
+    {
+        ax::Voice* voice = ax.AcquireVoice(16, on_drop);
+        voice->pb.src.ratio_hi = 2;
+        voice->pb.SetMixerCtrl(0xffffffff);
+        voice->SetState(ax::VoiceState::kRun);
+    }
+
+    ax.StartFrame();
+    Check(dropped.empty(), "drop callbacks wait for the end of the frame");
+    ax.FinishFrame();
+    Check(!dropped.empty() && dropped.size() < ax::kVoiceCount, "voices dropped for want of cycles");
+    Check(ax.DspCycles() > 364317, "the frame's cycles counted past the limit");
+}
+
+} // namespace
+
+int main()
+{
+    try
+    {
+        TestInit();
+        TestAllocation();
+        TestSync();
+        TestCycleBudget();
+    }
+    catch (const std::exception& e)
+    {
+        std::fprintf(stderr, "exception: %s\n", e.what());
+
+        return 1;
+    }
+
+    return failures == 0 ? 0 : 1;
+}
