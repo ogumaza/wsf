@@ -19,7 +19,6 @@
 #include "ax/voice.h"
 #include "common/common_types.h"
 #include "nw4r/envelope.h"
-#include "nw4r/util.h"
 #include "rsar/formats.h"
 
 namespace wsf::nw4r
@@ -128,6 +127,10 @@ public:
     // SetVe (0x80034178): sets the volume to reach by the end of the next frame. Also sets the starting volume if the
     // voice hasn't started.
     void SetVe(float volume, float init_volume);
+
+    // AXSetVoiceVe of October 2006 (0x80031404 in Smooth Moves' main.dol): sets the envelope's volume and its step per
+    // sample. The build of October 2006 sets the envelope this way, in place of SetVe and Sync.
+    void SetVeOctober2006(uint16_t volume, int16_t delta);
 
     // SetLpf (0x80034254): sets the low-pass filter's cutoff in Hz. A cutoff of 16 kHz or above turns the filter off.
     void SetLpf(uint16_t freq);
@@ -282,7 +285,7 @@ public:
     void Calc();
     void Update();
 
-    // Setup (0x8004c454): sets the wave to play, starting `offset` samples in.
+    // Setup (0x8004c454): sets the wave to play from `offset` samples in.
     void Setup(const WaveData& data, uint32_t offset);
 
     void Start(); // 0x8004c704
@@ -327,7 +330,9 @@ private:
 
     bool IsPlayFinished() const;
     void CalcAxSrc(bool initial);
-    void CalcAxVe();
+    // CalcAxVe returns true in the build of October 2006 while the envelope ramps. The voice then sets it again in the
+    // next frame. The ramp then lands on its target.
+    bool CalcAxVe();
     bool CalcAxMix();
     void CalcAxLpf();
     void CalcAxBiquadFilter();
@@ -349,7 +354,6 @@ private:
     bool starting_ = false;               // + 0xad
     bool started_ = false;                // + 0xae
     bool pause_ = false;                  // + 0xaf
-    bool pausing_ = false;                // + 0xb0
     uint16_t sync_flag_ = 0;              // + 0xb1
     int priority_ = 0;                    // + 0xb4
     float pan_ = 0.0f;                    // + 0xb8
@@ -366,6 +370,8 @@ private:
     uint8_t pan_curve_ = 0;               // + 0x120
     uint8_t biquad_type_ = 0;             // builds from June 2008
     float biquad_value_ = 0.0f;           // builds from June 2008
+    bool first_ve_update_ = true;         // the build of October 2006: whether CalcAxVe hasn't run yet
+    float prev_ve_volume_ = 1.0f;         // the build of October 2006: the volume that CalcAxVe last used
 };
 
 // The voices in use, by priority (VoiceManager): 96, one for each AX voice.
@@ -404,9 +410,6 @@ public:
     // NotifyVoiceUpdate (0x8004e65c): AX's frame callback. It ends each voice's ramps where the frame took them. The
     // sound frame may not set new ramps.
     void NotifyVoiceUpdate();
-
-    // UpdateAllVoicesSync (0x8004e7cc): marks a change for every active voice.
-    void UpdateAllVoicesSync(uint8_t sync_flag);
 
     // The voices in use, lowest priority first and oldest first among equals.
     const std::list<Voice*>& PrioVoices() const
@@ -618,6 +621,11 @@ public:
     void UpdateSweep(int count);
     void SetSweepParam(float pitch, int time, bool auto_update);
 
+    float InitVolume() const
+    {
+        return init_volume_;
+    }
+
     void SetInitVolume(float volume)
     {
         init_volume_ = volume;
@@ -636,6 +644,11 @@ public:
     void SetTune(float tune)
     {
         tune_ = tune;
+    }
+
+    int Key() const
+    {
+        return key_;
     }
 
     void SetKey(int key)

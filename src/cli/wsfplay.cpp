@@ -29,6 +29,7 @@
 #include "cli/audio_out.h"
 #include "cli/console.h"
 #include "common/ascii.h"
+#include "wsf/format.h"
 #include "wsf/playback.h"
 
 using namespace wsf;
@@ -46,7 +47,7 @@ constexpr char kUsage[] =
     "You can also drop files on the program.\n"
     "\n"
     "options:\n"
-    "  -o, --output FILE  write FILE instead, as WAV or FLAC by its extension (one input only)\n"
+    "  -o, --output FILE  write FILE instead. Its extension selects WAV or FLAC (one input only)\n"
     "  --length T         play for T instead of the tagged length (seconds, m:s or h:m:s)\n"
     "  --fade T           fade out over T instead of the tagged fade\n"
     "  --default T        the length of a file without a length tag (default %lld:%02lld, with a %lld s\n"
@@ -112,6 +113,13 @@ int Render(const std::string& in, const fs::path& out, const Options& o)
     {
         PrintInfo(playback);
         return 0;
+    }
+
+    // Refuse a length that the file can't hold before the render. The render would take hours.
+    if (const auto err = CheckAudioLength(out.string(), playback.LengthFrames()))
+    {
+        std::fprintf(stderr, "error: %s\n", err->c_str());
+        return 1;
     }
 
     const auto t0 = std::chrono::steady_clock::now();
@@ -192,7 +200,7 @@ int ParseArgs(int argc, char** argv, Options& o, std::vector<std::string>& input
         {
             if (i + 1 >= argc)
             {
-                std::fprintf(stderr, "error: %s needs a value\n", a.c_str());
+                std::fprintf(stderr, "error: %s requires a value\n", a.c_str());
                 return 2;
             }
 
@@ -228,7 +236,7 @@ int ParseArgs(int argc, char** argv, Options& o, std::vector<std::string>& input
         {
             if (i + 1 >= argc)
             {
-                std::fprintf(stderr, "error: %s needs a value\n", a.c_str());
+                std::fprintf(stderr, "error: %s requires a value\n", a.c_str());
                 return 2;
             }
 

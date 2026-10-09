@@ -63,7 +63,7 @@ protected:
 class Ios : private IosState
 {
 public:
-    // An open device, as a descriptor names it.
+    // An open device that a descriptor names.
     class Device;
 
     // IOS's state, with a copy of each open device.

@@ -21,9 +21,18 @@ namespace wsf::nw4r
 // builds from 20080308 (Mario Kart Wii) on differ, it checks Since2008. Where builds from 20080620 (Wii Music) on
 // differ again, it checks SinceJune2008. A build between two of these counts as the older kind because none has been
 // compared with the model.
+//
+// WarioWare: Smooth Moves links a build from 2006 without a banner. That build comes with AX of October 2006. AX's
+// microcode identifies the build (ArchiveModel::Start). Where that build differs, the model checks October2006.
 struct SndBuild
 {
     uint32_t date = 0;
+    bool october_2006 = false; // the build that comes with AX of October 2006
+
+    bool October2006() const
+    {
+        return october_2006;
+    }
 
     bool Since2008() const
     {
@@ -39,8 +48,8 @@ struct SndBuild
 // The build of NW4R SND that a main.dol links, from its banner.
 SndBuild FindSndBuild(std::span<const uint8_t> dol);
 
-// The random numbers (Util::CalcRandom, 0x8004ec58): x = x * 0x19660D + 0x3C6EF35F from 0x12345678, giving x's top 16
-// bits. The game has one generator for the whole sound system.
+// The random numbers (Util::CalcRandom, 0x8004ec58): x = x * 0x19660D + 0x3C6EF35F from 0x12345678. A draw gives x's
+// top 16 bits. The game has one generator for the whole sound system.
 class Random
 {
 public:
@@ -80,16 +89,9 @@ float CalcVolumeRatio(float db);
 // The ratio for one side at a pan of -1 (left) to 1 (right) (Util::CalcPanRatio, 0x8004ea24).
 float CalcPanRatio(float pan, const PanInfo& info);
 
-// The ratio for a surround pan of 0 (front) to 2 (rear) (Util::CalcSurroundPanRatio, 0x8004eb04).
-float CalcSurroundPanRatio(float pan, const PanInfo& info);
-
-// The low-pass filter's cutoff in Hz for a scale of 0..1: 32000 * 2^(10 (scale - 1)) (Util::CalcLpfFreq,
-// 0x8004eb98). The game computes the power with its C library's pow in double precision.
+// The low-pass filter's cutoff in Hz for a scale of 0..1: 32000 * 2^(10 (scale - 1)) (Util::CalcLpfFreq, 0x8004eb98).
+// The game computes the power with its C library's pow in double precision.
 int CalcLpfFreq(float scale);
-
-// The Wii Remote's biquad coefficients b0, b1, b2, a1 and a2 for a filter value, clamped to 0..127
-// (Util::GetRemoteFilterCoefs, 0x8004ec04).
-std::array<uint16_t, 5> RemoteFilterCoefs(int filter);
 
 // The biquad filter's coefficients b0, b1, b2, a1 and a2 for a filter `type` at a `value` of 0 (mildest) to 1, in
 // builds from June 2008 on. Type 1 is a low-pass filter, 2 a high-pass and 3 to 5 band-passes. Other types have no

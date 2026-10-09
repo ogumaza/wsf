@@ -7,14 +7,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <optional>
-#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "common/bytes.h"
-#include "common/dol.h"
 #include "dsp/main_memory.h"
 #include "ppc/cpu.h"
 
@@ -77,34 +74,6 @@ System::System(Disc& disc) : disc_(disc)
 {
 }
 
-uint32_t System::LoadDol(std::span<const uint8_t> dol)
-{
-    // Clear the DOL's BSS, then copy its sections to their addresses. The BSS range spans the small data sections
-    // between the BSS sections.
-    const std::optional<Dol> parsed = Dol::Parse(dol);
-    if (!parsed)
-    {
-        throw std::runtime_error("main.dol isn't a DOL");
-    }
-
-    if (uint8_t* bss = memory_.At(ToPhysical(parsed->BssAddress()), parsed->BssSize()))
-    {
-        std::fill(bss, bss + parsed->BssSize(), uint8_t{0});
-    }
-    for (const Dol::Section& section : parsed->Sections())
-    {
-        uint8_t* to = memory_.At(ToPhysical(section.address), section.data.size());
-        if (to == nullptr)
-        {
-            throw std::runtime_error("a section of main.dol lies outside memory");
-        }
-
-        std::copy(section.data.begin(), section.data.end(), to);
-    }
-
-    return parsed->Entry();
-}
-
 void System::Start(uint32_t entry, uint32_t ios_version)
 {
     LoadLowMemory(ios_version);
@@ -114,6 +83,7 @@ void System::Start(uint32_t entry, uint32_t ios_version)
     ppc::State& s = cpu_.state_;
     s.msr = ppc::msr::kIr | ppc::msr::kDr | ppc::msr::kRi | ppc::msr::kFp;
     s.spr[ppc::spr::kHid4] = 0x82000000; // SBE: BATs 4-7 on
+
     const auto set_bat = [&s](int base, uint32_t upper, uint32_t lower)
     {
         s.spr[base] = upper;
@@ -444,9 +414,11 @@ void System::WritePi(uint32_t offset, uint32_t value)
     {
     case 0x00: // the causes clear at their sources
         break;
+
     case 0x04:
         pi_mask_ = value;
         break;
+
     default:
         pi_.Write(offset, 4, value);
         ReportUnknown(0x0c003000 + offset, 4, true, value);
@@ -476,13 +448,17 @@ uint32_t System::ReadAi(uint32_t offset)
     {
     case 0x00:
         return ai_control_;
+
     case 0x04:
         return ai_volume_;
+
     case 0x08:
         AdvanceSampleCounter();
         return ai_samples_;
+
     case 0x0c:
         return ai_interrupt_timing_;
+
     default:
         return 0;
     }
@@ -511,6 +487,7 @@ void System::WriteAi(uint32_t offset, uint32_t value)
             {
                 ai_samples_ = 0;
             }
+
             if ((ai_control_ & kPlay) && (!(old & kPlay) || ((ai_control_ ^ old) & kRate48k)))
             {
                 ai_period_ = period(ai_control_);
@@ -520,16 +497,20 @@ void System::WriteAi(uint32_t offset, uint32_t value)
             dsp_interface_.SetDmaRate32k((value & 0x40) != 0);
             break;
         }
+
     case 0x04:
         ai_volume_ = value;
         break;
+
     case 0x08:
         AdvanceSampleCounter();
         ai_samples_ = value & 0x7fffffff;
         break;
+
     case 0x0c:
         ai_interrupt_timing_ = value;
         break;
+
     default:
         break;
     }

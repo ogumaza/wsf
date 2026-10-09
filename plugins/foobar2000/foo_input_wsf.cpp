@@ -248,8 +248,8 @@ public:
             pfc::throw_exception_with_message<exception_io_data>(err->c_str());
         }
 
-        // Enable endless playback, snapshots and rendering ahead only during playback. Conversion and scanning need a
-        // finite length and never seek.
+        // Enable endless playback, snapshots and rendering ahead only during playback. Conversion and scanning require
+        // a finite length and never seek.
         const bool playing = (p_flags & input_flag_playback) != 0;
         PlaybackOptions options = DefaultOptions();
         options.endless = cfg_endless.get() && playing && !(p_flags & input_flag_no_looping);

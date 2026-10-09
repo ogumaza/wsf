@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -69,6 +70,7 @@ float CalcPitchRatio(int pitch)
     {
         ratio *= tables::kNote[note];
     }
+
     if (microtone != 0)
     {
         ratio *= tables::kPitch[microtone];
@@ -98,14 +100,6 @@ float CalcPanRatio(float pan, const PanInfo& info)
     return std::clamp(ratio, 0.0f, info.zero_clamp ? 1.0f : 2.0f);
 }
 
-float CalcSurroundPanRatio(float pan, const PanInfo& info)
-{
-    pan = std::clamp(pan, 0.0f, 2.0f) * 0.5f;
-    const float ratio = PanTable(info.curve)[static_cast<int>(0.5f + kPanTableMax * pan)];
-
-    return std::clamp(ratio, 0.0f, 2.0f);
-}
-
 int CalcLpfFreq(float scale)
 {
     scale = std::clamp(scale, 0.0f, 1.0f);
@@ -114,19 +108,11 @@ int CalcLpfFreq(float scale)
     return static_cast<int>(32000.0 * std::pow(2.0, exponent));
 }
 
-std::array<uint16_t, 5> RemoteFilterCoefs(int filter)
-{
-    const int row = std::clamp(filter, 0, 127) * 5;
-
-    return {tables::kRemoteFilter[row], tables::kRemoteFilter[row + 1], tables::kRemoteFilter[row + 2],
-            tables::kRemoteFilter[row + 3], tables::kRemoteFilter[row + 4]};
-}
-
 std::optional<std::array<uint16_t, 5>> BiquadFilterCoefs(int type, float value)
 {
     // The preset filters' coefficient callbacks (Wii Music, 0x800b3b7c, 0x800b3c04, 0x800b3c8c, 0x800b3d20 and
-    // 0x800b3db4) take the row at the value times the last row's index, rounded towards zero. The band-passes scale
-    // value × (2 - value) instead.
+    // 0x800b3db4) take the row at the value times the last row's index. The product is rounded towards zero. The
+    // band-passes scale value × (2 - value) instead.
     std::span<const uint16_t> table;
     bool band_pass = false;
     switch (type)
@@ -134,21 +120,26 @@ std::optional<std::array<uint16_t, 5>> BiquadFilterCoefs(int type, float value)
     case 1:
         table = tables::kBiquadLpf;
         break;
+
     case 2:
         table = tables::kBiquadHpf;
         break;
+
     case 3:
         table = tables::kBiquadBpf512;
         band_pass = true;
         break;
+
     case 4:
         table = tables::kBiquadBpf1024;
         band_pass = true;
         break;
+
     case 5:
         table = tables::kBiquadBpf2048;
         band_pass = true;
         break;
+
     default:
         return std::nullopt;
     }
@@ -174,6 +165,7 @@ SndBuild FindSndBuild(std::span<const uint8_t> dol)
     static constexpr std::string_view kMonths = "JanFebMarAprMayJunJulAugSepOctNovDec";
     const std::string_view date = text.substr(build + 7, 11);
     const std::size_t month = kMonths.find(date.substr(0, 3));
+
     const auto digit = [&date](std::size_t i)
     {
         return date[i] == ' ' ? 0u : static_cast<uint32_t>(date[i] - '0');

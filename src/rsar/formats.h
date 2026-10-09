@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -62,8 +63,8 @@ struct Wave
     bool loop = false;
     uint32_t sample_rate = 32000;
 
-    // DSP addresses, as stored: in nibbles for ADPCM (two for each 8-byte frame's header), in samples for PCM16 and in
-    // bytes for PCM8. The end is the last sample's address.
+    // DSP addresses as the file stores them: in nibbles for ADPCM (two for each 8-byte frame's header), in samples for
+    // PCM16 and in bytes for PCM8. The end is the last sample's address.
     uint32_t loop_start = 0;
     uint32_t loop_end = 0;
 
@@ -151,7 +152,6 @@ private:
         std::vector<Node> entries;
     };
 
-    Node ReadNode(const Reader& reader, size_t base, size_t ref_offset, int depth);
     const Node* Choose(const Node& node, int key) const;
 
     uint16_t version_ = 0;
@@ -161,7 +161,7 @@ private:
     std::vector<Wave> waves_;
 };
 
-// RSEQ: a sequence file. It can hold several sequences, each starting at a label.
+// RSEQ: a sequence file. It can hold several sequences. Each starts at a label.
 struct Sequence
 {
     struct Label
@@ -221,7 +221,7 @@ struct PlayerInfo
     uint32_t heap_size = 0;
 };
 
-// A file's contents and its wave data, as a group holds them. Banks and wave sound files have wave data.
+// A file in a group: its contents and its wave data. Banks and wave sound files have wave data.
 struct FileData
 {
     std::span<const uint8_t> file;
@@ -233,7 +233,7 @@ struct FileData
 class SoundArchive
 {
 public:
-    // A group of files that a game loads into memory together: their data, followed by their wave data.
+    // A group of files that a game loads into memory together: their data, then their wave data.
     struct Group
     {
         struct Item

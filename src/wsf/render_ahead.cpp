@@ -344,8 +344,8 @@ void RenderAhead::Append(const int16_t* pcm, std::size_t frames)
 
 void RenderAhead::DropBehind()
 {
-    // Discard only whole blocks before the read position, leaving nearby audio available for instant backward seeks.
-    // Keep the last block until a new one follows it.
+    // Discard only whole blocks before the read position. Nearby audio stays available for instant backward seeks. Keep
+    // the last block until a new one follows it.
     while (end_ - start_ > keep_ && blocks_.size() > 1 && start_ + block_ <= read_)
     {
         blocks_.pop_front();

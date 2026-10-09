@@ -41,9 +41,9 @@ public:
     // The rate players report, the audio interface's DMA rate: 32,000 Hz.
     static constexpr int kSampleRate = kPlayerSampleRate;
 
-    // A snapshot of the player between emulation steps, with the audio it hasn't handed out yet. Unchanged memory pages
-    // are shared with the snapshot it was taken after. It points at this player's emulation. It can only be restored to
-    // this player before the next Start.
+    // A snapshot of the player between emulation steps, with the audio that the player has rendered but not returned
+    // yet. Unchanged memory pages are shared with the snapshot taken before it. The snapshot points at this player's
+    // emulation and can only be restored to this player before the next Start.
     struct Snapshot;
 
     Player();
@@ -92,13 +92,7 @@ public:
     // Tagged volume (linear gain, 1.0 if absent).
     double Volume() const;
 
-    // True for an archive-mode set.
-    bool ArchiveMode() const
-    {
-        return set_.archive.has_value();
-    }
-
-    // The rip's files, as the player loaded them.
+    // The rip's files that the player loaded.
     const LoadedSet& GetLoadedSet() const
     {
         return set_;

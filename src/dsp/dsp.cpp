@@ -5,6 +5,7 @@
 #include "dsp/dsp.h"
 
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 
 #include "dsp/internal.h"
@@ -50,45 +51,15 @@ void Dsp::Step()
     }
 }
 
-uint64_t Dsp::Run(uint64_t steps, bool stop_when_idle)
+uint64_t Dsp::Run(uint64_t steps)
 {
     uint64_t run = 0;
     for (; run < steps && !Halted(); run++)
     {
-        if (stop_when_idle && Idle())
-        {
-            break;
-        }
-
         Step();
     }
 
     return run;
-}
-
-bool Dsp::Idle() const
-{
-    // At the start of a mail-polling loop whose condition holds, the DSP would only spin. It would wait for the CPU to
-    // read its mail (DMBH full) or for the CPU's mail (CMBH empty).
-    const uint16_t pc = regs_.pc;
-    if (pc >= kIramSize || !idle_[pc])
-    {
-        return false;
-    }
-
-    const uint16_t first = iram_[pc];
-    const bool polls_cpu_mailbox = first == 0x26fe || first == 0x27fe || first == 0x00de;
-    const bool polls_dsp_mailbox = first == 0x26fc || first == 0x27fc;
-    if (polls_cpu_mailbox)
-    {
-        return (mailbox_to_dsp_ & 0x80000000) == 0;
-    }
-    if (polls_dsp_mailbox)
-    {
-        return (mailbox_to_cpu_ & 0x80000000) != 0;
-    }
-
-    return false;
 }
 
 void Dsp::LoadIram(uint16_t address, std::span<const uint16_t> words)
@@ -255,22 +226,27 @@ void Dsp::SetFlags40(int64_t value, bool carry, bool overflow)
     {
         flags |= kSrCarry;
     }
+
     if (overflow)
     {
         flags |= kSrOverflow | kSrOverflowSticky;
     }
+
     if (value == 0)
     {
         flags |= kSrZero;
     }
+
     if (value < 0)
     {
         flags |= kSrSign;
     }
+
     if (value < kS32Min || value > kS32Max)
     {
         flags |= kSrAboveS32;
     }
+
     if ((bits >> 31 & 1) == (bits >> 30 & 1))
     {
         flags |= kSrTopBits;
@@ -301,14 +277,17 @@ void Dsp::SetFlags16(uint16_t value, bool above_s32)
     {
         flags |= kSrZero;
     }
+
     if (value & 0x8000)
     {
         flags |= kSrSign;
     }
+
     if (above_s32)
     {
         flags |= kSrAboveS32;
     }
+
     if ((value >> 15 & 1) == (value >> 14 & 1))
     {
         flags |= kSrTopBits;
@@ -346,6 +325,7 @@ uint16_t Dsp::AddIndex(uint16_t address, uint16_t index, uint16_t wrap) const
     const uint32_t mask = (uint32_t{1} << n) - 1;
     const int32_t i = static_cast<int16_t>(index);
     const int32_t sum = int32_t{address} + i;
+
     const auto carries = [mask](uint32_t x, uint32_t y)
     {
         return (x & mask) + (y & mask) > mask;

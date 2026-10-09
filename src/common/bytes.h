@@ -26,11 +26,6 @@ inline uint64_t LoadBe64(const uint8_t* p)
     return (static_cast<uint64_t>(LoadBe32(p)) << 32) | LoadBe32(p + 4);
 }
 
-inline uint16_t LoadLe16(const uint8_t* p)
-{
-    return static_cast<uint16_t>(p[0] | (p[1] << 8));
-}
-
 inline uint32_t LoadLe32(const uint8_t* p)
 {
     return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |

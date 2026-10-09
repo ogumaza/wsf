@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 
@@ -108,15 +109,18 @@ void Dsp::RomStep()
         case kEntry:
             RomEntry();
             return;
+
         case kLoader:
             RomLoader();
             return;
+
         case kMixTwoConstant:
         case kMixOneConstant:
         case kMixTwoRamped:
         case kMixOneRamped:
             RomMix(regs_.pc);
             return;
+
         default:
             // An address outside the modelled routines. Without the ROM's code, the DSP stops.
             control_ |= control::kHalt;
@@ -156,27 +160,33 @@ void Dsp::RomStep()
                     regs_.ix[0] = high;
                     regs_.ix[1] = low;
                     break;
+
                 case 0xa002:
                     SetAcM(1, low);
                     regs_.ix[3] = low;
                     break;
+
                 case 0xc002:
                     SetAcM(1, low);
                     regs_.ix[2] = low;
                     break;
+
                 case 0xb001:
                     SetAcM(1, low);
                     regs_.ax_h[0] = high;
                     regs_.ax_l[0] = low;
                     break;
+
                 case 0xb002:
                     SetAcM(1, low);
                     regs_.ax_l[1] = low;
                     break;
+
                 case 0xc001:
                     SetAcM(1, low);
                     regs_.ax_h[1] = low;
                     break;
+
                 default: // 0xd001: the entry point, then the loader
                     SetAc(0, 0);
                     SetAcM(0, low);
@@ -299,6 +309,7 @@ void Dsp::RomMix(uint16_t routine)
     // Mixes 32 samples of one or two inputs into 24-bit accumulation buffers at a constant or ramped volume.
     Registers& r = regs_;
     const bool sxm = (r.sr & kSrSxm) != 0;
+
     const auto advance = [this](uint16_t address, int count)
     {
         for (int i = 0; i < count; i++)

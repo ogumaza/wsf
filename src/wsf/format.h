@@ -58,6 +58,18 @@ std::string FormatTagArea(const Tags& tags);
 std::vector<uint8_t> WritePsf(uint8_t version, const std::vector<uint8_t>& reserved,
                               const std::vector<uint8_t>& program, const Tags& tags);
 
+// A number read from the start of a tag's value, and the number of characters it took.
+struct DecimalNumber
+{
+    double value;
+    std::size_t length;
+};
+
+// Reads a decimal number from the start of `text` the same way in every locale: an optional sign, digits with an
+// optional '.' or ',' before decimals, and an optional exponent ("1.5e3"). Returns nullopt if `text` doesn't start with
+// one. Unlike std::strtod, it reads no white space, hex, infinity or NaN.
+std::optional<DecimalNumber> ReadDecimal(std::string_view text);
+
 // Parses a PSF length or fade tag ("seconds", "m:s" or "h:m:s", with '.' or ',' before decimals) into milliseconds.
 // Returns -1 if the tag is empty or malformed.
 long long ParseTime(const std::string& text);
@@ -81,7 +93,7 @@ struct ProcessDescriptor
     uint32_t version = 1;
     uint32_t entry = 0x80004000; // main.dol's entry point
     uint32_t status_address = 0; // the driver's status word, or 0
-    uint32_t ios_version = 0;    // the IOS the game runs on, as in its TMD (21 for IOS21)
+    uint32_t ios_version = 0;    // the IOS that the game's TMD names (21 for IOS21)
     uint32_t flags = kFlagDspRequired;
 };
 
@@ -136,8 +148,8 @@ struct DriverBlock
     static constexpr uint32_t kSoundOffset = 0x0c;
 };
 
-// Builds a program (docs/wsf.md, "Program: chunks"): the chunks in the order they're added, each padded to a multiple
-// of four bytes.
+// Builds a program (docs/wsf.md, "Program: chunks"): the chunks in the order they're added. Each is padded to a
+// multiple of four bytes.
 class ProgramBuilder
 {
 public:

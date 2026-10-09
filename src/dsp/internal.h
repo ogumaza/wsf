@@ -36,7 +36,7 @@ inline constexpr uint16_t kSrAm = 1u << 13;
 inline constexpr uint16_t kSrSxm = 1u << 14;
 inline constexpr uint16_t kSrSu = 1u << 15;
 
-// Hardware register numbers, as the low 8 bits of their addresses: DMA and the mailboxes.
+// Hardware register numbers (the low 8 bits of their addresses): DMA and the mailboxes.
 inline constexpr uint8_t kDscr = 0xc9;
 inline constexpr uint8_t kDsbl = 0xcb;
 inline constexpr uint8_t kDspa = 0xcd;
@@ -81,6 +81,7 @@ WSF_DSP_FORCE_INLINE uint16_t Dsp::ReadReg(int reg)
     case 0x0e:
     case 0x0f:
         return Pop(reg - 0x0c);
+
     case 0x1e:
     case 0x1f:
         {
@@ -93,6 +94,7 @@ WSF_DSP_FORCE_INLINE uint16_t Dsp::ReadReg(int reg)
 
             return AcM(i);
         }
+
     default:
         return RawReg(reg);
     }

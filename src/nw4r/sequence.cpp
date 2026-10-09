@@ -3,6 +3,7 @@
 #include "nw4r/sequence.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -190,6 +191,7 @@ int SeqTrack::ParseNextTick(bool do_note_on)
 
         note_finish_wait_ = false;
     }
+
     if (wait_ > 0 && --wait_ > 0)
     {
         return 1;
@@ -197,7 +199,7 @@ int SeqTrack::ParseNextTick(bool do_note_on)
 
     for (int count = 0; wait_ == 0 && !note_finish_wait_; count++)
     {
-        if (count == kParseLimit || Parse(do_note_on) == ParseResult::kFinish)
+        if (count == kParseLimit || RunCommand(do_note_on) == ParseResult::kFinish)
         {
             return -1;
         }
@@ -310,18 +312,82 @@ void SeqTrack::FreeAllChannel()
     channels_ = nullptr;
 }
 
+SeqTrack::SoundState SeqTrack::State() const
+{
+    SoundState state{};
+    state.program = program_;
+    state.lfo_param = lfo_param_;
+    state.lfo_target = lfo_target_;
+    state.sweep_pitch = sweep_pitch_;
+    state.volume2 = volume2_;
+    state.pitch_bend = pitch_bend_;
+    state.bend_range = bend_range_;
+    state.init_pan = init_pan_;
+    state.transpose = transpose_;
+    state.priority = priority_;
+    state.porta_key = porta_key_;
+    state.porta_time = porta_time_;
+    state.envelope = {attack_, decay_, sustain_, release_};
+    state.hold = hold_;
+    state.velocity_range = velocity_range_;
+    state.biquad_type = biquad_type_;
+    state.biquad_value = biquad_value_;
+    state.main_send = main_send_;
+    state.fx_send = fx_send_;
+    state.lpf_freq = lpf_freq_;
+    state.mute = mute_;
+    state.porta = porta_;
+    state.damper = damper_;
+    state.monophonic = monophonic_;
+    state.note_wait = note_wait_;
+    state.tie = tie_;
+
+    std::size_t at = 0;
+    const auto move = [&state, &at](const auto& value)
+    {
+        state.moves[at++] = value.Get();
+        state.moves[at++] = value.target;
+        state.moves[at++] = value.duration - value.counter;
+    };
+
+    move(volume_);
+    move(pan_);
+    move(surround_pan_);
+
+    state.newest = channels_;
+    state.timebase = player_->timebase_;
+    state.tempo = player_->tempo_;
+    state.player_volume = player_->volume_;
+
+    return state;
+}
+
+SeqTrack::ParseResult SeqTrack::RunCommand(bool do_note_on)
+{
+    if (!player_->on_loop)
+    {
+        return Parse(do_note_on);
+    }
+
+    const uint64_t now = ++player_->commands_run_;
+    run_.resize(data_.size() + 1);
+    run_[std::min<std::size_t>(current_, data_.size())] = now;
+    const SoundState before = State();
+    const ParseResult result = Parse(do_note_on);
+    if (State() != before)
+    {
+        MarkChange();
+    }
+
+    return result;
+}
+
 SeqTrack::ParseResult SeqTrack::Parse(bool do_note_on)
 {
     // MmlParser::Parse (0x8003b8b8). A command may be conditional on the last comparison. Its argument may come from a
     // random range or a variable instead of the command. Builds from 2008 also take a time for a command of 0xb0-0xdf,
     // after its argument (Mario Kart Wii, 0x80096240). The time comes from the command, a random range or a variable.
     const bool build_2008 = player_->GetEngine().Build().Since2008();
-    if (player_->on_loop)
-    {
-        run_.resize(data_.size() + 1);
-        run_[std::min<std::size_t>(current_, data_.size())] = true;
-    }
-
     bool exec = true;
     bool use_arg_type = false;
     ArgType arg_type = ArgType::kU8;
@@ -334,18 +400,21 @@ SeqTrack::ParseResult SeqTrack::Parse(bool do_note_on)
         command = ReadByte();
         exec = cmp_flag_;
     }
+
     if (build_2008 && command >= kTimeParam && command <= kTimeVariableParam)
     {
         static constexpr ArgType kTimeTypes[] = {ArgType::kS16, ArgType::kRandom, ArgType::kVariable};
         time_type = kTimeTypes[command - kTimeParam];
         command = ReadByte();
     }
+
     if (command == kRandomParam)
     {
         command = ReadByte();
         arg_type = ArgType::kRandom;
         use_arg_type = true;
     }
+
     if (command == kVariableParam)
     {
         command = ReadByte();
@@ -370,12 +439,13 @@ SeqTrack::ParseResult SeqTrack::Parse(bool do_note_on)
         }
 
         key = std::clamp(key, 0, 127);
-        noted_ = true;
+        noted_at_ = player_->commands_run_;
         holds_ = length >= kHeldTicks;
-        if (!mute_ && do_note_on)
+        if (!mute_ && do_note_on && NoteOn(key, velocity, length > 0 ? length : -1, tie_))
         {
-            NoteOn(key, velocity, length > 0 ? length : -1, tie_);
+            MarkChange();
         }
+
         if (note_wait_)
         {
             wait_ = length;
@@ -403,7 +473,6 @@ SeqTrack::ParseResult SeqTrack::Parse(bool do_note_on)
                 {
                     wait_ = time;
                 }
-
                 break;
             }
 
@@ -413,7 +482,6 @@ SeqTrack::ParseResult SeqTrack::Parse(bool do_note_on)
             {
                 CommandProc(command, arg1, arg2);
             }
-
             break;
 
         case kOpenTrack:
@@ -424,7 +492,6 @@ SeqTrack::ParseResult SeqTrack::Parse(bool do_note_on)
                 {
                     CommandProc(command, track, static_cast<int32_t>(offset));
                 }
-
                 break;
             }
 
@@ -436,14 +503,12 @@ SeqTrack::ParseResult SeqTrack::Parse(bool do_note_on)
                 {
                     CommandProc(command, static_cast<int32_t>(offset), arg2);
                 }
-
                 break;
             }
 
         default:
             break;
         }
-
         break;
 
     case 0xb0:
@@ -474,7 +539,6 @@ SeqTrack::ParseResult SeqTrack::Parse(bool do_note_on)
         {
             CommandProc(command, arg1, arg2);
         }
-
         break;
 
     case 0xe0:
@@ -483,7 +547,6 @@ SeqTrack::ParseResult SeqTrack::Parse(bool do_note_on)
         {
             CommandProc(command, arg1, arg2);
         }
-
         break;
 
     case 0xf0:
@@ -509,7 +572,6 @@ SeqTrack::ParseResult SeqTrack::Parse(bool do_note_on)
                     {
                         CommandProc((command << 8) + ex, arg1, arg2);
                     }
-
                     break;
 
                 case kExArithmetic:
@@ -520,13 +582,11 @@ SeqTrack::ParseResult SeqTrack::Parse(bool do_note_on)
                     {
                         CommandProc((command << 8) + ex, arg1, arg2);
                     }
-
                     break;
 
                 default:
                     break;
                 }
-
                 break;
             }
 
@@ -535,10 +595,8 @@ SeqTrack::ParseResult SeqTrack::Parse(bool do_note_on)
             {
                 CommandProc(command, arg1, arg2);
             }
-
             break;
         }
-
         break;
 
     default:
@@ -546,6 +604,11 @@ SeqTrack::ParseResult SeqTrack::Parse(bool do_note_on)
     }
 
     return ParseResult::kContinue;
+}
+
+int32_t SeqTrack::PanArgument(int32_t value) const
+{
+    return player_->engine_->Build().October2006() && value <= 1 ? value + 1 : value;
 }
 
 void SeqTrack::CommandProc(uint32_t command, int32_t arg1, int32_t arg2)
@@ -562,9 +625,11 @@ void SeqTrack::CommandProc(uint32_t command, int32_t arg1, int32_t arg2)
             player.tempo_ =
                 static_cast<uint16_t>(player.GetEngine().Build().Since2008() ? std::clamp(arg1, 0, 1023) : arg1);
             break;
+
         case kSetTimebase:
             player.timebase_ = static_cast<uint8_t>(arg1);
             break;
+
         case kSetHold:
             // Only a 2008 build supports the hold and monophony (Mario Kart Wii, 0x80096b90 and 0x80096be8). An older
             // build ignores the commands.
@@ -572,8 +637,8 @@ void SeqTrack::CommandProc(uint32_t command, int32_t arg1, int32_t arg2)
             {
                 hold_ = static_cast<int16_t>(arg1 & 0xff);
             }
-
             break;
+
         case kSetMonophonic:
             if (player.GetEngine().Build().Since2008())
             {
@@ -584,138 +649,170 @@ void SeqTrack::CommandProc(uint32_t command, int32_t arg1, int32_t arg2)
                     FreeAllChannel();
                 }
             }
-
             break;
+
         case kSetVelocityRange:
             // From June 2008, the notes' velocities are scaled by this over 127 (Wii Music, 0x800b95c4).
             if (player.GetEngine().Build().SinceJune2008())
             {
                 velocity_range_ = static_cast<uint8_t>(arg1);
             }
-
             break;
+
         case kSetBiquadType:
             // From June 2008, the notes' biquad filter (Wii Music, 0x800b9870) and its value over 127 (0x800b9878).
             if (player.GetEngine().Build().SinceJune2008())
             {
                 biquad_type_ = static_cast<uint8_t>(arg1);
             }
-
             break;
+
         case kSetBiquadValue:
             if (player.GetEngine().Build().SinceJune2008())
             {
                 biquad_value_ = static_cast<float>(arg1) / 127.0f;
             }
-
             break;
+
         case kSetProgram:
             if (arg1 < 0x10000)
             {
                 program_ = arg1 & 0xffff;
             }
-
             break;
+
         case kSetMute:
             SetMute(arg1);
             break;
+
         case kSetTrackVolume:
             volume_.SetTarget(static_cast<uint8_t>(arg1), static_cast<int16_t>(arg2));
             break;
+
         case kSetTrackVolume2:
             volume2_ = static_cast<uint8_t>(arg1);
             break;
+
         case kSetPlayerVolume:
             player.volume_ = static_cast<uint8_t>(arg1);
             break;
+
         case kSetTranspose:
             transpose_ = static_cast<int8_t>(arg1);
             break;
+
         case kSetPitchBend:
             pitch_bend_ = static_cast<int8_t>(arg1);
             break;
+
         case kSetBendRange:
             bend_range_ = static_cast<uint8_t>(arg1);
             break;
+
         case kSetPan:
-            pan_.SetTarget(static_cast<int8_t>(arg1 - 64), static_cast<int16_t>(arg2));
+            pan_.SetTarget(static_cast<int8_t>(PanArgument(arg1) - 64), static_cast<int16_t>(arg2));
             break;
+
         case kSetInitPan:
-            init_pan_ = static_cast<int8_t>(arg1 - 64);
+            init_pan_ = static_cast<int8_t>(PanArgument(arg1) - 64);
             break;
+
         case kSetSurroundPan:
-            surround_pan_.SetTarget(static_cast<int8_t>(arg1), static_cast<int16_t>(arg2));
+            surround_pan_.SetTarget(static_cast<int8_t>(PanArgument(arg1)), static_cast<int16_t>(arg2));
             break;
+
         case kSetPriority:
             priority_ = static_cast<uint8_t>(arg1);
             break;
+
         case kSetNoteWait:
             note_wait_ = arg1 != 0;
             break;
+
         case kSetPortaTime:
             porta_time_ = static_cast<uint8_t>(arg1);
             break;
+
         case kSetLfoDepth:
             lfo_param_.depth = static_cast<float>(static_cast<uint8_t>(arg1)) / 128.0f;
             break;
+
         case kSetLfoSpeed:
             lfo_param_.speed = static_cast<float>(static_cast<uint8_t>(arg1)) * (100.0f / 256.0f);
             break;
+
         case kSetLfoTarget:
             lfo_target_ = static_cast<uint8_t>(arg1);
             break;
+
         case kSetLfoRange:
             lfo_param_.range = static_cast<uint8_t>(arg1);
             break;
+
         case kSetLfoDelay:
             lfo_param_.delay = static_cast<uint32_t>(arg1 * 5);
             break;
+
         case kSetSweepPitch:
             // In 32nds of a semitone, or 64ths in a 2008 build (Mario Kart Wii, 0x80096b58).
             sweep_pitch_ = static_cast<float>(arg1) / (player.GetEngine().Build().Since2008() ? 64.0f : 32.0f);
             break;
+
         case kSetAttack:
             attack_ = static_cast<uint8_t>(arg1);
             break;
+
         case kSetDecay:
             decay_ = static_cast<uint8_t>(arg1);
             break;
+
         case kSetSustain:
             sustain_ = static_cast<uint8_t>(arg1);
             break;
+
         case kSetRelease:
             release_ = static_cast<uint8_t>(arg1);
             break;
+
         case kSetDamper:
             damper_ = static_cast<uint8_t>(arg1) >= 64;
             break;
+
         case kSetTie:
             tie_ = arg1 != 0;
             ReleaseAllChannel(-1);
             FreeAllChannel();
             break;
+
         case kSetPortamento:
             porta_key_ = static_cast<uint8_t>(arg1 + transpose_);
             porta_ = true;
             break;
+
         case kSetPortaSpeed:
             porta_ = arg1 != 0;
             break;
+
         case kSetLpfFreq:
             lpf_freq_ = static_cast<uint8_t>(arg1);
             break;
+
         case kSetFxSendA:
             fx_send_[0] = static_cast<uint8_t>(arg1);
             break;
+
         case kSetFxSendB:
             fx_send_[1] = static_cast<uint8_t>(arg1);
             break;
+
         case kSetFxSendC:
             fx_send_[2] = static_cast<uint8_t>(arg1);
             break;
+
         case kSetMainSend:
             main_send_ = static_cast<uint8_t>(arg1);
             break;
+
         case kOpenTrack:
             {
                 // Another track starts at an offset in the same sequence.
@@ -725,27 +822,29 @@ void SeqTrack::CommandProc(uint32_t command, int32_t arg1, int32_t arg2)
                     track->Close();
                     track->SetSeqData(data_, static_cast<uint32_t>(arg2));
                     track->Open();
+                    MarkChange(); // the new track's sound is this pass's change
                 }
-
                 break;
             }
+
         case kJump:
             {
                 // A jump back inside a subroutine isn't a loop of the sequence. An example is a subroutine that draws a
                 // random value again until it differs from the last. The exception is a subroutine that can't be left
                 // while the track holds a note that sounds until the game stops it. Such a subroutine may bend a held
                 // note's pitch forever.
+                const auto target = static_cast<uint32_t>(arg1);
                 const bool in_call = std::any_of(called_.begin(), called_.begin() + call_depth_, std::identity());
                 const bool holding = !conditional_ && HoldsSustainedNote();
-                if (static_cast<uint32_t>(arg1) < current_ && static_cast<uint32_t>(arg1) < run_.size() && run_[arg1] &&
-                    (!in_call || holding))
+                if (target < current_ && target < run_.size() && run_[target] != 0 && (!in_call || holding))
                 {
-                    CountLoop();
+                    CountLoop(target);
                 }
 
-                current_ = static_cast<uint32_t>(arg1);
+                current_ = target;
                 break;
             }
+
         case kCall:
             if (call_depth_ < call_stack_.size())
             {
@@ -753,15 +852,15 @@ void SeqTrack::CommandProc(uint32_t command, int32_t arg1, int32_t arg2)
                 call_stack_[call_depth_++] = current_;
                 current_ = static_cast<uint32_t>(arg1);
             }
-
             break;
+
         case kReturn:
             if (call_depth_ > 0)
             {
                 current_ = call_stack_[--call_depth_];
             }
-
             break;
+
         case kEnvReset:
             // From June 2008: the notes take their envelopes from the bank again (Wii Music, 0x800b9788).
             if (player.GetEngine().Build().SinceJune2008())
@@ -772,8 +871,8 @@ void SeqTrack::CommandProc(uint32_t command, int32_t arg1, int32_t arg2)
                 release_ = 0xff;
                 hold_ = 0xff;
             }
-
             break;
+
         case kLoopStart:
             if (call_depth_ < call_stack_.size())
             {
@@ -782,8 +881,8 @@ void SeqTrack::CommandProc(uint32_t command, int32_t arg1, int32_t arg2)
                 loop_count_[call_depth_] = static_cast<uint8_t>(arg1);
                 call_depth_++;
             }
-
             break;
+
         case kLoopEnd:
             {
                 // A count of 0 loops forever. On the main track, that's a loop of the sequence.
@@ -801,15 +900,15 @@ void SeqTrack::CommandProc(uint32_t command, int32_t arg1, int32_t arg2)
                 {
                     if (count == 0)
                     {
-                        CountLoop();
+                        CountLoop(call_stack_[call_depth_ - 1]);
                     }
 
                     loop_count_[call_depth_ - 1] = count;
                     current_ = call_stack_[call_depth_ - 1];
                 }
-
                 break;
             }
+
         default:
             break;
         }
@@ -829,30 +928,40 @@ void SeqTrack::CommandProc(uint32_t command, int32_t arg1, int32_t arg2)
         }
     }
 
+    if ((ex & 0xf0) == kExLogic)
+    {
+        MarkRead(arg1);
+    }
+
     switch (ex)
     {
     case kExSet:
         *variable = static_cast<int16_t>(arg2);
         break;
+
     case kExAdd:
         *variable = static_cast<int16_t>(*variable + arg2);
         break;
+
     case kExSubtract:
         *variable = static_cast<int16_t>(*variable - arg2);
         break;
+
     case kExMultiply:
         *variable = static_cast<int16_t>(WrapMultiply(*variable, arg2));
         break;
+
     case kExDivide:
         if (arg2 != 0)
         {
             *variable = static_cast<int16_t>(*variable / arg2);
         }
-
         break;
+
     case kExShift:
         *variable = static_cast<int16_t>(arg2 >= 0 ? ShiftLeft(*variable, arg2) : ShiftRight(*variable, -arg2));
         break;
+
     case kExRandom:
         {
             // A random number from 0 to the argument, or from its negative to 0.
@@ -863,47 +972,59 @@ void SeqTrack::CommandProc(uint32_t command, int32_t arg1, int32_t arg2)
             }
 
             int32_t random = player.GetEngine().Rng().Next();
+            drew_at_ = player.commands_run_;
             random = WrapMultiply(random, arg2 + 1) >> 16;
             *variable = static_cast<int16_t>(minus ? -random : random);
             break;
         }
+
     case kExAnd:
         *variable = static_cast<int16_t>(*variable & arg2);
         break;
+
     case kExOr:
         *variable = static_cast<int16_t>(*variable | arg2);
         break;
+
     case kExXor:
         *variable = static_cast<int16_t>(*variable ^ arg2);
         break;
+
     case kExNot:
         *variable = static_cast<int16_t>(~static_cast<uint16_t>(arg2));
         break;
+
     case kExModulo:
         if (arg2 != 0)
         {
             *variable = static_cast<int16_t>(*variable % arg2);
         }
-
         break;
+
     case kExEqual:
         cmp_flag_ = *variable == arg2;
         break;
+
     case kExGreaterEqual:
         cmp_flag_ = *variable >= arg2;
         break;
+
     case kExGreater:
         cmp_flag_ = *variable > arg2;
         break;
+
     case kExLessEqual:
         cmp_flag_ = *variable <= arg2;
         break;
+
     case kExLess:
         cmp_flag_ = *variable < arg2;
         break;
+
     case kExNotEqual:
         cmp_flag_ = *variable != arg2;
         break;
+
     default:
         break;
     }
@@ -916,22 +1037,29 @@ int32_t SeqTrack::ReadArg(ArgType type)
     {
     case ArgType::kU8:
         return ReadByte();
+
     case ArgType::kS16:
         return Read16();
+
     case ArgType::kVmidi:
         return ReadVar();
+
     case ArgType::kVariable:
         {
             // The game leaves the argument unset for an index past the track's variables. The model gives 0.
-            const int16_t* variable = Variable(ReadByte());
+            const int index = ReadByte();
+            MarkRead(index);
+            const int16_t* variable = Variable(index);
 
             return variable != nullptr ? *variable : 0;
         }
+
     case ArgType::kRandom:
         {
             const auto min = static_cast<int16_t>(Read16());
             const auto max = static_cast<int16_t>(Read16());
             int32_t random = player_->GetEngine().Rng().Next();
+            drew_at_ = player_->commands_run_;
             random = WrapMultiply(random, max - min + 1) >> 16;
 
             return random + min;
@@ -997,7 +1125,7 @@ int16_t* SeqTrack::Variable(int index)
     return nullptr;
 }
 
-Channel* SeqTrack::NoteOn(int key, int velocity, int32_t length, bool tie)
+bool SeqTrack::NoteOn(int key, int velocity, int32_t length, bool tie)
 {
     // NoteOn (0x80040bc0). In a tie, the last note takes the new key and velocity. Otherwise the bank starts a note. On
     // a monophonic track, the last note also takes the new length (Mario Kart Wii, 0x8009be98). If that note is being
@@ -1006,6 +1134,10 @@ Channel* SeqTrack::NoteOn(int key, int velocity, int32_t length, bool tie)
     SeqPlayer& player = *player_;
     Channel* channel = nullptr;
     velocity = velocity * velocity_range_ / 127;
+    const float velocity_volume = static_cast<float>(velocity) / 127.0f;
+    const Channel* newest = channels_;
+    const bool same =
+        newest != nullptr && newest->Key() == key && newest->InitVolume() == velocity_volume * velocity_volume;
     if (tie)
     {
         channel = channels_;
@@ -1051,7 +1183,7 @@ Channel* SeqTrack::NoteOn(int key, int velocity, int32_t length, bool tie)
         channel = player.NoteOn(info);
         if (channel == nullptr)
         {
-            return nullptr;
+            return false;
         }
 
         // A 2008 build's note releases the track's notes of its key group (Mario Kart Wii, 0x8009bfcc).
@@ -1073,18 +1205,22 @@ Channel* SeqTrack::NoteOn(int key, int velocity, int32_t length, bool tie)
     {
         channel->SetAttack(attack_);
     }
+
     if (decay_ != 0xff)
     {
         channel->SetDecay(decay_);
     }
+
     if (sustain_ != 0xff)
     {
         channel->SetSustain(sustain_);
     }
+
     if (release_ != 0xff)
     {
         channel->SetRelease(release_);
     }
+
     if (hold_ <= 127)
     {
         channel->SetHold(hold_);
@@ -1116,7 +1252,7 @@ Channel* SeqTrack::NoteOn(int key, int velocity, int32_t length, bool tie)
     channel->SetPanMode(player.pan_mode_);
     channel->SetPanCurve(player.pan_curve_);
 
-    return channel;
+    return channel != newest || !same || sweep_pitch != 0.0f;
 }
 
 void SeqTrack::SetMute(int mute)
@@ -1128,18 +1264,22 @@ void SeqTrack::SetMute(int mute)
     case 0:
         mute_ = false;
         break;
+
     case 1:
         mute_ = true;
         break;
+
     case 2:
         ReleaseAllChannel(-1);
         FreeAllChannel();
         mute_ = true;
         break;
+
     case 3:
         StopAllChannel();
         mute_ = true;
         break;
+
     default:
         break;
     }
@@ -1174,26 +1314,113 @@ void SeqTrack::UpdateChannelRelease(Channel* channel)
     }
 }
 
-void SeqTrack::CountLoop()
+void SeqTrack::CountLoop(uint32_t target)
 {
-    if (player_->on_loop && (index_ == 0 || (noted_ && player_->IsMainTrack(index_))))
+    if (!player_->on_loop)
     {
-        player_->on_loop();
+        return;
     }
 
-    noted_ = false;
+    // The pass began when the track last ran `target`. A pass of an outer loop includes the passes of the inner loops
+    // in it. A still pass also left the variables that tracks read with the values that the pass before left. The first
+    // pass compares them with 0. A variable that no track reads doesn't count. The game may read it. The beats that a
+    // timing track marks are an example.
+    const uint64_t begun = target < run_.size() ? run_[target] : 0;
+    std::array<int16_t, 48> variables{};
+    for (int i = 0; i < static_cast<int>(variables.size()); i++)
+    {
+        const int16_t* variable = IsRead(i) ? Variable(i) : nullptr;
+        variables[static_cast<std::size_t>(i)] = variable != nullptr ? *variable : 0;
+    }
+
+    idle_ = changed_at_ < begun;
+    quiet_ = noted_at_ < begun;
+    still_ = idle_ && drew_at_ < begun && variables == loop_variables_;
+    loop_variables_ = variables;
+    looped_at_ = player_->commands_run_;
+    const bool alone = HoldsSustainedNote() && player_->OthersRest(index_);
+    if (!idle_ && (index_ == 0 || (!quiet_ && player_->IsMainTrack(index_)) || alone))
+    {
+        player_->on_loop(index_, target);
+    }
 }
 
-bool SeqTrack::HoldsSustainedNote() const
+bool SeqTrack::WaitsOnEndlessNote() const
 {
-    if (!holds_)
+    if (!note_finish_wait_)
+    {
+        return false;
+    }
+
+    // A note of length 0 has a length of -1 and is never released. While the track waits, nothing else releases it.
+    for (const Channel* channel = channels_; channel != nullptr; channel = channel->NextTrackChannel())
+    {
+        if (channel->Length() < 0 && channel->WaveLoops())
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool SeqTrack::HasEndingNote() const
+{
+    if (holds_)
     {
         return false;
     }
 
     for (const Channel* channel = channels_; channel != nullptr; channel = channel->NextTrackChannel())
     {
-        if (channel->IsSustain() && channel->WaveLoops())
+        if (channel->Length() > 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void SeqTrack::MarkChange()
+{
+    changed_at_ = player_->commands_run_;
+    player_->changed_at_ = changed_at_;
+}
+
+void SeqTrack::MarkRead(int index)
+{
+    if (index >= 0 && index < 32)
+    {
+        player_->variables_read_ |= 1u << index;
+    }
+    else if (index >= 32 && index < 48)
+    {
+        variables_read_ = static_cast<uint16_t>(variables_read_ | 1u << (index - 32));
+    }
+}
+
+bool SeqTrack::IsRead(int index) const
+{
+    if (index >= 0 && index < 32)
+    {
+        return (player_->variables_read_ >> index & 1) != 0;
+    }
+    if (index >= 32 && index < 48)
+    {
+        return (variables_read_ >> (index - 32) & 1) != 0;
+    }
+
+    return false;
+}
+
+bool SeqTrack::HoldsSustainedNote() const
+{
+    // A note of length 0 has a length of -1.
+    for (const Channel* channel = channels_; channel != nullptr; channel = channel->NextTrackChannel())
+    {
+        const bool endless = holds_ || channel->Length() < 0;
+        if (endless && channel->IsSustain() && channel->WaveLoops())
         {
             return true;
         }
@@ -1284,7 +1511,15 @@ void SeqPlayer::Update()
         return;
     }
 
-    UpdateTick(3);
+    if (engine_->Build().October2006())
+    {
+        UpdateTickOctober2006();
+    }
+    else
+    {
+        UpdateTick(3);
+    }
+
     for (std::optional<SeqTrack>& track : tracks_)
     {
         if (track)
@@ -1292,11 +1527,6 @@ void SeqPlayer::Update()
             track->UpdateChannelParam();
         }
     }
-}
-
-bool SeqPlayer::HasChannels() const
-{
-    return engine_->Channels().ActiveCount() > 0;
 }
 
 float SeqPlayer::BaseTempo() const
@@ -1320,21 +1550,25 @@ int16_t* SeqPlayer::Variable(int index)
     return nullptr;
 }
 
-bool SeqPlayer::WaitsForNotes() const
+bool SeqPlayer::IsSettled() const
 {
-    const auto waits = [](const SeqTrack& track)
+    const auto settled = [](const SeqTrack& track)
     {
-        return track.WaitsForNotes();
+        return track.WaitsForNotes() || (track.IsStill() && !track.HasEndingNote());
     };
 
-    return tempo_ == 0 || EveryOpenTrack(waits);
+    return tempo_ == 0 || EveryOpenTrack(settled);
 }
 
 bool SeqPlayer::IsMainTrack(int index) const
 {
+    // A track before it keeps it from being the main track when that track's loops would count. Track 0's loops count
+    // unless its passes are idle. A later track's loops count only when its passes play notes. A track that waits for
+    // ever makes no more passes.
     for (int i = 0; i < index; i++)
     {
-        if (tracks_[i] && tracks_[i]->IsOpen())
+        const std::optional<SeqTrack>& track = tracks_[i];
+        if (track && track->IsOpen() && !track->IsIdle() && !track->WaitsForEver() && (i == 0 || !track->IsQuiet()))
         {
             return false;
         }
@@ -1343,14 +1577,28 @@ bool SeqPlayer::IsMainTrack(int index) const
     return true;
 }
 
-bool SeqPlayer::WaitsForEver() const
+bool SeqPlayer::OthersRest(int index) const
 {
-    const auto waits = [](const SeqTrack& track)
+    for (int i = 0; i < static_cast<int>(tracks_.size()); i++)
     {
-        return track.WaitsForEver();
+        const std::optional<SeqTrack>& track = tracks_[static_cast<std::size_t>(i)];
+        if (i != index && track && track->IsOpen() && !track->IsIdle() && !track->WaitsForEver())
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool SeqPlayer::IsStuck() const
+{
+    const auto stuck = [](const SeqTrack& track)
+    {
+        return track.WaitsForEver() || (track.IsStill() && track.IsQuiet());
     };
 
-    return tempo_ == 0 || EveryOpenTrack(waits);
+    return tempo_ == 0 || EveryOpenTrack(stuck);
 }
 
 bool SeqPlayer::IsMoving() const
@@ -1411,7 +1659,6 @@ void SeqPlayer::UpdateTick(int msec)
             return;
         }
 
-        tick_counter_++;
         tick_per_msec = BaseTempo();
         if (tick_per_msec == 0.0f)
         {
@@ -1423,6 +1670,31 @@ void SeqPlayer::UpdateTick(int msec)
 
     next_msec -= rest_msec;
     tick_fraction_ = next_msec * tick_per_msec;
+}
+
+void SeqPlayer::UpdateTickOctober2006()
+{
+    // The build of October 2006 (0x800e6588 in Smooth Moves' main.dol) counts time in 416ths of a tick, from 416 at the
+    // start. Each frame, the player takes out the whole ticks first. It adds the tempo times the tempo ratio next. WSF
+    // leaves that ratio at 1. The player then runs the ticks that it took out. The timebase plays no part: a tick lasts
+    // 416 / tempo frames, 0.16% shorter than 48 ticks a beat would make it.
+    int ticks = 0;
+    while (tick_units_ >= 416)
+    {
+        ticks++;
+        tick_units_ -= 416;
+    }
+
+    tick_units_ = static_cast<uint16_t>(tick_units_ + tempo_);
+    for (; ticks > 0; ticks--)
+    {
+        if (ParseNextTick(true) != 0)
+        {
+            FinishPlayer();
+
+            return;
+        }
+    }
 }
 
 void SeqPlayer::CloseTrack(int index)

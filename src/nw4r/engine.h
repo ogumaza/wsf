@@ -46,7 +46,7 @@ class Engine
 {
 public:
     // The engine's state between sound frames, for a snapshot of the model: its pools, its players' state and the
-    // random numbers. It points at this engine's objects. It can only be restored to this engine.
+    // random numbers. The snapshot points at this engine's objects and can only be restored to this engine.
     struct Snapshot
     {
         AxVoiceManager::Snapshot ax_voices;
@@ -125,9 +125,9 @@ public:
         return global_variables_;
     }
 
-    // Starts the sequence sound at `index` in the archive's sound table, from the next sound frame. Returns its
-    // player, or nullptr if the sound isn't a sequence or its sequence or bank isn't in the archive. Throws
-    // rsar::FormatError for a sequence or bank that can't be read.
+    // Starts the sequence sound at `index` in the archive's sound table, from the next sound frame. Returns its player,
+    // or nullptr if the sound isn't a sequence or its sequence or bank isn't in the archive. Throws rsar::FormatError
+    // for a sequence or bank that can't be read.
     SeqPlayer* StartSequence(uint32_t index);
 
     // Bank::NoteOn (0x80035b68): finds the region for the note and starts a channel on its wave.
@@ -149,10 +149,10 @@ public:
     void Restore(const Snapshot& snapshot);
 
 private:
-    // Returns the bank with `bank_id`, loading it the first time. Returns nullptr if the archive doesn't hold it.
+    // Returns the bank with `bank_id`. The first call loads the bank. Returns nullptr if the archive doesn't hold it.
     const LoadedBank* GetBank(uint32_t bank_id);
 
-    // A wave of a bank, as WaveFileReader::ReadWaveParam (0x8004eca8) reads it.
+    // The wave parameters that WaveFileReader::ReadWaveParam (0x8004eca8) reads for a wave of a bank.
     WaveData ReadWaveParam(const LoadedBank& bank, const rsar::Wave& wave) const;
 
     MainMemory& memory_;
@@ -172,12 +172,12 @@ private:
     std::vector<std::unique_ptr<SeqPlayer>> players_;
 };
 
-// Archive mode's whole stack for one sound archive: main memory, the DSP running the game's AX microcode, AX's CPU
-// side and the engine. The player and the ripper's length analysis both build it this way.
+// Archive mode's whole stack for one sound archive: main memory, the DSP running the game's AX microcode, AX's CPU side
+// and the engine. The player and the ripper's length analysis both build it this way.
 struct ArchiveModel
 {
-    // A snapshot of the model between frames: its memory, the DSP, AX and the engine. It points at this model's
-    // objects. It can only be restored to this model.
+    // A snapshot of the model between frames: its memory, the DSP, AX and the engine. The snapshot points at this
+    // model's objects and can only be restored to this model.
     struct Snapshot
     {
         MainMemory::Snapshot memory;

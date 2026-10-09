@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-// NW4R SND's envelope (EnvGenerator) and LFO (Lfo), as linked into Wii Sports' main.dol (see util.h).
+// NW4R SND's envelope (EnvGenerator) and LFO (Lfo) in Wii Sports' main.dol (see util.h).
 
 #pragma once
 
@@ -79,6 +79,8 @@ struct LfoParam
     float speed = 6.25f; // + 0x4
     uint32_t delay = 0;  // + 0x8
     uint8_t range = 1;   // + 0xc
+
+    bool operator==(const LfoParam&) const = default;
 };
 
 // A sine LFO (Lfo).
@@ -97,11 +99,6 @@ public:
     void SetParam(const LfoParam& param)
     {
         param_ = param;
-    }
-
-    const LfoParam& Param() const
-    {
-        return param_;
     }
 
 private:

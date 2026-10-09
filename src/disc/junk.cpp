@@ -17,6 +17,7 @@ JunkGenerator::JunkGenerator(const uint8_t* seed)
     {
         buffer_[i] = LoadBe32(seed + i * 4);
     }
+
     for (size_t i = 17; i < kWords; ++i)
     {
         buffer_[i] = (buffer_[i - 17] << 23) ^ (buffer_[i - 16] >> 9) ^ buffer_[i - 1];
@@ -69,6 +70,7 @@ void JunkGenerator::Advance()
     {
         buffer_[i] ^= buffer_[i + kWords - 32];
     }
+
     for (size_t i = 32; i < kWords; ++i)
     {
         buffer_[i] ^= buffer_[i - 32];

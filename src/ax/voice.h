@@ -24,8 +24,8 @@ struct Voice
     // AXSetVoiceState (main.dol 0x80107374). Stopping a running voice fades out the last samples it added to the mix.
     void SetState(VoiceState state);
 
-    // AXSetVoiceAddr (0x801073e4). For PCM it also sets the ADPCM block to the identity: no coefficients and a gain
-    // of 0x800 (PCM16) or 0x100 (PCM8).
+    // AXSetVoiceAddr (0x801073e4). For PCM it also sets the ADPCM block to the identity: no coefficients and a gain of
+    // 0x800 (PCM16) or 0x100 (PCM8).
     void SetAddr(const PbAddr& address);
 
     bool IsRunning() const

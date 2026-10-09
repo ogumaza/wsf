@@ -6,11 +6,13 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -23,12 +25,25 @@
 namespace wsf::rip
 {
 
+// A function's code, to find the function in another main.dol: its length up to its first blr, its first word and an
+// FNV-1a hash of its words, each with the fields that the linker fills in cleared (branch targets, and the immediates
+// of addis and of the loads, stores and adds that don't address the stack).
+struct FunctionSignature
+{
+    uint32_t size = 0;
+    uint32_t first = 0;
+    uint64_t hash = 0;
+};
+
+// The functions of a profile: main, then those from ai_init to update.
+constexpr std::size_t kProfileFunctions = 18;
+
 // Game-specific addresses for the driver (see driver/driver.c): the game's functions in its main.dol.
 struct GameProfile
 {
-    const char* name;
-    const char* game_id;  // "RSPE01"
-    const char* dol_sha1; // the main.dol that the addresses belong to
+    std::string name;
+    std::string game_id;  // "RSPE01"
+    std::string dol_sha1; // the main.dol that the addresses belong to
     uint32_t main;        // patched to branch to the driver
     uint32_t ai_init, ax_init, alloc, sleep_ticks, init_sound_system;
     uint32_t archive_ctor, archive_open, archive_load_info;
@@ -37,12 +52,22 @@ struct GameProfile
     uint32_t startable_offset; // SoundArchivePlayer's SoundStartable base
     uint32_t ios_version;      // the IOS that the game's TMD requests
     uint32_t init_flag;        // the sound system's flag byte, checked by Setup in 2008 builds, or 0
+    std::array<FunctionSignature, kProfileFunctions> signatures;
+    std::string derived_from = {}; // the profile that a derived profile comes from (see FindProfile), or nothing
 };
 
 const std::vector<GameProfile>& KnownProfiles();
 
-// The profile for a game's main.dol, or nullptr if it isn't supported.
-const GameProfile* FindProfile(const disc::GameFiles& game);
+// The profile for a game: the one for its main.dol, or else one derived from the profile of another release or revision
+// of the game. A game's releases share the first three characters of their game IDs. Their main.dols link the same
+// functions at other addresses (see DeriveProfile). Returns nothing if neither exists.
+std::optional<GameProfile> FindProfile(const disc::GameFiles& game);
+
+// Finds `source`'s functions in `dol` by their signatures. A small function can match in several places. The functions
+// of a library move together. The offset of the nearest function that matched once therefore picks the place. Returns
+// the profile with the addresses found, or nothing if a function isn't there. `source` must have no init flag. The
+// flag's address can't be found this way.
+std::optional<GameProfile> DeriveProfile(const GameProfile& source, std::span<const uint8_t> dol);
 
 // What game mode loads to play a sequence: the groups that hold its sequence and its bank (with the bank's waves), and
 // the size of the sound heap they require.
@@ -86,7 +111,8 @@ std::vector<std::string> MissingData(const rsar::SoundArchive& archive, uint32_t
 // BGM. A player whose name also contains the word SE plays sound effects.
 bool IsMusic(const rsar::SoundArchive& archive, uint32_t index);
 
-// Filenames for one rip, valid on Windows, macOS and Linux and unique even on case-insensitive filesystems.
+// Filenames for the rips in one folder, valid on Windows, macOS and Linux and unique even on case-insensitive
+// filesystems.
 class FileNames
 {
 public:
@@ -102,11 +128,12 @@ private:
     std::set<std::string> taken_; // the names used so far, in lowercase
 };
 
-// A sequence's length and fade in milliseconds.
+// A sequence's length and fade in milliseconds, and whether it never makes a sound.
 struct Timing
 {
     long long length_ms;
     long long fade_ms;
+    bool silent = false;
 };
 
 // Whether archive mode's model can drive `microcode`. The microcode must start and mix the model's first frame. Some
@@ -124,7 +151,8 @@ public:
     ~LengthAnalyzer();
 
     // A looping sequence gets two loops and a 10 s fade. Any other sequence runs to its end or to where it falls silent
-    // for good, for at most 600 s. Returns nullopt when the length can't be worked out. No length tag is written then.
+    // for good, for at most 600 s. A sequence that never makes a sound is marked silent and gets the 0.5 s that follows
+    // a sequence's last sound. Returns nullopt when the length can't be worked out. No length tag is written then.
     // Throws std::bad_alloc when memory runs out.
     std::optional<Timing> Analyze(uint32_t sound_index) const;
 

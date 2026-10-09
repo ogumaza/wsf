@@ -14,6 +14,7 @@
 #include "ax/voice.h"
 #include "check.h"
 #include "common/bytes.h"
+#include "common/common_types.h"
 #include "dsp/main_memory.h"
 
 namespace
@@ -197,6 +198,102 @@ void TestCycleBudget()
     Check(ax.DspCycles() > 364317, "the frame's cycles counted past the limit");
 }
 
+void TestOctober2006()
+{
+    MainMemory memory;
+    ax::System ax(memory);
+    ax.Init(ax::Build::kOctober2006);
+    Check(ax.VoiceCount() == 64, "64 voices in the build of October 2006");
+
+    // Command 5 follows PROCESS. The commands after it are numbered one higher, and OUTPUT takes no master volume.
+    std::vector<uint16_t> words;
+    for (PAddr at = ax::layout::kCommandLists; words.size() < 30; at += 2)
+    {
+        words.push_back(LoadBe16(memory.At(at, 2)));
+    }
+
+    const auto word32 = [&words](std::size_t i)
+    {
+        return uint32_t{words[i]} << 16 | words[i + 1];
+    };
+
+    Check(words[0] == 0 && words[3] == 1 && words[6] == 4 && word32(7) == Cached(ax::layout::kPbs) && words[9] == 5,
+          "SETUP, ADD_TO_LR, PROCESS and command 5");
+    Check(
+        words[10] == 11 && words[11] == 32768 && words[12] == 10 && word32(13) == Cached(ax::layout::kCompressorTable),
+        "the October 2006 COMPRESSOR");
+    Check(words[15] == 14 && word32(16) == Cached(ax::layout::kRemoteBuffers), "the October 2006 WM_OUTPUT");
+    Check(words[24] == 12 && word32(25) == Cached(ax::layout::kSurroundBuffer) &&
+              word32(27) == Cached(ax::layout::kOutputBuffers + 384) && words[29] == 15,
+          "the October 2006 OUTPUT, without a volume, and END");
+
+    // 0x120-byte PBs, each with the address of its update buffer.
+    for (uint32_t i = 0; i < 64; i++)
+    {
+        const uint8_t* bytes = memory.At(ax::layout::kPbs + i * 0x120, ax::kPbSizeOctober2006);
+        const ax::Pb pb = ax::LoadPbOctober2006(bytes);
+        const uint32_t next = i == 63 ? 0 : Cached(ax::layout::kPbs + (i + 1) * 0x120);
+        Check(ax::Join(pb.next_hi, pb.next_lo) == next &&
+                  ax::Join(pb.curr_hi, pb.curr_lo) == Cached(ax::layout::kPbs + i * 0x120),
+              "an October 2006 PB's links");
+        Check(LoadBe32(bytes + 0x58) == Cached(ax::layout::kUpdateBuffers + i * 0x100) && LoadBe16(bytes + 0x52) == 0,
+              "an October 2006 PB's update block");
+    }
+
+    // A voice's changes land at that layout's offsets. The update block stays.
+    std::vector<ax::Voice*> voices;
+    for (int i = 0; i < 64; i++)
+    {
+        voices.push_back(ax.AcquireVoice(16, nullptr));
+    }
+
+    Check(ax.AcquireVoice(16, nullptr) == nullptr, "no 65th voice");
+    ax::Voice* voice = voices[0];
+    ax::PbAddr address;
+    address.format = static_cast<uint16_t>(ax::SampleFormat::kPcm16);
+    address.current_address_hi = 0x0800;
+    voice->SetAddr(address);
+    voice->pb.mix.l = 0x4000;
+    voice->pb.remote = 1;
+    voice->sync |= ax::sync::kMix | ax::sync::kRemote;
+    voice->SetState(ax::VoiceState::kRun);
+    ax.StartFrame();
+    const uint8_t* bytes = memory.At(ax::layout::kPbs + voice->index * 0x120, ax::kPbSizeOctober2006);
+    Check(LoadBe16(bytes + 0x10) == 1 && LoadBe16(bytes + 0x14) == 0x4000 && LoadBe16(bytes + 0x84) == 0x0800 &&
+              LoadBe16(bytes + 0xa8) == 0x800 && LoadBe16(bytes + 0xd4) == 1,
+          "a voice's changes in its October 2006 PB");
+    Check(LoadBe32(bytes + 0x58) == Cached(ax::layout::kUpdateBuffers + voice->index * 0x100),
+          "the update block left as it was");
+}
+
+void TestOctober2006Cycles()
+{
+    MainMemory memory;
+    ax::System ax(memory);
+    ax.Init(ax::Build::kOctober2006);
+
+    // The build of October 2006 counts more cycles for a voice. Fewer voices fit in a frame.
+    std::vector<uint32_t> dropped;
+    const auto on_drop = [&dropped](ax::Voice* voice)
+    {
+        dropped.push_back(voice->index);
+    };
+
+    for (int i = 0; i < 64; i++)
+    {
+        ax::Voice* voice = ax.AcquireVoice(16, on_drop);
+        voice->pb.src.ratio_hi = 2;
+        voice->pb.SetMixerCtrl(0xffffffff);
+        voice->SetState(ax::VoiceState::kRun);
+    }
+
+    ax.StartFrame();
+    ax.FinishFrame();
+
+    // Each voice takes (264 + 728) * 6 cycles to convert and 4 * 3735 + 140 to mix. 14 of them fit.
+    Check(dropped.size() == 50, "the voices that the build of October 2006 drops");
+}
+
 } // namespace
 
 int main()
@@ -207,6 +304,8 @@ int main()
         TestAllocation();
         TestSync();
         TestCycleBudget();
+        TestOctober2006();
+        TestOctober2006Cycles();
     }
     catch (const std::exception& e)
     {

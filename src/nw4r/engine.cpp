@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "ax/microcode.h"
@@ -37,8 +38,8 @@ ax::SampleFormat ToAxFormat(rsar::WaveFormat format)
     }
 }
 
-// A sample's index from a PB address, counting from address 0 in the format's units. ADPCM indices skip the two header
-// nibbles of each 16-nibble frame.
+// A sample's index from a PB address. The index counts from address 0 in the format's units. ADPCM indices skip the two
+// header nibbles of each 16-nibble frame.
 uint64_t SampleAt(uint32_t address, ax::SampleFormat format)
 {
     if (format == ax::SampleFormat::kAdpcm)
@@ -95,7 +96,13 @@ Engine::Engine(MainMemory& memory, ax::System& ax, const rsar::SoundArchive& arc
     : memory_(memory), ax_(ax), archive_(archive), ax_voices_(*this), voices_(*this), channels_(*this), build_(build)
 {
     std::memset(memory_.At(kZeroBuffer, kZeroBufferSize), 0, kZeroBufferSize);
-    ax_.RegisterCallback([this] { voices_.NotifyVoiceUpdate(); });
+
+    // The build of October 2006 ends no ramps after AX's frame. Its envelope ramps land on their targets in the next
+    // frame (Voice::CalcAxVe), and its mix doesn't ramp.
+    if (!build_.October2006())
+    {
+        ax_.RegisterCallback([this] { voices_.NotifyVoiceUpdate(); });
+    }
 }
 
 Engine::~Engine()
@@ -287,14 +294,18 @@ WaveData Engine::ReadWaveParam(const LoadedBank& bank, const rsar::Wave& wave) c
 
 bool ArchiveModel::Start(const ax::Microcode& microcode, const rsar::SoundArchive& archive)
 {
-    // AXInit boots the DSP with AX's microcode. Then NW4R SND's AxManager sets up its side.
-    ax.Init();
+    // AXInit boots the DSP with AX's microcode. Then NW4R SND's AxManager sets up its side. The microcode identifies
+    // the build of AX that it comes with. AX of October 2006 comes with a build of NW4R SND that has no banner.
+    const ax::Build ax_build = ax::IdentifyBuild(microcode);
+    ax.Init(ax_build);
     if (!link.Start(microcode.words, microcode.address))
     {
         return false;
     }
 
-    engine.emplace(memory, ax, archive, build);
+    SndBuild snd_build = build;
+    snd_build.october_2006 = ax_build == ax::Build::kOctober2006;
+    engine.emplace(memory, ax, archive, snd_build);
 
     return true;
 }
@@ -335,14 +346,13 @@ void ArchiveModel::RunFrameWithoutDsp()
 {
     // AX's frame. In place of the microcode, only its work on the voices' positions is done.
     ax.StartFrame();
-    for (uint32_t i = 0; i < ax::kVoiceCount; i++)
+    for (uint32_t i = 0; i < ax.VoiceCount(); i++)
     {
-        uint8_t* bytes = memory.At(ax::layout::kPbs + i * static_cast<PAddr>(ax::kPbSize), ax::kPbSize);
-        ax::Pb pb = ax::LoadPb(bytes);
+        ax::Pb pb = ax.ReadPb(i);
         if (pb.state == static_cast<uint16_t>(ax::VoiceState::kRun))
         {
             AdvanceWithoutDsp(pb);
-            ax::StorePb(pb, bytes);
+            ax.WritePb(i, pb);
         }
     }
 

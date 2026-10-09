@@ -20,14 +20,16 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "check.h"
-#include "common/bytes.h"
+#include "common/common_types.h"
 #include "dsp/main_memory.h"
 #include "dsp_test_hashes.h"
 
@@ -69,9 +71,9 @@ iramw 0x0010 0x0092 0x00ff 0x16d1 0x0000 0x16d4 0x0000 0x16d5 0x2002 0x16d6 0x00
 until halt 2000
 )";
 
-// Whether the report gives a hardware register's stored value. It leaves out the accelerator's registers
-// (0xFFD1-0xFFDF) because the accelerator state has a separate line. It also leaves out the interrupt and mailbox
-// registers (0xFFFB-0xFFFF) because the mailbox lines give them.
+// Whether the report gives a hardware register's stored value. The report leaves out the accelerator's registers
+// (0xFFD1-0xFFDF) because the accelerator state has a separate line. The interrupt and mailbox registers
+// (0xFFFB-0xFFFF) are left out too because the mailbox lines give them.
 bool Reported(int reg)
 {
     return !(reg >= 0xd1 && reg <= 0xdf) && reg < 0xfb;
@@ -195,9 +197,9 @@ std::string WordProgram(uint16_t word)
 class Scenario
 {
 public:
-    // With `replay_every` above 0, every step whose number is a multiple of it runs twice. It runs first from a copy of
-    // the DSP, which is then put back, and then for real. The report must come out the same. With `generic`, every
-    // instruction goes through the generic decoder.
+    // With `replay_every` above 0, every step whose number is a multiple of `replay_every` runs twice. The test copies
+    // the DSP, runs the step and puts the copy back. Then the step runs for real. The report must come out the same.
+    // With `generic`, every instruction goes through the generic decoder.
     explicit Scenario(int replay_every = 0, bool generic = false)
         : dsp_(std::make_unique<dsp::Dsp>(memory_)), replay_every_(replay_every)
     {
@@ -265,6 +267,7 @@ bool Scenario::Run(std::string_view text, std::string& error)
 bool Scenario::Directive(const std::vector<std::string>& words, std::string& error)
 {
     const std::string& kind = words[0];
+
     const auto number = [&words](std::size_t i)
     {
         return std::stoull(words.at(i), nullptr, 0);
@@ -413,6 +416,7 @@ bool Scenario::Step()
     {
         Line("event " + step + " exception " + std::to_string(exception) + " from " + Hex(pc_before, 4));
     }
+
     if (dsp_->Halted())
     {
         Line("event " + step + " halt at " + Hex(dsp_->regs_.pc, 4));
@@ -492,6 +496,7 @@ uint64_t Scenario::Finish()
     Line("final steps " + std::to_string(dsp_->Steps()));
     Line("final pc " + Hex(r.pc, 4));
     Line(std::string("final halted ") + (dsp_->Halted() ? "1" : "0"));
+
     const auto part = [&r](int ac, int shift)
     {
         const auto bits = static_cast<uint64_t>(r.ac[ac]);

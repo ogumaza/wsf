@@ -18,7 +18,6 @@
 #include <span>
 #include <vector>
 
-#include "common/common_types.h"
 #include "dsp/main_memory.h"
 
 namespace wsf::dsp
@@ -92,21 +91,16 @@ public:
     // check.
     void Step();
 
-    // Runs up to `steps` steps. Stops early if the DSP halts. With `stop_when_idle`, also stops at a polling loop that
-    // waits for mail. Returns the number of steps run.
-    uint64_t Run(uint64_t steps, bool stop_when_idle = false);
+    // Runs up to `steps` steps. Stops early if the DSP halts. Returns the number of steps run.
+    uint64_t Run(uint64_t steps);
 
     bool Halted() const
     {
         return (control_ & control::kHalt) != 0;
     }
 
-    // Whether the next step starts a polling loop that waits for a mailbox (as Dolphin's analysis finds them) and
-    // running on would only spin.
-    bool Idle() const;
-
-    // Whether the next step starts one of those polling loops, whatever the mailbox holds, or one of the boot ROM's
-    // waits for mail. A batch of DSP cycles ends early at these points.
+    // Whether the next step starts a polling loop that waits for a mailbox (as Dolphin's analysis finds them), whatever
+    // the mailbox holds, or one of the boot ROM's waits for mail. A batch of DSP cycles ends early at these points.
     bool AtIdleLoop() const;
 
     // Starts `microcode` at `entry` without running the boot code. The DSP is left in the state that the boot ROM
@@ -118,17 +112,6 @@ public:
     {
         regs_.pc = pc;
         control_ &= ~(control::kHalt | control::kInit);
-    }
-
-    // DMEM as the DSP's instructions access it, including the side effects of hardware registers.
-    uint16_t ReadData(uint16_t address)
-    {
-        return ReadDmem(address);
-    }
-
-    void WriteData(uint16_t address, uint16_t value)
-    {
-        WriteDmem(address, value);
     }
 
     // A hardware register's stored value. For registers that are plain storage, this is what a read returns.
@@ -152,12 +135,6 @@ public:
     int TakenException() const
     {
         return taken_exception_;
-    }
-
-    // Sets a mailbox's 32 bits. Bit 31 is the full flag.
-    void SetMailbox(bool to_dsp, uint32_t value)
-    {
-        (to_dsp ? mailbox_to_dsp_ : mailbox_to_cpu_) = value;
     }
 
     // Loads words into IRAM or DRAM like a DMA. An IRAM load rebuilds the loop-end map.
@@ -201,6 +178,7 @@ public:
     {
         const bool requested = interrupt_request_;
         interrupt_request_ = false;
+
         return requested;
     }
 
@@ -300,6 +278,7 @@ private:
         // Addresses outside IRAM read as 0. The boot ROM isn't shipped. Its routines run in boot_rom.cpp.
         return address < kIramSize ? iram_[address] : 0;
     }
+
     uint16_t ReadDmem(uint16_t address);
     void WriteDmem(uint16_t address, uint16_t value);
     uint16_t ReadHardware(uint8_t reg);

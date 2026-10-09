@@ -199,8 +199,8 @@ std::size_t Playback::Render(int16_t* out, std::size_t frames)
 
 Playback::Route Playback::RouteTo(uint64_t frame) const
 {
-    // Use the latest snapshot at or before the target, unless the current position is nearer and the player can
-    // continue from it.
+    // Use the latest snapshot at or before the target. When the current position is nearer and the player can continue
+    // from it, continue from there instead.
     const bool can_go_on =
         player_.GetState() == Player::State::kPlaying || player_.GetState() == Player::State::kFinished;
     const auto it = std::ranges::upper_bound(saved_, frame, {}, &SavedState::position);

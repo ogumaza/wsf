@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <iterator>
 #include <list>
 #include <memory>
@@ -237,21 +238,26 @@ void AxVoice::SetSrcType(SrcType type, float pitch)
     case SrcType::kNone:
         pb.src_select = 2;
         break;
+
     case SrcType::kLinear:
         pb.src_select = 1;
         break;
+
     case SrcType::k4Tap8k:
         pb.src_select = 0;
         pb.coef_select = 0;
         break;
+
     case SrcType::k4Tap12k:
         pb.src_select = 0;
         pb.coef_select = 1;
         break;
+
     case SrcType::k4Tap16k:
         pb.src_select = 0;
         pb.coef_select = 2;
         break;
+
     default:
         break;
     }
@@ -281,9 +287,11 @@ void AxVoice::SetAdpcm(const rsar::AdpcmInfo& info, uint16_t pred_scale, int16_t
         adpcm.yn1 = static_cast<uint16_t>(yn1);
         adpcm.yn2 = static_cast<uint16_t>(yn2);
         break;
+
     case ax::SampleFormat::kPcm16:
         adpcm.gain = 0x800;
         break;
+
     case ax::SampleFormat::kPcm8:
         adpcm.gain = 0x100;
         break;
@@ -319,6 +327,28 @@ bool AxVoice::SetMix(const MixParam& mix)
         return false;
     }
 
+    // The build of October 2006 sets the mix at once, with no ramp (CalcMixParam, 0x800dd970 in Smooth Moves' main.dol,
+    // and AXSetVoiceMix).
+    if (engine_->Build().October2006())
+    {
+        ax::PbMix pb_mix;
+        pb_mix.l = mix.l;
+        pb_mix.r = mix.r;
+        pb_mix.s = mix.s;
+        pb_mix.aux_a_l = mix.aux_a_l;
+        pb_mix.aux_a_r = mix.aux_a_r;
+        pb_mix.aux_a_s = mix.aux_a_s;
+        pb_mix.aux_b_l = mix.aux_b_l;
+        pb_mix.aux_b_r = mix.aux_b_r;
+        pb_mix.aux_b_s = mix.aux_b_s;
+        pb_mix.aux_c_l = mix.aux_c_l;
+        pb_mix.aux_c_r = mix.aux_c_r;
+        pb_mix.aux_c_s = mix.aux_c_s;
+        SetVoiceMix(pb_mix, true);
+
+        return false;
+    }
+
     // A voice that hasn't started jumps straight to its mix. A playing voice ramps from where it is.
     if (first_mix_update_ || !IsRun())
     {
@@ -330,7 +360,6 @@ bool AxVoice::SetMix(const MixParam& mix)
 
     // Each volume starts where the last frame's ramp left it. The ramp moves it towards the target over the frame. A
     // volume reaches its target when the ramp would overshoot, or when the target is 0.
-    ax::PbMix pb_mix;
     const auto ramp = [](uint16_t& prev, uint16_t target, uint16_t& volume, uint16_t& delta)
     {
         volume = prev;
@@ -346,6 +375,7 @@ bool AxVoice::SetMix(const MixParam& mix)
         }
     };
 
+    ax::PbMix pb_mix;
     ramp(mix_prev_.l, mix.l, pb_mix.l, pb_mix.delta_l);
     ramp(mix_prev_.r, mix.r, pb_mix.r, pb_mix.delta_r);
     ramp(mix_prev_.s, mix.s, pb_mix.s, pb_mix.delta_s);
@@ -408,6 +438,17 @@ void AxVoice::SetVe(float volume, float init_volume)
     }
 
     volume_ = static_cast<uint16_t>(static_cast<int32_t>(32767.0f * volume));
+}
+
+void AxVoice::SetVeOctober2006(uint16_t volume, int16_t delta)
+{
+    if (!IsAvailable())
+    {
+        return;
+    }
+
+    vpb_->pb.ve = {volume, static_cast<uint16_t>(delta)};
+    vpb_->sync |= ax::sync::kVe;
 }
 
 void AxVoice::SetLpf(uint16_t freq)
@@ -509,9 +550,18 @@ void AxVoice::Sync()
         return;
     }
 
-    // The envelope starts the frame where the model expects the last frame to have left it. It ramps by a whole step
-    // per sample towards the target. The step is rounded towards whichever value comes closer. The game's alternative
-    // step is 1, or -1 when the step is 0.
+    // The build of October 2006 sets the envelope in Voice::CalcAxVe. Only the other changes go to AX here.
+    if (engine_->Build().October2006())
+    {
+        vpb_->sync |= sync_;
+        sync_ = 0;
+
+        return;
+    }
+
+    // The envelope starts the frame at the volume that the model computed for the end of the last frame. It ramps by a
+    // whole step per sample towards the target. The step is rounded towards whichever value comes closer. The game's
+    // alternative step is 1, or -1 when the step is 0.
     ax::PbVe& ve = vpb_->pb.ve;
     ve.current_volume = prev_volume_;
     const auto delta_in = static_cast<int16_t>((volume_ - prev_volume_) / ax::kSamplesPerFrame);
@@ -608,8 +658,10 @@ uint32_t AxVoice::SampleByDspAddress(PAddr base, uint32_t address, ax::SampleFor
             return nibbles % ax::kAdpcmNibblesPerFrame +
                    nibbles / ax::kAdpcmNibblesPerFrame * ax::kAdpcmSamplesPerFrame - 2;
         }
+
     case ax::SampleFormat::kPcm8:
         return address - base;
+
     case ax::SampleFormat::kPcm16:
         return address - base / 2;
     }
@@ -947,7 +999,6 @@ bool Voice::Acquire(int channels, int priority, Callback callback)
     callback_ = std::move(callback);
     sync_flag_ = 0;
     pause_ = false;
-    pausing_ = false;
     started_ = false;
     volume_ = 1.0f;
     ve_init_volume_ = 0.0f;
@@ -963,6 +1014,8 @@ bool Voice::Acquire(int channels, int priority, Callback callback)
     pitch_ = 1.0f;
     pan_mode_ = PanMode::kDual;
     pan_curve_ = 0;
+    first_ve_update_ = true;
+    prev_ve_volume_ = 1.0f;
     active_ = true;
 
     return true;
@@ -1016,11 +1069,15 @@ void Voice::Calc()
         CalcAxSrc(false);
         sync_flag_ &= ~kSyncSrc;
     }
+
     if (sync_flag_ & kSyncVe)
     {
-        CalcAxVe();
-        sync_flag_ &= ~kSyncVe;
+        if (!CalcAxVe())
+        {
+            sync_flag_ &= ~kSyncVe;
+        }
     }
+
     if (sync_flag_ & kSyncMix)
     {
         if (!CalcAxMix())
@@ -1028,11 +1085,13 @@ void Voice::Calc()
             sync_flag_ &= ~kSyncMix;
         }
     }
+
     if (sync_flag_ & kSyncLpf)
     {
         CalcAxLpf();
         sync_flag_ &= ~kSyncLpf;
     }
+
     if (sync_flag_ & kSyncBiquad)
     {
         CalcAxBiquadFilter();
@@ -1063,12 +1122,10 @@ void Voice::Update()
             if (pause_)
             {
                 StopAllAxVoice();
-                pausing_ = true;
             }
             else
             {
                 RunAllAxVoice();
-                pausing_ = false;
             }
 
             sync_flag_ &= ~kSyncVoice;
@@ -1089,7 +1146,7 @@ void Voice::Setup(const WaveData& data, uint32_t offset)
             continue;
         }
 
-        // A start part way into an ADPCM wave needs the decoder's state there.
+        // A start part way into an ADPCM wave requires the decoder's state there.
         const WaveData::Channel& channel = data.channels[i];
         uint16_t pred_scale = channel.adpcm.pred_scale;
         int16_t yn1 = channel.adpcm.yn1;
@@ -1112,7 +1169,6 @@ void Voice::Setup(const WaveData& data, uint32_t offset)
     }
 
     pause_ = false;
-    pausing_ = false;
     starting_ = false;
     started_ = false;
     sync_flag_ |= kSyncLpf | kSyncMix | kSyncVe;
@@ -1133,7 +1189,6 @@ void Voice::Stop()
         started_ = false;
     }
 
-    pausing_ = false;
     pause_ = false;
     starting_ = false;
 }
@@ -1309,12 +1364,38 @@ void Voice::CalcAxSrc(bool initial)
     }
 }
 
-void Voice::CalcAxVe()
+bool Voice::CalcAxVe()
 {
     // CalcAxVe (0x8004d044): the voice's volume, scaled by the master volume, at both ends of the frame's ramp.
     float volume = 1.0f;
     volume *= volume_;
     volume *= engine_->OutputVolume();
+    if (engine_->Build().October2006())
+    {
+        // The build of October 2006 (0x800dd140 in Smooth Moves' main.dol) sets the AX voices' envelopes itself. The
+        // ramp starts at the volume where the last ramp ended. Once the voice runs, that volume comes from the last
+        // frame. The ramp steps by the difference over the frame's 96 samples. The step is rounded towards 0. The next
+        // ramp starts at the target.
+        const bool running = ax_voices_[0] != nullptr && ax_voices_[0]->IsRun();
+        const float start = first_ve_update_ || !running ? volume : prev_ve_volume_;
+        const auto init = static_cast<uint16_t>(static_cast<int32_t>(32767.0f * (start * ve_init_volume_)));
+        const auto end = static_cast<uint16_t>(static_cast<int32_t>(32767.0f * (volume * ve_target_volume_)));
+        const auto delta = static_cast<int16_t>((end - init) / ax::kSamplesPerFrame);
+        for (int i = 0; i < channel_count_; i++)
+        {
+            if (ax_voices_[i] != nullptr)
+            {
+                ax_voices_[i]->SetVeOctober2006(init, delta);
+            }
+        }
+
+        prev_ve_volume_ = volume;
+        first_ve_update_ = false;
+        ve_init_volume_ = ve_target_volume_;
+
+        return end != init;
+    }
+
     const float target = volume * ve_target_volume_;
     const float init = volume * ve_init_volume_;
     for (int i = 0; i < channel_count_; i++)
@@ -1324,6 +1405,8 @@ void Voice::CalcAxVe()
             ax_voices_[i]->SetVe(target, init);
         }
     }
+
+    return false;
 }
 
 bool Voice::CalcAxMix()
@@ -1380,10 +1463,13 @@ void Voice::CalcMixParam(int channel, AxVoice::MixParam& mix) const
     const float fx_b = main_volume * fx_send_[1];
     const float fx_c = main_volume * fx_send_[2];
 
-    const PanInfo info = PanInfoFor(pan_curve_);
+    // The build of October 2006 (0x800dd970 in Smooth Moves' main.dol) has no pan curves and no balance mode. It pans
+    // by the square root curve, and each channel of a stereo wave pans from its side.
+    const bool october = engine_->Build().October2006();
+    const PanInfo info = PanInfoFor(october ? 0 : pan_curve_);
     float left = 0.0f;
     float right = 0.0f;
-    if (channel_count_ > 1 && pan_mode_ == PanMode::kBalance)
+    if (channel_count_ > 1 && pan_mode_ == PanMode::kBalance && !october)
     {
         if (channel == 0)
         {
@@ -1501,6 +1587,7 @@ void Voice::OnAxVoiceEvent(AxVoice* dropped, AxVoice::CallbackStatus status)
     {
         Free();
     }
+
     if (callback_)
     {
         const Callback callback = callback_;
@@ -1595,17 +1682,6 @@ void VoiceManager::NotifyVoiceUpdate()
     {
         Voice* voice = *it++;
         voice->ResetDelta();
-    }
-}
-
-void VoiceManager::UpdateAllVoicesSync(uint8_t sync_flag)
-{
-    for (Voice* voice : prio_list_)
-    {
-        if (voice->active_)
-        {
-            voice->sync_flag_ |= sync_flag;
-        }
     }
 }
 
@@ -1767,11 +1843,13 @@ void Channel::Update(bool periodic)
         ve_init_volume *= CalcVolumeRatio(6.0f * lfo_value);
     }
 
-    // A released note stops once it's silent. For a channel with an owner, that's when its envelope reaches 0. For a
-    // channel without an owner, it's when its volume times its envelope reaches 0.
+    // A released note stops once it's silent. A channel with an owner falls silent when its envelope reaches 0. A
+    // channel without an owner falls silent when its volume times its envelope reaches 0. The build of October 2006
+    // (0x800e039c in Smooth Moves' main.dol) always takes the volume times the envelope.
     if (envelope_.GetStatus() == Envelope::Status::kRelease)
     {
-        if (callback_ ? ve_init_volume == 0.0f : volume * ve_init_volume == 0.0f)
+        const bool owner = callback_ && !engine_->Build().October2006();
+        if (owner ? ve_init_volume == 0.0f : volume * ve_init_volume == 0.0f)
         {
             Stop();
 
@@ -1914,6 +1992,7 @@ void Channel::Stop()
         alloc_ = false;
         engine_->Channels().Free(this);
     }
+
     if (callback_)
     {
         const Callback callback = callback_;
@@ -1946,7 +2025,7 @@ uint8_t Channel::SilenceVolume::Value() const
 
 float Channel::SweepValue() const
 {
-    // GetSweepValue (inlined in Update): the sweep's pitch, falling to 0 over its length.
+    // GetSweepValue (inlined in Update): the sweep's pitch. The pitch falls to 0 over the sweep's length.
     if (sweep_pitch_ == 0.0f || sweep_counter_ >= sweep_length_)
     {
         return 0.0f;
@@ -1969,10 +2048,12 @@ void Channel::OnVoiceEvent(Voice* voice, Voice::Status status)
         channel_status = CallbackStatus::kFinish;
         voice->Free();
         break;
+
     case Voice::Status::kCancel:
         channel_status = CallbackStatus::kCancel;
         voice->Free();
         break;
+
     case Voice::Status::kDropVoice:
     case Voice::Status::kDropDsp:
         channel_status = CallbackStatus::kDrop;

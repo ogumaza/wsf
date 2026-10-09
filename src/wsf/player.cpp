@@ -8,10 +8,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <exception>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -19,6 +19,7 @@
 
 #include "common/bytes.h"
 #include "dsp/main_memory.h"
+#include "ppc/cpu.h"
 #include "wii/file_disc.h"
 #include "wii/system.h"
 #include "wsf/archive_player.h"
@@ -408,10 +409,10 @@ double Player::Volume() const
         return 1.0;
     }
 
-    // A value that isn't a finite number, such as nan, is ignored. It would turn every sample into nonsense.
-    char* end = nullptr;
-    const double v = std::strtod(it->second.c_str(), &end);
-    return end != it->second.c_str() && std::isfinite(v) ? v : 1.0;
+    // Text after the number, as in "0.5dB", is ignored. So is a value that isn't a finite number, such as 1e999. It
+    // would turn every sample into nonsense.
+    const std::optional<DecimalNumber> volume = ReadDecimal(it->second);
+    return volume && std::isfinite(volume->value) ? volume->value : 1.0;
 }
 
 } // namespace wsf

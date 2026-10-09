@@ -13,11 +13,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <ios>
 #include <map>
 #include <random>
 #include <string>
@@ -143,8 +145,8 @@ TestDisc BuildDisc()
     wsf::StoreBe32(disc.dol.data() + 0xAC, 0x500);
     wsf::StoreBe32(disc.dol.data() + 0xE0, 0x80004000);
 
-    // The files: one across many sectors and two chunks, a small one in a subfolder, an empty one, and two whose
-    // names aren't ASCII (half-width katakana, and two double-byte characters that come out as %XX).
+    // The files: one across many sectors and two chunks, a small one in a subfolder, an empty one, and two whose names
+    // aren't ASCII (half-width katakana, and two double-byte characters that come out as %XX).
     struct File
     {
         std::string disc_name;
@@ -271,6 +273,7 @@ Bytes TestDisc::Iso(bool hashed, bool encrypted, bool nkit, bool scrambled) cons
         const uint64_t n = std::min(kSectorData, partition_data.size() - s * kSectorData);
         std::copy_n(partition_data.begin() + static_cast<std::ptrdiff_t>(s * kSectorData), n, sector + 0x400);
     }
+
     if (scrambled)
     {
         std::for_each(iso.begin() + kData, iso.end(), [](uint8_t& b) { b ^= 0xA5; });
@@ -466,6 +469,7 @@ Bytes Compress(Method method, const Bytes& data, Bytes& props)
     case Method::kZstd:
         size = ZSTD_compress(out.data(), out.size(), data.data(), data.size(), 3);
         break;
+
     default:
         size = 0;
         break;
@@ -807,8 +811,8 @@ int main(int argc, char** argv)
                               : fs::temp_directory_path() / ("wsf_disc_test_" + std::to_string(std::random_device{}()));
     fs::create_directories(dir);
 
-    // ISO images: without hashes as NKit stores them, with hashed sectors, and in the containers that hold an ISO
-    // as it is.
+    // ISO images: without hashes as NKit stores them, with hashed sectors, and in the containers that hold an ISO as it
+    // is.
     const Bytes iso = disc.Iso(false, false, true);
     const Bytes hashed = disc.Iso(true, false, false);
     WriteFile(dir / "nkit.iso", iso);
@@ -879,7 +883,7 @@ int main(int argc, char** argv)
         }
     }
 
-    // Extracted discs, as Dolphin extracts them (a DATA folder) and with the partition's folder given directly.
+    // Extracted discs in Dolphin's layout (a DATA folder) and with the partition's folder given directly.
     for (const fs::path& root : {dir / "extracted" / "DATA", dir / "partition"})
     {
         WriteFile(root / "sys" / "boot.bin", disc.boot);
@@ -897,7 +901,7 @@ int main(int argc, char** argv)
     CheckGame("extracted disc", dir / "extracted", disc, true);
     CheckGame("extracted partition", dir / "partition", disc, true);
 
-    // A partition decrypted as Wiimm's tools leave it, with the disc header still calling it encrypted.
+    // A partition decrypted as Wiimm's tools leave it. The disc header still calls the partition encrypted.
     WriteFile(dir / "decrypted.wbfs", Wbfs(disc.Iso(true, true, false)));
     CheckGame("decrypted WBFS with the encryption flag on", dir / "decrypted.wbfs", disc, true);
 

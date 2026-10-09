@@ -56,11 +56,6 @@ public:
         return data_[offset];
     }
 
-    int8_t S8(size_t offset) const
-    {
-        return static_cast<int8_t>(U8(offset));
-    }
-
     uint16_t U16(size_t offset) const
     {
         Check(offset, 2);

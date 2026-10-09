@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "wsf/format.h"
 #include "wsf/player.h"
 
 namespace wsf
@@ -181,7 +182,8 @@ private:
     // Declared after player_ so snapshots release their references to the player's objects before the player is
     // destroyed.
     std::vector<SavedState> saved_; // in order of position, at most one in each stretch of interval_ frames
-    // Last snapshot taken or restored. The next snapshot shares pages with it, even if it is no longer in saved_.
+    // Last snapshot taken or restored. The next snapshot shares pages with it. That holds even if it is no longer in
+    // saved_.
     std::shared_ptr<const Player::Snapshot> latest_;
     uint64_t interval_ = 0;
 };

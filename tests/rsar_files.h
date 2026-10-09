@@ -80,12 +80,14 @@ inline size_t PutRegion(Bytes& file, size_t base, int32_t wave, uint8_t key)
 }
 
 // A wave info for one ADPCM channel whose samples start at `data_offset` in the wave data, at offset `at` in `file`.
-inline void PutWaveInfo(Bytes& file, size_t at, uint32_t data_offset, uint16_t pred_scale, bool loop = true)
+// The wave plays at `sample_rate` Hz.
+inline void PutWaveInfo(Bytes& file, size_t at, uint32_t data_offset, uint16_t pred_scale, bool loop = true,
+                        uint16_t sample_rate = 32000)
 {
     file[at] = 2;
     file[at + 1] = loop ? 1 : 0;
     file[at + 2] = 1;
-    StoreBe16(&file[at + 4], 32000);
+    StoreBe16(&file[at + 4], sample_rate);
     StoreBe32(&file[at + 8], 2);
     StoreBe32(&file[at + 0xC], 30);
     StoreBe32(&file[at + 0x10], 0x1C);
@@ -177,7 +179,7 @@ inline Bytes MakeOldBank()
     return file;
 }
 
-// The raw wave data for MakeOldBank: two waves of 0x40 bytes, each starting with its predictor/scale.
+// The raw wave data for MakeOldBank: two waves of 0x40 bytes. Each starts with its predictor/scale.
 inline Bytes MakeOldWaveData()
 {
     Bytes data(0x80, 0);
@@ -187,14 +189,14 @@ inline Bytes MakeOldWaveData()
     return data;
 }
 
-// An RWAV holding one ADPCM channel. The channel loops unless `loop` is false.
-inline Bytes MakeRwav(uint16_t pred_scale, bool loop = true)
+// An RWAV holding one ADPCM channel at `sample_rate` Hz. The channel loops unless `loop` is false.
+inline Bytes MakeRwav(uint16_t pred_scale, bool loop = true, uint16_t sample_rate = 32000)
 {
     Bytes file = Header("RWAV", 0x0102, 2);
     const size_t info = Block(file, "INFO", 0);
     const size_t payload = Grow(file, 0x6C);
     const size_t data = file.size() + 4;
-    PutWaveInfo(file, payload, static_cast<uint32_t>(data - payload), pred_scale, loop);
+    PutWaveInfo(file, payload, static_cast<uint32_t>(data - payload), pred_scale, loop, sample_rate);
     Grow(file, 4);
     EndBlock(file, info, 0);
     const size_t samples = Block(file, "DATA", 1);
@@ -204,8 +206,8 @@ inline Bytes MakeRwav(uint16_t pred_scale, bool loop = true)
     return file;
 }
 
-// An RWAR of two RWAVs.
-inline Bytes MakeRwar(bool loop = true)
+// An RWAR of two RWAVs at `sample_rate` Hz.
+inline Bytes MakeRwar(bool loop = true, uint16_t sample_rate = 32000)
 {
     Bytes file = Header("RWAR", 0x0100, 2);
     const size_t table = Block(file, "TABL", 0);
@@ -215,7 +217,7 @@ inline Bytes MakeRwar(bool loop = true)
     const size_t data = Block(file, "DATA", 1);
     for (int i = 0; i < 2; ++i)
     {
-        const Bytes rwav = MakeRwav(static_cast<uint16_t>(0x31 + i), loop);
+        const Bytes rwav = MakeRwav(static_cast<uint16_t>(0x31 + i), loop, sample_rate);
         const size_t at = Grow(file, rwav.size());
         std::memcpy(&file[at], rwav.data(), rwav.size());
         PutRef(file, entries + i * 12, 0, static_cast<uint32_t>(at - data));
@@ -266,8 +268,9 @@ inline Bytes MakeSequence(const Bytes& commands)
 
 // An archive of version 1.4 with one sequence sound, named in SYMB. The sound's sequence and bank (with its RWAR as
 // wave data) are in one group. The sound starts `offset` bytes into the sequence's commands, with the tracks in
-// `allocate_track`. The waves loop unless `loop` is false.
-inline Bytes MakeArchive(const Bytes& sequence, uint32_t offset, uint32_t allocate_track, bool loop = true)
+// `allocate_track`. The waves loop unless `loop` is false, and play at `sample_rate` Hz.
+inline Bytes MakeArchive(const Bytes& sequence, uint32_t offset, uint32_t allocate_track, bool loop = true,
+                         uint16_t sample_rate = 32000)
 {
     Bytes file(0x40, 0);
     std::memcpy(file.data(), "RSAR", 4);
@@ -334,7 +337,7 @@ inline Bytes MakeArchive(const Bytes& sequence, uint32_t offset, uint32_t alloca
     StoreBe32(&file[bank + 4], 1);
 
     const Bytes bank_file = MakeNewBank();
-    const Bytes rwar = MakeRwar(loop);
+    const Bytes rwar = MakeRwar(loop, sample_rate);
     const size_t files = table(3, 2);
     for (uint32_t f = 0; f < 2; ++f)
     {
@@ -399,7 +402,7 @@ struct TableSound
 };
 
 // An archive of version 1.4 with only its tables of sounds and players, named in SYMB, and no files. Each player plays
-// one more sound at once than the one before it, starting from one.
+// one more sound at once than the one before it. The first plays one.
 inline Bytes MakeSoundTable(const std::vector<TableSound>& sounds, const std::vector<const char*>& players)
 {
     Bytes file(0x40, 0);

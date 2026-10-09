@@ -7,12 +7,15 @@
 
 #include <zlib.h>
 
+#include <algorithm>
+#include <clocale>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <iterator>
 #include <map>
 #include <string>
 #include <vector>
@@ -48,6 +51,68 @@ static void TestTimes()
     {
         WSF_CHECK(ParseTime(FormatTime(ms)) == ms);
     }
+}
+
+// Numbers in tags: an optional sign, digits with '.' or ',' before decimals, and an optional exponent, with the values
+// that std::strtod gives in the C locale. Text after the number is left unread.
+static void TestDecimals()
+{
+    for (const char* text : {"0", "0.5", "1,25", "-1.5", "+2", ".5", "5.", "123.456", "0.000123", "2.718281828459045",
+                             "1e3", "1.5E-3", "1e22", "1e-22", "9007199254740992", "0.1", "0.3", "62.226"})
+    {
+        std::string c_text = text;
+        std::replace(c_text.begin(), c_text.end(), ',', '.');
+
+        const auto number = ReadDecimal(text);
+
+        Check(number && number->length == std::strlen(text) && number->value == std::strtod(c_text.c_str(), nullptr),
+              std::string(text) + " reads as std::strtod reads it");
+    }
+
+    const auto with_unit = ReadDecimal("0.5dB");
+    const auto bare_exponent = ReadDecimal("1e+x");
+    const auto hex = ReadDecimal("0x10");
+    const auto huge = ReadDecimal("1e999");
+    const auto tiny = ReadDecimal("1e-999");
+
+    WSF_CHECK(with_unit && with_unit->value == 0.5 && with_unit->length == 3);
+    WSF_CHECK(bare_exponent && bare_exponent->value == 1 && bare_exponent->length == 1);
+    WSF_CHECK(hex && hex->value == 0 && hex->length == 1);
+    WSF_CHECK(huge && std::isinf(huge->value));
+    WSF_CHECK(tiny && tiny->value == 0);
+    for (const char* text : {"", ".", "-", "+.", "e5", " 1", "nan", "inf", "x1"})
+    {
+        Check(!ReadDecimal(text), std::string("\"") + text + "\" isn't a number");
+    }
+}
+
+// Under a locale that writes decimals with a comma, std::strtod stops at '.'. Tags still read the same. The check runs
+// only where such a locale is installed.
+static void TestDecimalsUnderCommaLocale()
+{
+    const char* comma_locale = nullptr;
+    for (const char* name : {"de_DE.UTF-8", "de_DE.utf8", "de_DE", "fr_FR.UTF-8", "de-DE", "German_Germany.1252"})
+    {
+        if (std::setlocale(LC_NUMERIC, name) && std::strtod("0.5", nullptr) == 0)
+        {
+            comma_locale = name;
+            break;
+        }
+    }
+
+    if (!comma_locale)
+    {
+        std::setlocale(LC_NUMERIC, "C");
+        std::printf("no locale with decimal commas is installed. Tags weren't read under one.\n");
+        return;
+    }
+
+    const auto volume = ReadDecimal("0.5");
+    const long long length = ParseTime("1:02.226");
+    std::setlocale(LC_NUMERIC, "C");
+
+    Check(volume && volume->value == 0.5, std::string("a volume of 0.5 reads as 0.5 under ") + comma_locale);
+    Check(length == 62226, std::string("a length of 1:02.226 reads as 62,226 ms under ") + comma_locale);
 }
 
 static void TestPsfRoundTrip()
@@ -169,8 +234,8 @@ static void TestChunks()
     WSF_CHECK(!ParseProgram(prog, skipped));
     WSF_CHECK(skipped.memory.size() == 2 && skipped.files.size() == 1);
 
-    // A truncated chunk is an error, even when its size is so large that adding it to the position wraps around on a
-    // 32-bit host.
+    // A truncated chunk is an error. That holds even when its size is so large that adding it to the position wraps
+    // around on a 32-bit host.
     std::vector<uint8_t> trunc = {'M', 'E', 'M', ' ', 100, 0, 0, 0, 1, 2};
     std::vector<uint8_t> huge = {'M', 'E', 'M', ' ', 0xf8, 0xff, 0xff, 0xff, 1, 2, 3, 4};
     ProgramChunks truncated;
@@ -286,8 +351,8 @@ static void TestLoadSet()
         WSF_CHECK(LoadSet("dir/flags.wsflib", reader, set).has_value());
     }
 
-    // A driver block of version 1 plays. A block of another version doesn't, including when a .miniwsf patches the
-    // version. Like the rest of the Wii's memory, the block's words are big-endian.
+    // A driver block of version 1 plays. A block of another version doesn't. Neither does a block whose version a
+    // .miniwsf patches to another. Like the rest of the Wii's memory, the block's words are big-endian.
     const auto driver_block = [](uint32_t version)
     {
         std::vector<uint8_t> block(0x20, 0);
@@ -298,6 +363,7 @@ static void TestLoadSet()
 
         return b.Data();
     };
+
     fs["dir/driver1.wsflib"] = WritePsf(kPsfVersionWsf, d.Serialize(), driver_block(1), {});
     fs["dir/driver2.wsflib"] = WritePsf(kPsfVersionWsf, d.Serialize(), driver_block(2), {});
     {
@@ -415,7 +481,7 @@ static void TestArchiveMode()
 
     const auto raw1 = v1.Serialize();
 
-    // A later descriptor of the other kind decides the mode. The last SND chunk selects the sound.
+    // A later descriptor of the other kind sets the mode. The last SND chunk selects the sound.
     ProgramBuilder lib;
     lib.AddFile("Sound/b.brsar", {1, 2, 3});
     lib.AddSound(5);
@@ -459,6 +525,8 @@ static void TestArchiveMode()
 int main()
 {
     TestTimes();
+    TestDecimals();
+    TestDecimalsUnderCommaLocale();
     TestArchiveMode();
     TestPsfRoundTrip();
     TestTagParsing();

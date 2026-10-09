@@ -16,6 +16,7 @@
 
 #include "check.h"
 #include "common/bytes.h"
+#include "rsar/binary.h"
 #include "rsar/formats.h"
 #include "rsar_files.h"
 

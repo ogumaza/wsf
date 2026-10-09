@@ -19,8 +19,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 OUTPUT = HERE.parent / "src" / "rip" / "driver_blob.h"
 
-# Where the driver is loaded: near the top of MEM1, below the disc's file system table and outside the OS's arena.
-# Its entry is at BASE. Its parameter block is at PARAMS (docs/wsf.md, "Driver").
+# Where the driver is loaded: near the top of MEM1, below the disc's file system table and outside the OS's arena. The
+# driver's entry is at BASE, and its parameter block is at PARAMS (docs/wsf.md, "Driver").
 BASE = 0x81700000
 PARAMS = 0x81700010
 
@@ -112,7 +112,7 @@ def link(elf):
     def symbol_address(index):
         name, value, shndx = symbols[index]
         if shndx not in addresses:
-            sys.exit(f"error: the driver refers to {name or 'a symbol'}, which isn't in it")
+            sys.exit(f"error: the driver refers to {name or 'a symbol'}. The driver doesn't define it.")
         return addresses[shndx] + value
 
     for rela in (s for s in elf.sections if s["kind"] == SHT_RELA):

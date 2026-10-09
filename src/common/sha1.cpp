@@ -95,6 +95,7 @@ void Sha1::Block(const uint8_t* block)
     {
         w[i] = LoadBe32(block + i * 4);
     }
+
     for (int i = 16; i < 80; ++i)
     {
         w[i] = Rotate(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);

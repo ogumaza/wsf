@@ -66,41 +66,59 @@ uint16_t DspInterface::Read(uint32_t offset)
     case 0x000:
         RunForPoll();
         return dsp_.CpuReadMailboxHigh(true);
+
     case 0x002:
         return dsp_.CpuReadMailboxLow(true);
+
     case 0x004:
         RunForPoll();
         return dsp_.CpuReadMailboxHigh(false);
+
     case 0x006:
         return dsp_.CpuReadMailboxLow(false);
+
     case 0x00a:
         return (control_ & dspcr::kCpuSide) | dsp_.Control(cpu_.TimeBase());
+
     case 0x012:
         return aram_size_;
+
     case 0x016:
         return 1;
+
     case 0x01a:
         return aram_refresh_;
+
     case 0x020:
         return static_cast<uint16_t>(aram_dma_main_ >> 16);
+
     case 0x022:
         return static_cast<uint16_t>(aram_dma_main_);
+
     case 0x024:
         return static_cast<uint16_t>(aram_dma_aram_ >> 16);
+
     case 0x026:
         return static_cast<uint16_t>(aram_dma_aram_);
+
     case 0x028:
         return static_cast<uint16_t>(aram_dma_count_ >> 16);
+
     case 0x02a:
         return static_cast<uint16_t>(aram_dma_count_);
+
     case 0x030:
         return static_cast<uint16_t>(ai_start_ >> 16);
+
     case 0x032:
         return static_cast<uint16_t>(ai_start_);
+
     case 0x036:
         return ai_control_;
+
     case 0x03a:
         return static_cast<uint16_t>(ai_remaining_ == 0 ? 0 : ai_remaining_ - 1);
+
     default:
         return 0;
     }
@@ -113,43 +131,56 @@ void DspInterface::Write(uint32_t offset, uint16_t value)
     case 0x000:
         dsp_.CpuWriteMailboxHigh(value);
         break;
+
     case 0x002:
         dsp_.CpuWriteMailboxLow(value);
         break;
+
     case 0x00a:
         SetControl(value);
         break;
+
     case 0x012:
         aram_size_ = value & 0x7f;
         break;
+
     case 0x01a:
         aram_refresh_ = value & 0x7ff;
         break;
+
     case 0x020:
         aram_dma_main_ = (aram_dma_main_ & 0xffff) | uint32_t{value & 0x03ffu} << 16;
         break;
+
     case 0x022:
         aram_dma_main_ = (aram_dma_main_ & 0xffff0000) | (value & 0xffe0u);
         break;
+
     case 0x024:
         aram_dma_aram_ = (aram_dma_aram_ & 0xffff) | uint32_t{value & 0x03ffu} << 16;
         break;
+
     case 0x026:
         aram_dma_aram_ = (aram_dma_aram_ & 0xffff0000) | (value & 0xffe0u);
         break;
+
     case 0x028:
         aram_dma_count_ = (aram_dma_count_ & 0xffff) | uint32_t{value & 0x83ffu} << 16;
         break;
+
     case 0x02a:
         aram_dma_count_ = (aram_dma_count_ & 0xffff0000) | (value & 0xffe0u);
         AramDma();
         break;
+
     case 0x030:
         ai_start_ = (ai_start_ & 0xffff) | uint32_t{value & 0x1fffu} << 16;
         break;
+
     case 0x032:
         ai_start_ = (ai_start_ & 0xffff0000) | (value & 0xffe0u);
         break;
+
     case 0x036:
         {
             // Starting the DMA begins a pass at once. A change while the DMA runs waits for the pass to end.
@@ -161,9 +192,9 @@ void DspInterface::Write(uint32_t offset, uint16_t value)
                 ai_remaining_ = value & 0x7fff;
                 ai_first_interrupt_ = cpu_.Cycles() + kFirstAiInterrupt;
             }
-
             break;
         }
+
     default:
         break;
     }
@@ -214,6 +245,7 @@ void DspInterface::Advance(uint64_t now)
         control_ = static_cast<uint16_t>((control_ & ~dspcr::kAramBusy) | dspcr::kAramInterrupt);
         aram_dma_done_ = UINT64_MAX;
     }
+
     if (now >= ai_first_interrupt_)
     {
         control_ |= dspcr::kAiInterrupt;
@@ -231,6 +263,7 @@ void DspInterface::Advance(uint64_t now)
             {
                 on_audio(block != nullptr ? std::span<const uint8_t, 32>(block, 32) : std::span(kSilence));
             }
+
             if (ai_remaining_ != 0)
             {
                 ai_remaining_--;

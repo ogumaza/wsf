@@ -14,13 +14,15 @@ filtering and resampling therefore match the game. A rip uses one of two modes:
 
 `docs/wsf.md` specifies the format. Version 1 supports game mode for Wii Sports and Wii Play (both USA, revision 1), and
 for WarioWare: Smooth Moves, Mario Kart Wii, Wii Music and Animal Crossing: City Folk (all USA). Other games and loose
-sound archives are ripped in archive mode.
+sound archives are ripped in archive mode. Another release of one of these games gets game mode too when its code
+matches. The European and Japanese releases of WarioWare: Smooth Moves get it that way. Archive mode follows the
+versions of the sound library from 2006 (WarioWare: Smooth Moves) to 2008 (Wii Music).
 
 ## Tools
 
 | Tool | Description |
 |---|---|
-| `wsfrip [options] <input>...` | Rips each input into a `.wsflib` and a `.miniwsf` per sequence. The output goes in a folder next to the input. The folder has the input's name with `_wsf` added. Each of a game's sound archives gets a separate folder with the archive's name. Where two of the game's archives have the same name, the names of the folders above them are added. An input is a Wii disc image, an extracted disc or a sound archive (`.brsar`). An extracted disc is a folder with `sys/main.dol` and `files/`, either directly or in a `DATA` folder. Dolphin and Wiimm's tools extract discs in these layouts. A sound archive requires a game's `main.dol` for AX's microcode. Give one with the archive or with `--microcode`, or put one in the archive's folder. `--list` lists a game's sound archives. `--mode game\|archive` chooses the mode. `--archive`, `--only` and `--bgm` choose what to rip. `--help` shows the rest. |
+| `wsfrip [options] <input>...` | Rips each input into a `.wsflib` and a `.miniwsf` per sequence. The output goes in a folder next to the input. The folder has the input's name with `_wsf` added. Each of a game's sound archives gets a separate folder with the archive's name. Where two of the game's archives have the same name, the names of the folders above them are added. An input is a Wii disc image, an extracted disc or a sound archive (`.brsar`). An extracted disc is a folder with `sys/main.dol` and `files/`, either directly or in a `DATA` folder. Dolphin and Wiimm's tools extract discs in these layouts. A sound archive requires a game's `main.dol` for AX's microcode. Give one with the archive or with `--microcode`, or put one in the archive's folder. `--list` lists a game's sound archives. `--mode game\|archive` chooses the mode. `--archive`, `--only` and `--bgm` choose what to rip. Sequences that make no sound, such as placeholders and those that only set values for the game, are listed and skipped. `--help` shows the rest. |
 | `wsfplay [options] <file>...` | Renders each `.miniwsf` to a WAV file next to it at 32,000 Hz. The length and fade come from the file's tags. `-o FILE` writes FILE instead. Its extension selects WAV or FLAC. `--length` and `--fade` override the tags. `--info` shows a file's tags and libraries. `--help` shows the rest. |
 | `plugins/foobar2000` | foobar2000 input component: `foo_input_wsf.component` for macOS and `foo_input_wsf.dll` for Windows. Both are built with the foobar2000 SDK (see its [README](plugins/foobar2000/README.md)). |
 

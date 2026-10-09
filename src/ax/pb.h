@@ -4,6 +4,9 @@
 // each PB, updates it and writes it back every frame. In main memory every field is a big-endian 16-bit word. A 32-bit
 // value takes two words, high word first. The layout follows AX in the RVL SDK as linked into Wii Sports (December
 // 2006). __AXSetPBDefault (main.dol 0x8010707c) confirms it.
+//
+// WarioWare: Smooth Moves links the build of October 2006. That build keeps a 0x120-byte PB. The build's microcode
+// reads that layout. Pb stands for that layout too (see LoadPbOctober2006).
 
 #pragma once
 
@@ -14,6 +17,14 @@
 namespace wsf::ax
 {
 
+// The builds of AX's CPU side that the model follows. The microcode is built with the CPU side. The microcode therefore
+// identifies the build (IdentifyBuild in ax/microcode.h).
+enum class Build
+{
+    kOctober2006,  // 64 voices, 0x120-byte PBs and other command numbers
+    kDecember2006, // and the later builds: they take the same command lists and PBs
+};
+
 // One AX frame is 3 ms long and holds 96 stereo samples at 32 kHz. The Wii Remote speakers get 18 samples per frame at
 // 6 kHz.
 constexpr int kSamplesPerFrame = 96;
@@ -21,8 +32,10 @@ constexpr int kRemoteSamplesPerFrame = 18;
 constexpr int kSampleRate = 32000;
 constexpr int kRemoteCount = 4;
 
-// AX has 96 voices (AX_VOICE_MAX) and 32 priorities. Priority 0 marks a free voice. Priority 31 is the highest.
+// AX has 96 voices (AX_VOICE_MAX) and 32 priorities. Priority 0 marks a free voice. Priority 31 is the highest. The
+// build of October 2006 has 64 voices.
 constexpr int kVoiceCount = 96;
+constexpr int kVoiceCountOctober2006 = 64;
 constexpr uint32_t kPriorityFree = 0;
 constexpr uint32_t kPriorityMin = 1;
 constexpr uint32_t kPriorityMax = 31;
@@ -348,5 +361,20 @@ constexpr uint32_t Join(uint16_t hi, uint16_t lo)
 // Reads a PB from main memory and writes a PB back.
 Pb LoadPb(const uint8_t* bytes);
 void StorePb(const Pb& pb, uint8_t* bytes);
+
+// The PB of the build of October 2006 (__AXServiceVPB, 0x80030534 in Smooth Moves' main.dol). Its fields up to the ITD
+// are at the same offsets. An update block follows at 0x52: three counters and the address of a buffer of changes that
+// the microcode makes within a frame. The model never queues such changes. Then come the fields from the depop values
+// to the low-pass filter, at 0x5c. A second filter of four words follows at 0xcc. The model leaves it off. The Wii
+// Remote's fields up to its sample rate converter start at 0xd4. The rest is padding. This PB has no biquad filter and
+// no filter for the Wii Remotes.
+constexpr std::size_t kPbSizeOctober2006 = 0x120;
+constexpr std::size_t kUpdateBlockOctober2006 = 0x52;
+
+// Reads the fields that both layouts have. The rest of the Pb is zero.
+Pb LoadPbOctober2006(const uint8_t* bytes);
+
+// Writes the fields that both layouts have. Leaves the update block, the second filter and the padding as they are.
+void StorePbOctober2006(const Pb& pb, uint8_t* bytes);
 
 } // namespace wsf::ax

@@ -2,8 +2,8 @@
 
 // NW4R SND model tests, on the AX model with no DSP: the parameter blocks a note's channel sets up, the ramps from
 // frame to frame, the release and the end of a channel, the voices NW4R SND drops by priority when all are in use, a
-// short sequence played from an archive, what the builds of 2008 do differently, the loops the ripper's length
-// analysis counts, snapshots of the model, and the end of a wave without the DSP.
+// short sequence played from an archive, what the builds of 2008 do differently, the loops the ripper's length analysis
+// counts, snapshots of the model, and the end of a wave without the DSP.
 
 #include <array>
 #include <cmath>
@@ -22,6 +22,7 @@
 #include "dsp/main_memory.h"
 #include "nw4r/driver.h"
 #include "nw4r/engine.h"
+#include "nw4r/sequence.h"
 #include "nw4r/tables.h"
 #include "nw4r/util.h"
 #include "rsar/formats.h"
@@ -32,10 +33,12 @@ namespace
 
 using namespace wsf;
 
-// Builds of NW4R SND: those of Wii Sports, Mario Kart Wii and Wii Music.
+// Builds of NW4R SND: those of Wii Sports, Mario Kart Wii and Wii Music, and the one that comes with AX of October
+// 2006.
 constexpr nw4r::SndBuild kBuild2007{20070608};
 constexpr nw4r::SndBuild kBuildMarch2008{20080308};
 constexpr nw4r::SndBuild kBuildJune2008{20080620};
+constexpr nw4r::SndBuild kBuildOctober2006{0, true};
 
 // An archive whose sequence sound has the tracks in the mask `tracks` and plays track 0 from the start of `commands`.
 rsar::SoundArchive MakeArchive(const test::Bytes& commands, uint32_t tracks = 1)
@@ -43,20 +46,21 @@ rsar::SoundArchive MakeArchive(const test::Bytes& commands, uint32_t tracks = 1)
     return rsar::SoundArchive::Load(test::MakeArchive(test::MakeSequence(commands), 0, tracks));
 }
 
-// AX, initialised as the game does before NW4R SND starts, with a compressor table of zeros.
-ax::System& Initialised(ax::System& ax)
+// AX, initialised as the game does before NW4R SND starts, with a compressor table of zeros. The build of NW4R SND that
+// comes with AX of October 2006 runs on that AX.
+ax::System& Initialised(ax::System& ax, nw4r::SndBuild build)
 {
-    ax.Init();
+    ax.Init(build.October2006() ? ax::Build::kOctober2006 : ax::Build::kDecember2006);
 
     return ax;
 }
 
-// The AX model and the engine on it, following `build` of NW4R SND. A frame runs as in the game: AX's interrupt, then
-// the sound frame.
+// The AX model and the engine on it. The engine follows `build` of NW4R SND. A frame runs as in the game: AX's
+// interrupt, then the sound frame.
 struct Model
 {
     explicit Model(const test::Bytes& commands = {0xff}, nw4r::SndBuild build = {}, uint32_t tracks = 1)
-        : archive(MakeArchive(commands, tracks)), engine{memory, Initialised(ax), archive, build}
+        : archive(MakeArchive(commands, tracks)), engine{memory, Initialised(ax, build), archive, build}
     {
     }
 
@@ -67,10 +71,16 @@ struct Model
         engine.FrameProcess();
     }
 
-    // The PB of the AX voice with `index`, as the microcode will read it.
+    // The PB that the microcode reads for the AX voice with `index`.
     ax::Pb Pb(uint32_t index) const
     {
-        return ax::LoadPb(memory.At(ax::layout::kPbs + index * 0x140, ax::kPbSize));
+        return ax.ReadPb(index);
+    }
+
+    // The PB of the first voice that AX hands out: the last of its voices.
+    ax::Pb FirstPb() const
+    {
+        return ax.ReadPb(ax.VoiceCount() - 1);
     }
 
     MainMemory memory;
@@ -314,7 +324,7 @@ struct Started
         }
 
         model.ax.StartFrame();
-        const ax::Pb next = model.Pb(95);
+        const ax::Pb next = model.FirstPb();
         model.ax.FinishFrame();
         model.engine.FrameProcess();
 
@@ -377,7 +387,7 @@ void TestTempo()
     Check(older_frames < 10, "a 2007 build plays a tempo of -1 at full speed (" + std::to_string(older_frames) + ")");
     Check(newer_frames == 300 && newer.model.engine.Channels().ActiveCount() == 1,
           "a 2008 build stops at a tempo of 0");
-    Check(newer.player->WaitsForEver() && newer.player->WaitsForNotes(), "a sequence at a tempo of 0 waits for ever");
+    Check(newer.player->IsStuck() && newer.player->IsSettled(), "a sequence at a tempo of 0 waits for ever");
 }
 
 void TestVelocityRange()
@@ -478,7 +488,7 @@ int LoopsOf(const test::Bytes& commands)
     Model model(commands, {}, 3);
     nw4r::SeqPlayer* player = model.engine.StartSequence(0);
     int loops = 0;
-    player->on_loop = [&loops]
+    player->on_loop = [&loops](int, uint32_t)
     {
         loops++;
     };
@@ -493,22 +503,31 @@ int LoopsOf(const test::Bytes& commands)
 
 void TestLoops()
 {
-    // A wait of 12 ticks (125 ms) repeated forever on track 0: by an endless loop, by a jump back, and by a jump back
-    // inside a subroutine. A subroutine that draws a random value until it differs from the last jumps back that way.
-    const int endless = LoopsOf({0xd4, 0x00, 0x80, 0x0c, 0xfc, 0xff});
-    const int jump = LoopsOf({0x80, 0x0c, 0x89, 0x00, 0x00, 0x00});
-    const int in_call = LoopsOf({0x8a, 0x00, 0x00, 0x05, 0xff, 0x80, 0x0c, 0x89, 0x00, 0x00, 0x05});
+    // A note of 12 ticks (125 ms) repeated forever on track 0: by an endless loop, by a jump back, and by a jump back
+    // inside a subroutine. A subroutine that draws a random value until it differs from the last jumps back that way. A
+    // wait of 12 ticks repeated by a jump back changes nothing in the sound.
+    const int endless = LoopsOf({0xd4, 0x00, 0x3c, 0x64, 0x0c, 0xfc, 0xff});
+    const int jump = LoopsOf({0x3c, 0x64, 0x0c, 0x89, 0x00, 0x00, 0x00});
+    const int in_call = LoopsOf({0x8a, 0x00, 0x00, 0x05, 0xff, 0x3c, 0x64, 0x0c, 0x89, 0x00, 0x00, 0x05});
+    const int idle = LoopsOf({0x80, 0x0c, 0x89, 0x00, 0x00, 0x00});
 
     // Track 0 opens track 1 and ends. Track 1 repeats a note of 12 ticks, or a wait of 12 ticks, forever.
     const int noted = LoopsOf({0x88, 0x01, 0x00, 0x00, 0x06, 0xff, 0xd4, 0x00, 0x3c, 0x64, 0x0c, 0xfc});
     const int silent = LoopsOf({0x88, 0x01, 0x00, 0x00, 0x06, 0xff, 0xd4, 0x00, 0x80, 0x0c, 0xfc});
 
+    // Track 0 opens track 1, then waits a tick and jumps back forever. Track 1 repeats a note of 12 ticks forever.
+    const int polled =
+        LoopsOf({0x88, 0x01, 0x00, 0x00, 0x0b, 0x80, 0x01, 0x89, 0x00, 0x00, 0x05, 0xd4, 0x00, 0x3c, 0x64, 0x0c, 0xfc});
+
     Check(endless >= 8 && jump >= 8, "an endless loop and a jump back on track 0 are loops (" +
                                          std::to_string(endless) + ", " + std::to_string(jump) + ")");
     Check(in_call == 0, "a jump back inside a subroutine isn't a loop");
+    Check(idle == 0, "a loop of waits on track 0 isn't the sequence's");
     Check(noted >= 8,
           "once track 0 has ended, track 1's loops of notes are the sequence's (" + std::to_string(noted) + ")");
     Check(silent == 0, "a loop of waits on track 1 isn't the sequence's");
+    Check(polled >= 8 && polled <= 10,
+          "while track 0 waits a tick at a time, track 1's loops are the sequence's (" + std::to_string(polled) + ")");
 }
 
 void TestHeldNotes()
@@ -522,15 +541,16 @@ void TestHeldNotes()
     long_note.RunUntilEnd(10);
 
     // Track 0 plays a note of 10,000 ticks, or of 9,000, without waiting for it. The note decays at once to a full
-    // sustain. The track then calls a subroutine that waits 12 ticks and jumps back forever.
-    const int holding = LoopsOf({0xd1, 0x7f, 0xd2, 0x7f, 0xc7, 0x00, 0x3c, 0x64, 0xce, 0x10, 0x8a,
-                                 0x00, 0x00, 0x0f, 0xff, 0x80, 0x0c, 0x89, 0x00, 0x00, 0x0f});
-    const int not_held = LoopsOf({0xd1, 0x7f, 0xd2, 0x7f, 0xc7, 0x00, 0x3c, 0x64, 0xc6, 0x28, 0x8a,
-                                  0x00, 0x00, 0x0f, 0xff, 0x80, 0x0c, 0x89, 0x00, 0x00, 0x0f});
+    // sustain. The track then calls a subroutine. The subroutine bends the note up for 6 ticks and back for 6 ticks,
+    // then jumps back to its start.
+    const int holding = LoopsOf({0xd1, 0x7f, 0xd2, 0x7f, 0xc7, 0x00, 0x3c, 0x64, 0xce, 0x10, 0x8a, 0x00, 0x00, 0x0f,
+                                 0xff, 0xc4, 0x10, 0x80, 0x06, 0xc4, 0x00, 0x80, 0x06, 0x89, 0x00, 0x00, 0x0f});
+    const int not_held = LoopsOf({0xd1, 0x7f, 0xd2, 0x7f, 0xc7, 0x00, 0x3c, 0x64, 0xc6, 0x28, 0x8a, 0x00, 0x00, 0x0f,
+                                  0xff, 0xc4, 0x10, 0x80, 0x06, 0xc4, 0x00, 0x80, 0x06, 0x89, 0x00, 0x00, 0x0f});
 
-    Check(held.player->WaitsForEver() && held.player->WaitsForNotes(),
+    Check(held.player->IsStuck() && held.player->IsSettled(),
           "a track that waits out a held note won't read on before the game stops the sound");
-    Check(!long_note.player->WaitsForEver(), "a note of 9,000 ticks isn't a held one");
+    Check(!long_note.player->IsStuck(), "a note of 9,000 ticks isn't a held one");
     Check(holding >= 8, "a subroutine that loops for ever while the track holds a note is the sequence's loop (" +
                             std::to_string(holding) + ")");
     Check(not_held == 0, "one that loops while the track holds a note of 9,000 ticks isn't");
@@ -610,6 +630,151 @@ void TestWaveEndWithoutDsp()
     Check(frames <= 3, "the note's channel stops when its wave ends (after " + std::to_string(frames) + " frames)");
 }
 
+// The sound frame, counting from 1, in which the first note of `commands` starts under `build`, or 0 if none starts
+// within `frames`.
+int NoteFrame(const test::Bytes& commands, nw4r::SndBuild build, int frames)
+{
+    Model model(commands, build);
+    model.engine.StartSequence(0);
+    for (int frame = 1; frame <= frames; frame++)
+    {
+        model.RunFrame();
+        if (model.engine.Channels().ActiveCount() > 0)
+        {
+            return frame;
+        }
+    }
+
+    return 0;
+}
+
+void TestTicksOctober2006()
+{
+    // A wait of a tick, then a note. At a tempo of 120 a tick lasts 3.47 frames. A 2007 build plays the second tick in
+    // the frame it falls in, the fourth. The build of October 2006 counts 416ths of a tick, and takes the whole ticks
+    // out before it adds the frame's 120. It plays the second tick in the fifth frame.
+    const test::Bytes one_tick = {0x80, 0x01, 0x3c, 0x64, 0x30, 0xff};
+    Check(NoteFrame(one_tick, kBuild2007, 10) == 4, "a 2007 build plays the second tick in the fourth frame");
+    Check(NoteFrame(one_tick, kBuildOctober2006, 10) == 5, "the build of October 2006 plays it in the fifth");
+
+    // After a wait of 1,250 ticks, the note starts in frame 1 + ceil(1250 * 416 / 120). A 2007 build takes 48 ticks a
+    // beat, and reaches the note about six frames later.
+    const test::Bytes long_wait = {0x80, 0x89, 0x62, 0x3c, 0x64, 0x30, 0xff};
+    const int older = NoteFrame(long_wait, kBuild2007, 5000);
+    const int october = NoteFrame(long_wait, kBuildOctober2006, 5000);
+    Check(october == 4335, "the build of October 2006's ticks (note in frame " + std::to_string(october) + ")");
+    Check(older >= 4339 && older <= 4343, "a 2007 build's ticks (note in frame " + std::to_string(older) + ")");
+}
+
+void TestPanOctober2006()
+{
+    // A pan of 1. The build of October 2006 raises it to 2, a step in from the left. The right side then gets a little.
+    // A 2007 build plays it at the far left.
+    const test::Bytes commands = {0xc0, 0x01, 0x3c, 0x64, 0x30, 0xff};
+    const Started older(commands, kBuild2007);
+    const Started october(commands, kBuildOctober2006);
+    Check(older.pb.mix.l != 0 && older.pb.mix.r == 0, "a 2007 build plays a pan of 1 at the far left");
+    Check(october.pb.mix.r != 0 && october.pb.mix.l > october.pb.mix.r,
+          "the build of October 2006 plays a pan of 1 a step in");
+}
+
+// The frames from the start of `commands` under `build` until its notes have all stopped, at most `frames`.
+int FramesUntilSilent(const test::Bytes& commands, nw4r::SndBuild build, int frames)
+{
+    Started started(commands, build);
+    int ran = 1;
+    while (started.model.engine.Channels().ActiveCount() > 0 && ran < frames)
+    {
+        started.model.RunFrame();
+        ran++;
+    }
+
+    return ran;
+}
+
+void TestReleaseStopOctober2006()
+{
+    // A track at volume 0 plays a note of 4 ticks with a slow release, and waits on without it. The build of October
+    // 2006 stops a released note once its volume times its envelope is 0, here at once. A 2007 build waits for the
+    // envelope of a note that a track owns.
+    const test::Bytes commands = {0xc7, 0x00, 0xc1, 0x00, 0xd3, 0x64, 0x3c, 0x64, 0x04, 0x80, 0x88, 0x00, 0xff};
+    const int older = FramesUntilSilent(commands, kBuild2007, 2000);
+    const int october = FramesUntilSilent(commands, kBuildOctober2006, 2000);
+    Check(october < 30,
+          "the build of October 2006 stops a silent note on release (" + std::to_string(october) + " frames)");
+    Check(older > 600, "a 2007 build plays out the release (" + std::to_string(older) + " frames)");
+}
+
+// The first voice's envelope as the microcode reads it in each of `frames` frames of `commands` under `build`.
+std::vector<ax::PbVe> RampOf(const test::Bytes& commands, nw4r::SndBuild build, int frames)
+{
+    Started started(commands, build);
+    std::vector<ax::PbVe> ramp = {started.pb.ve};
+    for (int i = 1; i < frames; i++)
+    {
+        ramp.push_back(started.PbAfter(0).ve);
+    }
+
+    return ramp;
+}
+
+// Whether each frame after a ramp starts where the ramp ended.
+bool StartsWhereRampsEnd(const std::vector<ax::PbVe>& ramp)
+{
+    for (std::size_t i = 1; i < ramp.size(); i++)
+    {
+        const auto delta = static_cast<int16_t>(ramp[i - 1].current_delta);
+        const auto end = static_cast<uint16_t>(ramp[i - 1].current_volume + delta * ax::kSamplesPerFrame);
+        if (delta != 0 && ramp[i].current_volume != end)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void TestRampOctober2006()
+{
+    // A note's decay to the sustain level 64. A 2007 build starts each frame's ramp where the last one ended. The build
+    // of October 2006 starts it at the volume that the last one aimed for. Both settle at the sustain level.
+    const test::Bytes commands = {0xd1, 0x78, 0xd2, 0x40, 0x3c, 0x7f, 0x60, 0xff};
+    const std::vector<ax::PbVe> older = RampOf(commands, kBuild2007, 40);
+    const std::vector<ax::PbVe> october = RampOf(commands, kBuildOctober2006, 40);
+    Check(StartsWhereRampsEnd(older), "a 2007 build starts each ramp where the last one ended");
+    Check(!StartsWhereRampsEnd(october), "the build of October 2006 starts each ramp at the last one's target");
+    Check(older.back().current_delta == 0 && october.back().current_delta == 0, "both settle at the sustain level");
+
+    // Nothing ends the build of October 2006's ramps after AX's frame. The volume stays where the decay took it.
+    Check(older.back().current_volume < older.front().current_volume &&
+              october.back().current_volume < october.front().current_volume,
+          "both settle below the note's first volume");
+}
+
+// Whether the first voice's mix ever ramps within 80 frames of `commands` under `build`.
+bool MixRamps(const test::Bytes& commands, nw4r::SndBuild build)
+{
+    Started started(commands, build);
+    for (int i = 0; i < 80; i++)
+    {
+        if (started.PbAfter(0).MixerCtrl() & ax::mixer::kDelta)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void TestMixOctober2006()
+{
+    // A pan to the far left while the note plays. A 2007 build ramps the mix there over a frame. The build of October
+    // 2006 sets the new mix at once.
+    const test::Bytes commands = {0xc7, 0x00, 0x3c, 0x64, 0x30, 0x80, 0x0c, 0xc0, 0x00, 0x80, 0x0c, 0xff};
+    Check(MixRamps(commands, kBuild2007), "a 2007 build ramps the mix");
+    Check(!MixRamps(commands, kBuildOctober2006), "the build of October 2006 sets the mix at once");
+}
+
 } // namespace
 
 int main()
@@ -633,6 +798,11 @@ int main()
         TestHeldNotes();
         TestSnapshot();
         TestWaveEndWithoutDsp();
+        TestTicksOctober2006();
+        TestPanOctober2006();
+        TestReleaseStopOctober2006();
+        TestRampOctober2006();
+        TestMixOctober2006();
     }
     catch (const std::exception& e)
     {

@@ -79,8 +79,8 @@ void Envelope::Update(int msec)
                 break;
             }
         }
-
         break;
+
     case Status::kHold:
         if (msec < hold_left_)
         {
@@ -109,6 +109,7 @@ void Envelope::Update(int msec)
 
     case Status::kSustain:
         break;
+
     case Status::kRelease:
         value_ -= release_ * static_cast<float>(msec);
         break;

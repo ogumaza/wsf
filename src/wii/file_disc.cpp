@@ -46,6 +46,7 @@ public:
         {
             Entry(false, file_name, static_cast<uint32_t>(offsets_[file] / 4), static_cast<uint32_t>(sizes_[file]));
         }
+
         for (const auto& [directory_name, child] : directory.directories)
         {
             Write(child, directory_name, index);
@@ -142,6 +143,7 @@ bool FileDisc::Read(uint64_t offset, void* out, std::size_t size)
     }
 
     std::memset(bytes, 0, size);
+
     const auto copy = [&](uint64_t start, std::span<const uint8_t> data)
     {
         const uint64_t from = std::max(offset, start);

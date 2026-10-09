@@ -11,14 +11,11 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <map>
-#include <memory>
 #include <set>
-#include <span>
 #include <string>
-#include <vector>
 
 #include "common/common_types.h"
 #include "dsp/dsp.h"
@@ -31,7 +28,7 @@
 namespace wsf::wii
 {
 
-// The game partition's data, as the disc drive reads it.
+// The game partition's data in the form that the disc drive reads.
 class Disc
 {
 public:
@@ -94,21 +91,11 @@ public:
 
     explicit System(Disc& disc);
 
-    // Loads main.dol's sections, with its BSS cleared, and returns its entry point. Throws std::runtime_error for a DOL
-    // that can't be loaded.
-    uint32_t LoadDol(std::span<const uint8_t> dol);
-
     // Puts the system, with the game's code in memory, in the state in which the system menu's loader starts the game
     // at `entry`. That covers the OS globals, the disc's file system table and the CPU's registers. `ios_version` is
     // the IOS that the game runs on (21 for IOS21). Throws std::runtime_error if the disc's header or file system table
     // can't be read.
     void Start(uint32_t entry, uint32_t ios_version);
-
-    // LoadDol, then Start on IOS `ios_version`.
-    void Boot(std::span<const uint8_t> dol, uint32_t ios_version = 21)
-    {
-        Start(LoadDol(dol), ios_version);
-    }
 
     // Runs for `cycles` CPU cycles, or until the CPU stops. Returns why it stopped.
     ppc::StopReason Run(uint64_t cycles);
@@ -135,11 +122,6 @@ public:
     DspInterface& DspRegisters()
     {
         return dsp_interface_;
-    }
-
-    Ios& IosModel()
-    {
-        return ios_;
     }
 
     // Called with a line of text the first time each unmodelled hardware register is accessed. Useful when bringing up

@@ -2,6 +2,7 @@
 
 #include "ax/microcode.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -69,6 +70,24 @@ std::optional<Microcode> FindMicrocode(std::span<const uint8_t> file)
     }
 
     return std::nullopt;
+}
+
+Build IdentifyBuild(const Microcode& microcode)
+{
+    // The microcode reads each voice's PB by DMA. It sets the DMA's length with SI @DSBL, #length (0x16CB, then the
+    // length in bytes).
+    bool reads_0x120 = false;
+    bool reads_0x140 = false;
+    for (std::size_t i = 0; i + 1 < microcode.words.size(); i++)
+    {
+        if (microcode.words[i] == 0x16cb)
+        {
+            reads_0x120 |= microcode.words[i + 1] == kPbSizeOctober2006;
+            reads_0x140 |= microcode.words[i + 1] == kPbSize;
+        }
+    }
+
+    return reads_0x120 && !reads_0x140 ? Build::kOctober2006 : Build::kDecember2006;
 }
 
 } // namespace wsf::ax

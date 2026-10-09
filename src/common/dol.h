@@ -36,28 +36,9 @@ public:
         return entry_;
     }
 
-    uint32_t BssAddress() const
-    {
-        return bss_address_;
-    }
-
-    uint32_t BssSize() const
-    {
-        return bss_size_;
-    }
-
-    // Returns the `size` bytes loaded at `address` if one section holds them all.
-    std::optional<std::span<const uint8_t>> Read(uint32_t address, uint32_t size) const;
-
-    // Returns the load address of `byte` (a pointer into the DOL's file). Returns nothing if no section contains
-    // `byte`.
-    std::optional<uint32_t> AddressOf(const uint8_t* byte) const;
-
 private:
     std::vector<Section> sections_;
     uint32_t entry_ = 0;
-    uint32_t bss_address_ = 0;
-    uint32_t bss_size_ = 0;
 };
 
 } // namespace wsf

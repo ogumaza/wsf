@@ -115,20 +115,23 @@ void Exi::Write(uint32_t offset, uint32_t value)
             channel.status = (channel.status & csr::kFlags & ~value) | (value & ~csr::kFlags);
             break;
         }
+
     case 0x04:
         channel.dma_address = value & 0x03ffffe0;
         break;
+
     case 0x08:
         channel.dma_length = value & 0x03ffffe0;
         break;
+
     case 0x0c:
         channel.control = value;
         if (value & kStart)
         {
             Transfer(channel, static_cast<int>(index));
         }
-
         break;
+
     default:
         channel.data = value;
         break;
@@ -169,6 +172,7 @@ void Exi::Transfer(Channel& channel, int index)
         {
             DeviceTransfer(bytes, size, direction == 1);
         }
+
         if (direction != 1)
         {
             channel.data = LoadBe32(bytes);

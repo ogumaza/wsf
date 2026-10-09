@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for wsfrip, wsfplay, the foobar2000 component, Windows file properties and macOS bundles
 # (wsf_add_version below). For a release, update it here and add notes in docs/release-notes/.
-project(wsf VERSION 1.0.0 LANGUAGES C CXX)
+project(wsf VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,7 +23,7 @@ if (WIN32 AND NOT MSVC)
 endif()
 if (NOT MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(i.86|x86|x86_64|AMD64)$")
     message(FATAL_ERROR "WSF doesn't support 32-bit x86 builds with ${compiler_name}: their output would differ from "
-                        "other builds. Build for 64-bit instead, or on Windows use clang-cl or MSVC, which build "
+                        "other builds. Build for 64-bit instead, or use clang-cl or MSVC on Windows. They build "
                         "32-bit x86 with SSE2.")
 endif()
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -430,7 +430,7 @@ endforeach()
 set(FOOBAR2000_SDK_DIR "" CACHE PATH "foobar2000 SDK (builds the foo_input_wsf component when set)")
 if (FOOBAR2000_SDK_DIR)
     if (NOT MSVC AND NOT APPLE)
-        message(FATAL_ERROR "the foobar2000 component needs clang-cl or MSVC on Windows, or macOS")
+        message(FATAL_ERROR "the foobar2000 component requires clang-cl or MSVC on Windows, or macOS")
     endif()
     add_subdirectory(plugins/foobar2000)
 endif()

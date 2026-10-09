@@ -4,9 +4,9 @@
 // Seeks further ahead wait for the worker to reach the target. Seeking back before the buffered audio calls
 // Playback::Seek. Playback::Seek restores a snapshot.
 //
-// A track that fits within the buffer limit requires no snapshots. Once it has been rendered to the end, every seek is
-// instant. Rendering ahead does the same work as normal playback. It just does it sooner. It keeps one core busy until
-// it reaches the end of the track or the buffer limit. Buffered audio uses about 7.3 MiB per minute.
+// A track that fits within the buffer limit requires no snapshots. Once the track has been rendered to the end, every
+// seek is instant. Rendering ahead does the work of normal playback sooner. The worker keeps one core busy until it
+// reaches the end of the track or the buffer limit. Buffered audio uses about 7.3 MiB per minute.
 //
 // The foobar2000 component reads the buffer on its decoding thread.
 
@@ -124,7 +124,7 @@ private:
 
     mutable std::mutex mutex_;
     std::condition_variable rendered_; // the worker has rendered, reached the end, failed, moved or stopped
-    std::condition_variable wanted_;   // the reader has read, sought or asked the worker to stop
+    std::condition_variable wanted_;   // the reader has read, sought or requested a stop
 
     // Guarded by mutex_.
     std::deque<std::vector<int16_t>> blocks_; // frames [start_, end_), block_ in each but the last

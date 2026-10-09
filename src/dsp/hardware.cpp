@@ -7,6 +7,7 @@
 #include <cstdint>
 
 #include "common/bytes.h"
+#include "common/common_types.h"
 #include "dsp/coef_rom.h"
 #include "dsp/dsp.h"
 #include "dsp/internal.h"
@@ -128,6 +129,7 @@ uint16_t Dsp::ReadHardware(uint8_t reg)
 void Dsp::WriteHardware(uint8_t reg, uint16_t value)
 {
     Accelerator& a = accelerator_;
+
     const auto high = [value](uint32_t old, uint32_t mask)
     {
         return ((uint32_t{value} << 16) | (old & 0xffff)) & mask;
@@ -144,65 +146,83 @@ void Dsp::WriteHardware(uint8_t reg, uint16_t value)
         hardware_[kDsbl] = value;
         Dma();
         break;
+
     case kFormat:
         a.format = value;
         break;
+
     case kAcdraw:
         AcceleratorWrite(value);
         break;
+
     case kAcsah:
         a.start = high(a.start, 0x3fffffff);
         break;
+
     case kAcsal:
         a.start = low(a.start, 0x3fffffff);
         break;
+
     case kAceah:
         a.end = high(a.end, 0x3fffffff);
         break;
+
     case kAceal:
         a.end = low(a.end, 0x3fffffff);
         break;
+
     case kAccah:
         a.current = high(a.current, 0xbfffffff);
         break;
+
     case kAccal:
         a.current = low(a.current, 0xbfffffff);
         break;
+
     case kPredScale:
         a.pred_scale = value & 0x7f;
         break;
+
     case kYn1:
         a.yn1 = value;
         break;
+
     case kYn2:
         a.yn2 = value;
         a.reads_stopped = false;
         break;
+
     case kGain:
         a.gain = value;
         break;
+
     case kAcin:
         a.input = value;
         break;
+
     case kDirq:
         if (value & 1)
         {
             interrupt_request_ = true;
         }
-
         break;
+
     case kDmbh:
         MailboxWriteHigh(mailbox_to_cpu_, value);
         break;
+
     case kDmbl:
         MailboxWriteLow(mailbox_to_cpu_, value);
         break;
+
     case kCmbh:
         MailboxWriteHigh(mailbox_to_dsp_, value);
         break;
+
     case kCmbl:
         MailboxWriteLow(mailbox_to_dsp_, value);
         break;
+
     default:
         hardware_[reg] = value;
         break;
@@ -495,6 +515,7 @@ void Dsp::WriteControl(uint16_t value, uint64_t time_base)
         Reset();
         value &= ~control::kReset;
     }
+
     if ((control_ & control::kInit) && !(value & control::kInit))
     {
         InitPath();

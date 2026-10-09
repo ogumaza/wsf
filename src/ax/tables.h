@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-// AX's compressor table (__AXCompressorTable), as linked into Wii Sports' main.dol. It holds the gains that the
-// microcode's output compressor steps through.
+// AX's compressor table (__AXCompressorTable) from Wii Sports' main.dol. It holds the gains that the microcode's output
+// compressor steps through.
 
 #pragma once
 

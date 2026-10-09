@@ -2,6 +2,7 @@
 
 // Unit tests for snapshots (save states): memory images (src/common/memory_image.h).
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>

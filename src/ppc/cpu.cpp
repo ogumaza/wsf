@@ -6,9 +6,7 @@
 #include <bit>
 #include <cfenv>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
-#include <string>
 
 #include "common/bytes.h"
 
@@ -199,53 +197,6 @@ void Cpu::InvalidateTranslation()
     RebuildMap(true);
 }
 
-bool Cpu::ReadVirtual(uint32_t address, void* out, std::size_t size)
-{
-    auto* bytes = static_cast<uint8_t*>(out);
-    for (std::size_t i = 0; i < size; i++)
-    {
-        PAddr physical = 0;
-        uint8_t* page = nullptr;
-        if (!Translate(address + static_cast<uint32_t>(i), false, physical) ||
-            (page = bus_.RamPage(physical & ~kPageMask)) == nullptr)
-        {
-            return false;
-        }
-
-        bytes[i] = page[physical & kPageMask];
-    }
-
-    return true;
-}
-
-bool Cpu::WriteVirtual(uint32_t address, const void* data, std::size_t size)
-{
-    const auto* bytes = static_cast<const uint8_t*>(data);
-    for (std::size_t i = 0; i < size; i++)
-    {
-        PAddr physical = 0;
-        uint8_t* page = nullptr;
-        if (!Translate(address + static_cast<uint32_t>(i), false, physical) ||
-            (page = bus_.RamPage(physical & ~kPageMask)) == nullptr)
-        {
-            return false;
-        }
-
-        page[physical & kPageMask] = bytes[i];
-    }
-
-    return true;
-}
-
-std::string Cpu::Describe() const
-{
-    char text[160];
-    std::snprintf(text, sizeof(text), "pc %08x lr %08x msr %08x cr %08x r1 %08x r3 %08x r4 %08x r5 %08x", state_.pc,
-                  state_.lr, state_.msr, state_.cr, state_.gpr[1], state_.gpr[3], state_.gpr[4], state_.gpr[5]);
-
-    return text;
-}
-
 bool Cpu::Step(uint32_t op)
 {
     State& s = state_;
@@ -338,6 +289,7 @@ bool Cpu::Step(uint32_t op)
             {
                 s.lr = stop_pc_ + 4;
             }
+
             if (ctr_ok && cond_ok)
             {
                 const auto offset = static_cast<uint32_t>(static_cast<int16_t>(op & 0xfffc));
@@ -362,6 +314,7 @@ bool Cpu::Step(uint32_t op)
             {
                 offset |= 0xfc000000;
             }
+
             if (op & 1)
             {
                 s.lr = stop_pc_ + 4;
@@ -598,7 +551,7 @@ bool Cpu::Step(uint32_t op)
         return Op63(op);
 
     default:
-        return Illegal(op);
+        return Illegal();
     }
 }
 
@@ -638,6 +591,7 @@ bool Cpu::Op19(uint32_t op)
             {
                 s.lr = stop_pc_ + 4;
             }
+
             if (ctr_ok && cond_ok)
             {
                 s.pc = target;
@@ -687,7 +641,7 @@ bool Cpu::Op19(uint32_t op)
         return true;
 
     default:
-        return Illegal(op);
+        return Illegal();
     }
 }
 
@@ -710,6 +664,7 @@ bool Cpu::Op31(uint32_t op)
         {
             s.xer = (sum >> 32) ? s.xer | kXerCa : s.xer & ~kXerCa;
         }
+
         if (oe)
         {
             const bool overflow = ((x ^ result) & (y ^ result)) >> 31;
@@ -1223,14 +1178,13 @@ bool Cpu::Op31(uint32_t op)
         case 39:
             return PairedLoadStore(op);
         default:
-            return Illegal(op);
+            return Illegal();
         }
     }
 }
 
-bool Cpu::Illegal(uint32_t op)
+bool Cpu::Illegal()
 {
-    stop_opcode_ = op;
     stop_reason_ = StopReason::kIllegal;
     state_.pc = stop_pc_;
 
@@ -1303,25 +1257,32 @@ bool Cpu::MtSpr(int number, uint32_t value)
     case spr::kXer:
         s.xer = value;
         return true;
+
     case spr::kLr:
         s.lr = value;
         return true;
+
     case spr::kCtr:
         s.ctr = value;
         return true;
+
     case spr::kDec:
         SetDecrementer(value);
         return true;
+
     case spr::kTblWrite:
         tb_base_ = (TimeBase() & 0xffffffff00000000) | value;
         tb_cycle_ = cycles_;
         return true;
+
     case spr::kTbuWrite:
         tb_base_ = (TimeBase() & 0xffffffff) | (uint64_t{value} << 32);
         tb_cycle_ = cycles_;
         return true;
+
     case spr::kPvr:
         return true;
+
     default:
         break;
     }
@@ -1521,7 +1482,7 @@ uint32_t Cpu::ReadSlow(uint32_t address, int size)
     PAddr physical = 0;
     if (!Translate(address, false, physical))
     {
-        Fault(address, false);
+        Fault();
         return 0;
     }
 
@@ -1534,7 +1495,7 @@ uint32_t Cpu::ReadSlow(uint32_t address, int size)
     uint32_t value = 0;
     if (!bus_.ReadIo(physical, size, value))
     {
-        Fault(address, false);
+        Fault();
         return 0;
     }
 
@@ -1556,7 +1517,7 @@ void Cpu::WriteSlow(uint32_t address, int size, uint32_t value)
     PAddr physical = 0;
     if (!Translate(address, false, physical))
     {
-        Fault(address, true);
+        Fault();
         return;
     }
 
@@ -1581,7 +1542,7 @@ void Cpu::WriteSlow(uint32_t address, int size, uint32_t value)
 
     if (!bus_.WriteIo(physical, size, value))
     {
-        Fault(address, true);
+        Fault();
     }
 }
 
@@ -1601,23 +1562,20 @@ bool Cpu::Fetch(uint32_t address, uint32_t& op)
     if (!Translate(address, true, physical) || (page = bus_.RamPage(physical & ~kPageMask)) == nullptr)
     {
         stop_pc_ = address;
-        fault_address_ = address;
-        fault_write_ = false;
         stop_reason_ = StopReason::kFault;
         stopped_ = true;
         return false;
     }
 
     op = LoadBe32(page + (physical & kPageMask));
+
     return true;
 }
 
-void Cpu::Fault(uint32_t address, bool write)
+void Cpu::Fault()
 {
     if (!stopped_)
     {
-        fault_address_ = address;
-        fault_write_ = write;
         stop_reason_ = StopReason::kFault;
         stopped_ = true;
         state_.pc = stop_pc_;

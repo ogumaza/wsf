@@ -4,6 +4,7 @@
 
 #include "wsf/archive_player.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>

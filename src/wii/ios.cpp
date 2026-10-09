@@ -3,6 +3,7 @@
 #include "wii/ios.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -10,6 +11,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "common/bytes.h"
@@ -56,8 +58,8 @@ constexpr int32_t kFsExists = -105;
 constexpr uint64_t kDiscHeaderSize = 0x440;
 constexpr uint64_t kDiscSize = 0x118240000;
 
-// The drive's errors, as RequestError gives them: the drive's state (0, ready) in the top byte, then the sense key and
-// the additional sense code.
+// The drive's errors in the form that RequestError gives: the drive's state (0, ready) in the top byte, then the sense
+// key and the additional sense code.
 constexpr uint32_t kDriveInvalidCommand = 0x052000;
 constexpr uint32_t kDriveOutOfRange = 0x052100;
 
@@ -268,6 +270,7 @@ public:
         {
         case 0x03: // CreateDir
             return true;
+
         case 0x06: // GetAttr
             {
                 const std::string path = path_at(0);
@@ -278,9 +281,11 @@ public:
 
                 return true;
             }
+
         case 0x07: // Delete
             ios_.nand_files_.erase(path_at(0));
             return true;
+
         case 0x09: // CreateFile
             {
                 const std::string path = path_at(6);
@@ -295,6 +300,7 @@ public:
 
                 return true;
             }
+
         default:
             return Device::Ioctl(number, in, out, result);
         }
@@ -409,6 +415,7 @@ public:
             }
 
             return true;
+
         case 0x70: // ReadDiskID: the header's first 32 bytes
             if (!ios_.disc_.Read(0, out.data(), std::min<std::size_t>(out.size(), 0x20)))
             {
@@ -416,6 +423,7 @@ public:
             }
 
             return true;
+
         case 0x71: // Read: length, then the partition offset >> 2
             {
                 const uint32_t length = in.size() >= 8 ? LoadBe32(&in[4]) : 0;
@@ -429,6 +437,7 @@ public:
 
                 return true;
             }
+
         case 0x8d: // UnencryptedRead: length, then the disc offset >> 2, outside the partition
             {
                 // The disc's header is the partition's header. The rest of the disc outside the partition reads as
@@ -464,6 +473,7 @@ public:
 
                 return true;
             }
+
         case 0x88: // GetCoverStatus: closed, with a disc
             if (out.size() >= 4)
             {
@@ -471,11 +481,13 @@ public:
             }
 
             return true;
+
         case 0xa4: // ReportKey: a Wii's drive rejects it
             error_ = kDriveInvalidCommand;
             result = 2;
 
             return true;
+
         case 0xe0: // RequestError: the last request's error, if it was rejected
             if (out.size() >= 4)
             {
@@ -485,11 +497,13 @@ public:
             error_ = 0;
 
             return true;
+
         case 0x86: // ClearCoverInterrupt
         case 0x8a: // Reset
         case 0x8e: // EnableDvdVideo
         case 0xe3: // StopMotor
             return true;
+
         default:
             return Device::Ioctl(number, in, out, result);
         }
@@ -583,6 +597,7 @@ void Ios::Write(uint32_t offset, uint32_t value)
     case 0x00:
         ppc_message_ = value;
         break;
+
     case 0x04:
         {
             // Writing 1 to Y1 or Y2 clears it. X2 releases the reply. X1 sends the request in PPCMSG.
@@ -591,6 +606,7 @@ void Ios::Write(uint32_t offset, uint32_t value)
             {
                 reply_out_ = false;
             }
+
             if (value & kX1)
             {
                 int32_t result = 0;
@@ -606,12 +622,15 @@ void Ios::Write(uint32_t offset, uint32_t value)
             cpu_.LimitRun(NextEvent());
             break;
         }
+
     case 0x30:
         irq_flags_ &= ~value;
         break;
+
     case 0x34:
         irq_mask_ = value;
         break;
+
     default:
         break;
     }
@@ -642,7 +661,7 @@ void Ios::Advance(uint64_t now)
         SetIrq();
     }
 
-    // The next reply, once the PPC has taken the last one.
+    // The next reply. It goes out once the PPC has taken the last one.
     if (!replies_.empty() && !reply_out_ && !(ppc_control_ & kY1) && now >= replies_.front().due)
     {
         const Request reply = replies_.front();
@@ -683,6 +702,7 @@ bool Ios::Execute(PAddr address, int32_t& result, uint64_t& delay)
 
     const uint32_t command = LoadBe32(&request[0]);
     const auto fd = static_cast<int32_t>(LoadBe32(&request[8]));
+
     const auto arg = [request](int i)
     {
         return LoadBe32(&request[0x0c + i * 4]);
@@ -710,7 +730,7 @@ bool Ios::Execute(PAddr address, int32_t& result, uint64_t& delay)
     const auto it = descriptors_.find(fd);
     if (it == descriptors_.end())
     {
-        Unknown("a request for descriptor " + std::to_string(fd) + ", which isn't open");
+        Unknown("a request for descriptor " + std::to_string(fd) + ". That descriptor isn't open");
         result = kInvalid;
 
         return true;
@@ -723,14 +743,19 @@ bool Ios::Execute(PAddr address, int32_t& result, uint64_t& delay)
         descriptors_.erase(it);
         result = 0;
         return true;
+
     case kRead:
         return device.Read(Buffer(memory_, arg(0), arg(1)), result);
+
     case kWrite:
         return device.Write(Buffer(memory_, arg(0), arg(1)), result);
+
     case kSeek:
         return device.Seek(static_cast<int32_t>(arg(0)), static_cast<int32_t>(arg(1)), result);
+
     case kIoctl:
         return device.Ioctl(arg(0), Buffer(memory_, arg(1), arg(2)), Buffer(memory_, arg(3), arg(4)), result);
+
     case kIoctlv:
         {
             // The vectors: the inputs, then the buffers that IOS writes.
@@ -746,6 +771,7 @@ bool Ios::Execute(PAddr address, int32_t& result, uint64_t& delay)
 
             return device.Ioctlv(arg(0), in, io, result);
         }
+
     default:
         Unknown("command " + std::to_string(command));
         result = kInvalid;

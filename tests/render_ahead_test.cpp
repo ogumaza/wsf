@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 
-// Tests rendering ahead (src/wsf/render_ahead.h) with a test source that generates samples from a formula. Reads
-// must return the correct samples, seeks within the buffer must not move the source, and the buffer must stay within
-// its memory limit. Errors must reach the reader after any preceding audio. Reads and the worker must stop when asked.
-// A random test covers combinations of reads and seeks across many tracks.
+// Tests rendering ahead (src/wsf/render_ahead.h) with a test source that generates samples from a formula. Reads must
+// return the correct samples, seeks within the buffer must not move the source, and the buffer must stay within its
+// memory limit. Errors must reach the reader after any preceding audio. Reads and the worker must stop on request. A
+// random test covers combinations of reads and seeks across many tracks.
 //
 // usage: render_ahead_test [rounds of the random test]
 
@@ -186,7 +186,7 @@ std::unique_ptr<RenderAhead> Make(const Settings& settings, Counts& counts, uint
     return std::make_unique<RenderAhead>(std::make_unique<FakeSource>(settings, counts), keep);
 }
 
-// Reads up to `frames` frames in chunks of at most `chunk`, checking samples against the track starting at `from`.
+// Reads up to `frames` frames in chunks of at most `chunk`. Checks the samples against the track from `from` on.
 // Returns the number read. It may be fewer at the end of the track or after an error.
 uint64_t ReadAndCheck(RenderAhead& ahead, uint64_t from, uint64_t frames, std::size_t chunk, const std::string& what)
 {
@@ -292,7 +292,7 @@ void TestKeepLimit()
     WSF_CHECK(kept.start > 0 && kept.start <= 200000);
     WSF_CHECK(kept.end - kept.start <= kKeep + kKeep / 8 + 1 + 1024);
 
-    // Seeking to the start of the buffer needs no source seek.
+    // Seeking to the start of the buffer requires no seek of the source.
     ahead->Seek(kept.start);
     WSF_CHECK(ReadAndCheck(*ahead, kept.start, 2000, 1024, "seek to start of buffer") == 2000);
     WSF_CHECK(counts.seeks == 0);

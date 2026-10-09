@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <utility>
 
 #include "ax/pb.h"
 #include "ax/tables.h"
@@ -34,6 +35,12 @@ constexpr std::array<uint32_t, 32> kMixCycles = {2,    408,  408,  810,  1404, 1
                                                  2111, 2111, 707,  1115, 1115, 1517, 2111, 2111, 2111, 2111};
 constexpr std::array<uint32_t, 4> kRemoteMixCycles = {4, 86, 151, 151};
 
+// The same for the build of October 2006 (at 0x80530348 in Smooth Moves' main.dol). That build counts no cycles for the
+// Wii Remotes.
+constexpr std::array<uint32_t, 32> kMixCyclesOctober2006 = {
+    0, 760, 760, 1470, 0, 1265, 1265, 2470, 760,  1520, 1520, 2230, 760,  2025, 2025, 3230,
+    0, 760, 760, 1470, 0, 1265, 1265, 2470, 1265, 2025, 2025, 2735, 1265, 2530, 2530, 3735};
+
 // The commands in the microcode's command list.
 enum Command : uint16_t
 {
@@ -44,6 +51,17 @@ enum Command : uint16_t
     kCommandOutput = 11,
     kCommandWmOutput = 13,
     kCommandEnd = 14,
+};
+
+// The commands of the build of October 2006. Command 5, which takes no arguments, always follows PROCESS. The commands
+// after it are numbered one higher, and OUTPUT takes no master volume.
+enum CommandOctober2006 : uint16_t
+{
+    kCommandAfterProcessOctober2006 = 5,
+    kCommandCompressorOctober2006 = 11,
+    kCommandOutputOctober2006 = 12,
+    kCommandWmOutputOctober2006 = 14,
+    kCommandEndOctober2006 = 15,
 };
 
 // The compressor's threshold and release time, in frames.
@@ -90,11 +108,6 @@ uint16_t Lo(uint32_t value)
     return static_cast<uint16_t>(value);
 }
 
-PAddr PbAddress(uint32_t index)
-{
-    return layout::kPbs + index * static_cast<PAddr>(kPbSize);
-}
-
 // The DSP cycles for the voice's sample rate conversion (__AXGetSrcCycles, inlined in __AXSyncPBs).
 uint32_t SrcCycles(const Pb& pb)
 {
@@ -137,8 +150,10 @@ System::System(MainMemory& memory) : memory_(&memory)
 {
 }
 
-void System::Init()
+void System::Init(Build build)
 {
+    build_ = build;
+    voice_count_ = build == Build::kOctober2006 ? kVoiceCountOctober2006 : kVoiceCount;
     uint8_t* table = memory_->At(layout::kCompressorTable, layout::kCompressorTableSize);
     for (std::size_t i = 0; i < tables::kCompressor.size(); i++)
     {
@@ -150,12 +165,20 @@ void System::Init()
     stack_tail_.fill(nullptr);
     callback_stack_ = nullptr;
 
-    // __AXVPBInitCommon (0x801070ec): frees every voice and links every PB to the next one in the microcode's list.
+    // __AXVPBInitCommon (0x801070ec): frees every voice and links every PB to the next one in the microcode's list. The
+    // build of October 2006 (__AXVPBInit, 0x80030de4) also gives each PB the address of a buffer for its updates.
     max_dsp_cycles_ = kBusClock / 667;
     recorded_dsp_cycles_ = 0;
-    std::memset(memory_->At(layout::kItdBuffers, kVoiceCount * layout::kItdBufferSize), 0,
-                kVoiceCount * layout::kItdBufferSize);
-    for (uint32_t i = 0; i < kVoiceCount; i++)
+    std::memset(memory_->At(layout::kItdBuffers, voice_count_ * layout::kItdBufferSize), 0,
+                voice_count_ * layout::kItdBufferSize);
+    if (build_ == Build::kOctober2006)
+    {
+        std::memset(memory_->At(layout::kPbs, voice_count_ * kPbSizeOctober2006), 0, voice_count_ * kPbSizeOctober2006);
+        std::memset(memory_->At(layout::kUpdateBuffers, voice_count_ * layout::kUpdateBufferSize), 0,
+                    voice_count_ * layout::kUpdateBufferSize);
+    }
+
+    for (uint32_t i = 0; i < voice_count_; i++)
     {
         Voice& voice = voices_[i];
         Pb& dsp = dsp_pbs_[i];
@@ -165,7 +188,7 @@ void System::Init()
         voice.itd_buffer = layout::kItdBuffers + i * layout::kItdBufferSize;
         SetPbDefault(&voice);
 
-        const uint32_t next = i == kVoiceCount - 1 ? 0 : ToCached(PbAddress(i + 1));
+        const uint32_t next = i == voice_count_ - 1 ? 0 : ToCached(PbAddress(i + 1));
         const uint32_t curr = ToCached(PbAddress(i));
         const uint32_t itd = ToCached(voice.itd_buffer);
         voice.pb.next_hi = dsp.next_hi = Hi(next);
@@ -176,7 +199,15 @@ void System::Init()
         voice.pb.itd.buffer_lo = dsp.itd.buffer_lo = Lo(itd);
         voice.priority = kPriorityMin;
         PushFreeStack(&voice);
-        StorePb(dsp, memory_->At(PbAddress(i), kPbSize));
+        WritePb(i, dsp);
+        if (build_ == Build::kOctober2006)
+        {
+            // The update block's three counters stay 0. Its last two words give the buffer's address.
+            const uint32_t updates = ToCached(layout::kUpdateBuffers + i * layout::kUpdateBufferSize);
+            uint8_t* block = memory_->At(PbAddress(i) + kUpdateBlockOctober2006, 10);
+            StoreBe16(block + 6, Hi(updates));
+            StoreBe16(block + 8, Lo(updates));
+        }
     }
 
     // __AXSPBInit (0x80106648) and __AXClInit (0x80105b6c).
@@ -203,6 +234,28 @@ void System::Init()
     NextFrame(layout::kSurroundBuffer, layout::kOutputBuffers + layout::kOutputBufferSize, remote);
 }
 
+Pb System::ReadPb(uint32_t index) const
+{
+    if (build_ == Build::kOctober2006)
+    {
+        return LoadPbOctober2006(memory_->At(PbAddress(index), kPbSizeOctober2006));
+    }
+
+    return LoadPb(memory_->At(PbAddress(index), kPbSize));
+}
+
+void System::WritePb(uint32_t index, const Pb& pb)
+{
+    if (build_ == Build::kOctober2006)
+    {
+        StorePbOctober2006(pb, memory_->At(PbAddress(index), kPbSizeOctober2006));
+
+        return;
+    }
+
+    StorePb(pb, memory_->At(PbAddress(index), kPbSize));
+}
+
 Voice* System::AcquireVoice(uint32_t priority, Voice::Callback callback)
 {
     // With no free voice, steal the oldest voice of the lowest priority below this one. Call its owner's callback
@@ -219,6 +272,7 @@ Voice* System::AcquireVoice(uint32_t priority, Voice::Callback callback)
                 {
                     voice->depop = true;
                 }
+
                 if (voice->callback)
                 {
                     const Voice::Callback owner = voice->callback;
@@ -265,8 +319,10 @@ void System::SetMasterVolume(uint16_t volume)
 
 Frame System::StartFrame()
 {
-    // In its default mode, AX passes 24,400 cycles of headroom (__AXOutNewFrame, 0x80105c00).
-    SyncPbs(24400);
+    // In its default mode, AX passes 24,400 cycles of headroom (__AXOutNewFrame, 0x80105c00). The build of October 2006
+    // passes 0 when the DSP has finished the last frame by the audio interface's interrupt (0x8002fb70). Otherwise it
+    // passes the time it waited for the DSP. Here the DSP is always done in time.
+    SyncPbs(build_ == Build::kOctober2006 ? 0 : 24400);
     PrintStudio();
 
     const uint32_t list = CommandListAddress();
@@ -403,6 +459,13 @@ Voice* System::PopStackFromBottom(uint32_t priority)
     return voice;
 }
 
+PAddr System::PbAddress(uint32_t index) const
+{
+    const std::size_t size = build_ == Build::kOctober2006 ? kPbSizeOctober2006 : kPbSize;
+
+    return layout::kPbs + index * static_cast<PAddr>(size);
+}
+
 void System::SetPbDefault(Voice* voice)
 {
     // __AXSetPBDefault (0x8010707c): a stopped voice with no filters, no ITD and no Wii Remote output.
@@ -418,24 +481,27 @@ void System::SetPbDefault(Voice* voice)
 
 void System::SyncPbs(uint32_t base_cycles)
 {
-    // __AXSyncPBs (0x80106d64). Read back what the microcode wrote. Then go through the voices from the highest
-    // priority and add up the cycles that each running voice will take. A voice that would push the frame over the
-    // limit stops. ServiceCallbackStack calls its owner's callback later.
-    for (uint32_t i = 0; i < kVoiceCount; i++)
+    // __AXSyncPBs (0x80106d64; October 2006, 0x80030af0). Read back what the microcode wrote. Then go through the
+    // voices from the highest priority and add up the cycles that each running voice will take. A voice that would push
+    // the frame over the limit stops. ServiceCallbackStack calls its owner's callback later.
+    for (uint32_t i = 0; i < voice_count_; i++)
     {
-        dsp_pbs_[i] = LoadPb(memory_->At(PbAddress(i), kPbSize));
+        dsp_pbs_[i] = ReadPb(i);
     }
 
-    uint32_t cycles = 32 + command_list_cycles_ + kVoiceCount * 600 + base_cycles;
+    const bool october = build_ == Build::kOctober2006;
+    uint32_t cycles = october ? command_list_cycles_ + base_cycles + 43536
+                              : 32 + command_list_cycles_ + kVoiceCount * 600 + base_cycles;
     for (uint32_t priority = kPriorityMax; priority > kPriorityFree; priority--)
     {
         for (Voice* voice = stack_head_[priority]; voice != nullptr; voice = voice->next)
         {
-            const Pb& pb = voice->pb;
-            if (pb.itd.flag == 1)
+            // The build of October 2006 counts no cycles for the ITD.
+            if (!october && voice->pb.itd.flag == 1)
             {
                 cycles += 129;
             }
+
             if (voice->depop)
             {
                 DepopVoice(dsp_pbs_[voice->index]);
@@ -443,42 +509,7 @@ void System::SyncPbs(uint32_t base_cycles)
 
             if (voice->IsRunning())
             {
-                cycles += 387;
-                if (pb.lpf.on != 0)
-                {
-                    cycles += 309;
-                }
-                if (pb.biquad.on != 0)
-                {
-                    cycles += 1024;
-                }
-                if (pb.itd.flag == 1)
-                {
-                    cycles += 27;
-                }
-
-                const uint32_t ctrl = pb.MixerCtrl();
-                cycles += SrcCycles(pb);
-                cycles += kMixCycles[ctrl & 31] + kMixCycles[ctrl >> 16 & 31] + kMixCycles[ctrl >> 21 & 31] +
-                          kMixCycles[ctrl >> 26 & 31];
-                if (pb.remote == 1)
-                {
-                    cycles += 613;
-                    if (pb.rmt_iir.on == kLpfOn)
-                    {
-                        cycles += 118;
-                    }
-                    else if (pb.rmt_iir.on == kBiquadOn)
-                    {
-                        cycles += 834;
-                    }
-
-                    for (int shift = 0; shift < 16; shift += 2)
-                    {
-                        cycles += kRemoteMixCycles[pb.rmt_mixer_ctrl >> shift & 3];
-                    }
-                }
-
+                cycles += RunningCycles(voice->pb);
                 if (max_dsp_cycles_ > cycles)
                 {
                     ServiceVpb(voice);
@@ -500,7 +531,7 @@ void System::SyncPbs(uint32_t base_cycles)
 
     recorded_dsp_cycles_ = cycles;
 
-    // A free voice only stops. If it was running when it was freed, it also fades out.
+    // A free voice only stops. A voice that was running when it was freed also fades out.
     for (Voice* voice = stack_head_[kPriorityFree]; voice != nullptr; voice = voice->next)
     {
         if (voice->depop)
@@ -512,10 +543,73 @@ void System::SyncPbs(uint32_t base_cycles)
         dsp_pbs_[voice->index].state = static_cast<uint16_t>(VoiceState::kStop);
     }
 
-    for (uint32_t i = 0; i < kVoiceCount; i++)
+    for (uint32_t i = 0; i < voice_count_; i++)
     {
-        StorePb(dsp_pbs_[i], memory_->At(PbAddress(i), kPbSize));
+        WritePb(i, dsp_pbs_[i]);
     }
+}
+
+uint32_t System::RunningCycles(const Pb& pb) const
+{
+    const uint32_t ctrl = pb.MixerCtrl();
+    if (build_ == Build::kOctober2006)
+    {
+        // Both sample rate converters take the same cycles, and no conversion takes none. The low-pass filter and the
+        // second filter take 555 each. The model never turns the second filter on.
+        uint32_t cycles = kMixCyclesOctober2006[ctrl & 31] + kMixCyclesOctober2006[ctrl >> 16 & 31] +
+                          kMixCyclesOctober2006[ctrl >> 21 & 31] + kMixCyclesOctober2006[ctrl >> 26 & 31] + 140;
+        if (pb.src_select != 2)
+        {
+            const uint32_t ratio = Join(pb.src.ratio_hi, pb.src.ratio_lo);
+            cycles += ((ratio * 132 + 0x8000) / 65536 + 728) * 6;
+        }
+
+        if (pb.lpf.on != 0)
+        {
+            cycles += 555;
+        }
+
+        return cycles;
+    }
+
+    uint32_t cycles = 387;
+    if (pb.lpf.on != 0)
+    {
+        cycles += 309;
+    }
+
+    if (pb.biquad.on != 0)
+    {
+        cycles += 1024;
+    }
+
+    if (pb.itd.flag == 1)
+    {
+        cycles += 27;
+    }
+
+    cycles += SrcCycles(pb);
+    cycles +=
+        kMixCycles[ctrl & 31] + kMixCycles[ctrl >> 16 & 31] + kMixCycles[ctrl >> 21 & 31] + kMixCycles[ctrl >> 26 & 31];
+    if (pb.remote == 1)
+    {
+        cycles += 613;
+        if (pb.rmt_iir.on == kLpfOn)
+        {
+            cycles += 118;
+        }
+        else if (pb.rmt_iir.on == kBiquadOn)
+        {
+            cycles += 834;
+        }
+
+        for (int shift = 0; shift < 16; shift += 2)
+        {
+            cycles += kRemoteMixCycles[pb.rmt_mixer_ctrl >> shift & 3];
+        }
+    }
+
+    return cycles;
 }
 
 void System::ServiceVpb(Voice* voice)
@@ -546,11 +640,13 @@ void System::ServiceVpb(Voice* voice)
         dst.src_select = src.src_select;
         dst.coef_select = src.coef_select;
     }
+
     if (sync & sync::kMixerCtrl)
     {
         dst.mixer_ctrl_hi = src.mixer_ctrl_hi;
         dst.mixer_ctrl_lo = src.mixer_ctrl_lo;
     }
+
     if (sync & sync::kState)
     {
         dst.state = src.state;
@@ -559,10 +655,12 @@ void System::ServiceVpb(Voice* voice)
     {
         src.state = dst.state;
     }
+
     if (sync & sync::kType)
     {
         dst.type = src.type;
     }
+
     if (sync & sync::kMix)
     {
         dst.mix = src.mix;
@@ -600,16 +698,19 @@ void System::ServiceVpb(Voice* voice)
         {
             dst.addr.loop_flag = src.addr.loop_flag;
         }
+
         if (sync & sync::kLoopAddr)
         {
             dst.addr.loop_address_hi = src.addr.loop_address_hi;
             dst.addr.loop_address_lo = src.addr.loop_address_lo;
         }
+
         if (sync & sync::kEndAddr)
         {
             dst.addr.end_address_hi = src.addr.end_address_hi;
             dst.addr.end_address_lo = src.addr.end_address_lo;
         }
+
         if (sync & sync::kCurrAddr)
         {
             dst.addr.current_address_hi = src.addr.current_address_hi;
@@ -678,18 +779,22 @@ void System::ServiceVpb(Voice* voice)
     {
         dst.remote = src.remote;
     }
+
     if (sync & sync::kRmtMixerCtrl)
     {
         dst.rmt_mixer_ctrl = src.rmt_mixer_ctrl;
     }
+
     if (sync & sync::kRmtMix)
     {
         dst.rmt_mix = src.rmt_mix;
     }
+
     if (sync & sync::kRmtDpop)
     {
         dst.rmt_dpop = src.rmt_dpop;
     }
+
     if (sync & sync::kRmtSrc)
     {
         dst.rmt_src = src.rmt_src;
@@ -821,6 +926,13 @@ void System::NextFrame(PAddr surround, PAddr output, const std::array<PAddr, kRe
     // __AXNextFrame (0x801051ac) in stereo, with the compressor on and no aux callbacks. The cycle counts are AX's
     // estimates. SyncPbs uses them.
     list_output_[(command_list_write_ - layout::kCommandLists) / layout::kCommandListSize] = output;
+    if (build_ == Build::kOctober2006)
+    {
+        NextFrameOctober2006(surround, output, remote);
+
+        return;
+    }
+
     command_list_cycles_ = 7811;
 
     WriteCommand(kCommandSetup);
@@ -854,6 +966,45 @@ void System::NextFrame(PAddr surround, PAddr output, const std::array<PAddr, kRe
     command_list_cycles_ += 1172;
 
     WriteCommand(kCommandEnd);
+    command_list_cycles_ += 30;
+}
+
+void System::NextFrameOctober2006(PAddr surround, PAddr output, const std::array<PAddr, kRemoteCount>& remote)
+{
+    // __AXNextFrame of October 2006 (0x8002ef20). It writes the commands in the same order as the later builds.
+    command_list_cycles_ = 7811;
+
+    WriteCommand(kCommandSetup);
+    WriteCommand32(ToCached(layout::kStudio));
+    command_list_cycles_ += 4246;
+
+    WriteCommand(kCommandAddToLr);
+    WriteCommand32(ToCached(surround));
+    command_list_cycles_ += 733;
+
+    WriteCommand(kCommandProcess);
+    WriteCommand32(ToCached(layout::kPbs));
+    WriteCommand(kCommandAfterProcessOctober2006);
+
+    WriteCommand(kCommandCompressorOctober2006);
+    WriteCommand(kCompressorThreshold);
+    WriteCommand(kCompressorRelease);
+    WriteCommand32(ToCached(layout::kCompressorTable));
+    command_list_cycles_ += 1850;
+
+    WriteCommand(kCommandWmOutputOctober2006);
+    for (const PAddr buffer : remote)
+    {
+        WriteCommand32(ToCached(buffer));
+    }
+    command_list_cycles_ += 409;
+
+    WriteCommand(kCommandOutputOctober2006);
+    WriteCommand32(ToCached(surround));
+    WriteCommand32(ToCached(output));
+    command_list_cycles_ += 665;
+
+    WriteCommand(kCommandEndOctober2006);
     command_list_cycles_ += 30;
 }
 

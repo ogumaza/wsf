@@ -161,7 +161,7 @@ std::map<std::string, FstEntry> ParseFst(const std::vector<uint8_t>& fst)
     return files;
 }
 
-// The game partition of a Wii disc image, as the game reads it: decrypted and without the hashes.
+// The game partition of a Wii disc image in the form that the game reads: decrypted and without the hashes.
 class GamePartition
 {
 public:

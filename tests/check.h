@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-// The checks that the unit tests share. A failed check is reported and counted. The test carries on. One run then lists
+// The checks that the unit tests share. A failed check is reported and counted. The test continues. One run then lists
 // every failure.
 
 #pragma once

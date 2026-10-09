@@ -14,9 +14,7 @@
 #include <cfenv>
 #include <cmath>
 #include <cstdint>
-#include <limits>
 
-#include "common/bytes.h"
 #include "ppc/cpu.h"
 
 namespace wsf::ppc
@@ -78,8 +76,8 @@ double SingleToDouble(uint32_t bits)
     return std::bit_cast<double>(sign | uint64_t{exponent - 127 + 1023} << 52 | mantissa << 29);
 }
 
-// A double's bits as a single, as stfs stores them (the architecture's store conversion). There's no rounding. The
-// result keeps only the bits that a single can hold. Values below the single range are denormalised.
+// Converts a double to a single's bits the way stfs stores them (the architecture's store conversion). There's no
+// rounding. The result keeps only the bits that a single can hold. Values below the single range are denormalised.
 uint32_t DoubleToSingle(double value)
 {
     const uint64_t bits = std::bit_cast<uint64_t>(value);
@@ -368,7 +366,7 @@ bool Cpu::PairedLoadStore(uint32_t op)
     State& s = state_;
     if (!(s.spr[spr::kHid2] & kHid2Pse))
     {
-        return Illegal(op);
+        return Illegal();
     }
     if (!FpEnabled(op))
     {
@@ -512,7 +510,7 @@ bool Cpu::Op59(uint32_t op)
         result = NegatedFma(a, c, b);
         break;
     default:
-        return Illegal(op);
+        return Illegal();
     }
 
     result = RoundToSingle(result);
@@ -540,6 +538,7 @@ bool Cpu::Op63(uint32_t op)
     const double a = s.fpr[Fa(op)].ps0;
     const double b = s.fpr[Fb(op)].ps0;
     const double c = s.fpr[Fc(op)].ps0;
+
     const auto arithmetic = [&](double result)
     {
         rd.ps0 = result;
@@ -616,10 +615,13 @@ bool Cpu::Op63(uint32_t op)
 
     case 40: // fneg
         return move(Negate(b));
+
     case 72: // fmr
         return move(b);
+
     case 136: // fnabs
         return move(Negate(Abs(b)));
+
     case 264: // fabs
         return move(Abs(b));
 
@@ -690,7 +692,7 @@ bool Cpu::Op63(uint32_t op)
         }
 
     default:
-        return Illegal(op);
+        return Illegal();
     }
 }
 
@@ -699,7 +701,7 @@ bool Cpu::Op4(uint32_t op)
     State& s = state_;
     if (!(s.spr[spr::kHid2] & kHid2Pse))
     {
-        return Illegal(op);
+        return Illegal();
     }
 
     // The indexed paired-single loads and stores share the opcode.
@@ -723,6 +725,7 @@ bool Cpu::Op4(uint32_t op)
     const Fpr a = s.fpr[Fa(op)];
     const Fpr b = s.fpr[Fb(op)];
     const Fpr c = s.fpr[Fc(op)];
+
     const auto set = [&](double ps0, double ps1)
     {
         s.fpr[d].ps0 = RoundToSingle(ps0);
@@ -795,26 +798,36 @@ bool Cpu::Op4(uint32_t op)
     case 32: // ps_cmpo0
         FpCompare(d >> 2, a.ps0, b.ps0, (op >> 1 & 0x3ff) == 32);
         return true;
+
     case 64: // ps_cmpu1
     case 96: // ps_cmpo1
         FpCompare(d >> 2, a.ps1, b.ps1, (op >> 1 & 0x3ff) == 96);
         return true;
+
     case 40: // ps_neg
         return move(Negate(b.ps0), Negate(b.ps1));
+
     case 72: // ps_mr
         return move(b.ps0, b.ps1);
+
     case 136: // ps_nabs
         return move(Negate(Abs(b.ps0)), Negate(Abs(b.ps1)));
+
     case 264: // ps_abs
         return move(Abs(b.ps0), Abs(b.ps1));
+
     case 528: // ps_merge00
         return move(a.ps0, b.ps0);
+
     case 560: // ps_merge01
         return move(a.ps0, b.ps1);
+
     case 592: // ps_merge10
         return move(a.ps1, b.ps0);
+
     case 624: // ps_merge11
         return move(a.ps1, b.ps1);
+
     case 1014: // dcbz_l
         {
             const uint32_t address = ((Fa(op) == 0 ? 0 : s.gpr[Fa(op)]) + s.gpr[Fb(op)]) & ~31u;
@@ -825,8 +838,9 @@ bool Cpu::Op4(uint32_t op)
 
             return !stopped_;
         }
+
     default:
-        return Illegal(op);
+        return Illegal();
     }
 }
 

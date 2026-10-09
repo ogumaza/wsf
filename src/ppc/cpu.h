@@ -15,8 +15,6 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <memory>
-#include <string>
 #include <vector>
 
 #include "common/common_types.h"
@@ -24,7 +22,7 @@
 namespace wsf::ppc
 {
 
-// Physical memory and devices, as the CPU accesses them.
+// The physical memory and devices that the CPU accesses.
 class Bus
 {
 public:
@@ -95,8 +93,7 @@ constexpr int kL2cr = 1017;
 
 } // namespace spr
 
-// A floating-point register: two slots for paired singles, each a double. Ordinary floating-point instructions use
-// ps0.
+// A floating-point register: two slots for paired singles, each a double. Ordinary floating-point instructions use ps0.
 struct Fpr
 {
     double ps0 = 0.0;
@@ -121,7 +118,7 @@ struct State
 enum class StopReason
 {
     kBudget,  // the requested cycles have run
-    kFault,   // an access that no BAT translates, or that no RAM or device handles; see Cpu::fault_address_
+    kFault,   // an access that no BAT translates, or that no RAM or device handles
     kIllegal, // an instruction that the interpreter doesn't support, at stop_pc_
 };
 
@@ -187,19 +184,8 @@ public:
     // Rebuilds the address translation after a change to the BATs or HID4 that didn't come from mtspr.
     void InvalidateTranslation();
 
-    // Reads and writes through the CPU's address translation, for the high-level parts of the system. They return false
-    // at an address that no BAT or RAM covers.
-    bool ReadVirtual(uint32_t address, void* out, std::size_t size);
-    bool WriteVirtual(uint32_t address, const void* data, std::size_t size);
-
-    // A one-line summary of the registers, for diagnostics.
-    std::string Describe() const;
-
     State state_;
-    uint32_t stop_pc_ = 0;       // the instruction that stopped execution
-    uint32_t stop_opcode_ = 0;   // and its encoding, for kIllegal
-    uint32_t fault_address_ = 0; // the address of a kFault
-    bool fault_write_ = false;
+    uint32_t stop_pc_ = 0; // the instruction that stopped execution
 
 private:
     enum class Exception : uint32_t
@@ -220,7 +206,7 @@ private:
     bool Op4(uint32_t op);
     bool LoadStoreFloat(uint32_t op);
     bool PairedLoadStore(uint32_t op);
-    bool Illegal(uint32_t op);
+    bool Illegal();
 
     // Called at the backward branch of a three-instruction loop that polls a word in memory (and compares it in CR
     // field `cr_field`). Runs the loop's whole iterations up to the next interrupt check at once.
@@ -261,7 +247,7 @@ private:
     uint32_t ReadSlow(uint32_t address, int size);
     void WriteSlow(uint32_t address, int size, uint32_t value);
     bool Fetch(uint32_t address, uint32_t& op);
-    void Fault(uint32_t address, bool write);
+    void Fault();
 
     // Condition register helpers.
     void SetCr0(uint32_t result);
@@ -291,13 +277,13 @@ private:
     uint64_t end_ = 0;        // the cycle the current Run stops at
     uint64_t next_check_ = 0; // the next cycle at which to check for interrupts
     bool external_ = false;
-    bool stopped_ = false; // a Step asked Run to stop
+    bool stopped_ = false; // a Step requested that Run stop
     StopReason stop_reason_ = StopReason::kBudget;
     bool reservation_ = false; // lwarx's reservation
     uint32_t reservation_address_ = 0;
 
-    // The time base counts from tb_base_ at tb_cycle_. The decrementer counts down from dec_base_ at dec_cycle_. Its
-    // exception is pending from when it goes from 0 to -1 until the CPU takes it.
+    // The time base counts from tb_base_ at tb_cycle_. The decrementer counts down from dec_base_ at dec_cycle_. The
+    // decrementer's exception is pending from when the count goes from 0 to -1 until the CPU takes the exception.
     uint64_t tb_base_ = 0;
     uint64_t tb_cycle_ = 0;
     uint32_t dec_base_ = 0;

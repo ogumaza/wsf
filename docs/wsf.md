@@ -20,12 +20,13 @@ In game mode, a WSF player emulates the parts of a Wii that a game's code uses t
   interface's interrupts, the DSP interface, the audio interface, the external interface (the clock and console
   settings), the serial interface, and the IPC registers to the I/O processor;
 - a high-level model of IOS, the I/O processor's kernel, that handles the requests of the game's OS and sound code;
-- the DSP, at the instruction level, running the game's AX microcode.
+- the DSP at the instruction level to run the game's AX microcode.
 
 A rip boots the game's `main.dol` from its entry point. The OS initialises itself. The game's static constructors run.
 The game's `main` is patched to branch to a small **driver** stored in the rip. The driver sets up the game's sound
 library, loads one sound's data from the emulated disc and plays it. It then calls the sound library's per-frame update
-forever. The player produces the audio interface's output.
+forever. The player produces the audio interface's output. The driver doesn't run the game's setup of effects. A sound's
+sends to the auxiliary buses are lost. AX loses them the same way when no effect is registered on a bus.
 
 ## Files
 
@@ -172,8 +173,8 @@ An archive-mode player runs a model of the SDK's sound library on AX's microcode
   model starts the microcode in the state that the DSP's boot ROM leaves it in. It exchanges AX's mails with the
   microcode each frame.
 - **AX's CPU side**: 96 voices with AX's priorities, the copy of the voices' parameter blocks to main memory each frame
-  with AX's DSP-cycle budget, and AX's command lists. The model mixes in stereo with no auxiliary effects. A frame is 96
-  samples (3 ms at 32 kHz).
+  with AX's DSP-cycle budget, and AX's command lists. The model mixes in stereo with no auxiliary effects. A sound's
+  sends to the auxiliary buses are lost, as in game mode. A frame is 96 samples (3 ms at 32 kHz).
 - **`nw4r::snd`**: the sequence player (sequence commands, tracks, variables, random numbers), bank lookup, envelopes,
   LFO, sweep, portamento, pitch and volume and pan curves, the voices and their priorities. The random number generator
   (x = x × 0x19660D + 0x3C6EF35F, from 0x12345678) steps once a frame, after the channels' updates. The sound's first
@@ -204,6 +205,23 @@ Builds from June 2008 (Wii Music's build) on also differ in these ways:
   the library's presets: a low-pass, a high-pass and three band-passes. The model applies them. Any other type takes its
   coefficients from a function that the game registers. Archive mode plays such a type unfiltered.
 
+The model also follows an older pair of builds: AX of October 2006 and the build of `nw4r::snd` that comes with it.
+WarioWare: Smooth Moves links them. That build of `nw4r::snd` has no version banner. The archive descriptor gives a
+build of 0 for it. The model recognises the pair by the AX microcode in the set instead. That microcode reads parameter
+blocks of 0x120 bytes. The later microcodes read 0x140 bytes. Where the older builds differ from the base builds:
+
+- AX has 64 voices. AX's parameter blocks are 0x120 bytes long, with a block for updates within a frame and no biquad
+  filter. The command list uses other command numbers. AX also counts other DSP cycles for each voice.
+- A sequence counts time in 416ths of a tick. Each frame, the player first takes out the whole ticks that it has
+  counted. It adds the tempo next. Then it plays the ticks that it took out. The timebase plays no part. A tick lasts
+  416 / tempo frames.
+- Commands 0xc0, 0xd7 and 0xdc (pan, surround pan and starting pan) raise a value of 0 or 1 by one.
+- The pan always follows the square root curve. Each channel of a stereo wave pans from its side, whatever the archive's
+  pan mode.
+- A released note stops once its volume times its envelope reaches 0, whether or not a track owns it.
+- Each frame, a voice's envelope starts at the volume that the last frame aimed for. It steps towards the new target by
+  the difference over 96 samples. The step is rounded towards 0. The mix changes at once, with no ramp.
+
 Other versions of the library may differ in other ways. Their archive-mode rips may then differ from what the game
 plays. A game whose AX microcode rejects the command lists that the model makes can't be ripped in archive mode. When a
 game has a driver profile, game mode is preferred.
@@ -214,8 +232,8 @@ finished when the sequence has ended and no voice is sounding.
 
 ## Driver (game mode)
 
-Game-mode rips contain WSF's driver, `driver/driver.c`. The driver is loaded at 0x81700000. Its entry point is at the
-same address. Its parameter block is at **0x81700010**. The block's words are big-endian:
+Game-mode rips contain WSF's driver, `driver/driver.c`. The driver is loaded at 0x81700000, and its entry point is at
+the same address. The driver's parameter block is at **0x81700010**. The block's words are big-endian:
 
 ```
 0x00  u32  magic "WSFD"
@@ -244,8 +262,8 @@ loads the group (and the bank's group, if there is one) into a sound heap. Then 
 the sound. The sound therefore always starts the same number of frames after the sound system. The time the loading
 takes doesn't matter. In a 2008 build, the sound archive player can't be set up before the sound system. It doesn't
 actually use the system. For such a build, the driver sets the flag byte whose address is at 0xB8 until it starts the
-sound system. The driver then calls the sound archive player's update, sleeping for the period at 0x18 between calls. It
-sets the status to 2 when the sound's handle is free again.
+sound system. The driver then calls the sound archive player's update. Between calls, it sleeps for the period at 0x18.
+It sets the status to 2 when the sound's handle is free again.
 
 The descriptor's status address points at the status word (0x81700018). A player uses it at both ends of the sound:
 
@@ -283,6 +301,13 @@ SONG or FANFARE among the words of its name separated by underscores, and not SE
 their players more consistently than their music. The players therefore find music whose labels don't say what it is.
 Given both options, `wsfrip` rips the music whose labels match.
 
+The ripper lists and skips the sequences that make no sound. Some have a volume of 0 in the archive. The sound library
+multiplies everything that a sound plays by that volume. The game can't make them heard. The length analysis (see "Game
+mode") finds the others. Those are placeholders, sequences that only set variables for the game, muted copies of other
+sounds, and sequences that play only on paths that depend on what the game sets or on random numbers. A rip always takes
+one path. On that path they make no sound. `--no-length` leaves out the analysis. Then only the sequences at a volume of
+0 are skipped.
+
 ### Game mode
 
 The `.wsflib` contains:
@@ -302,23 +327,38 @@ stops it gives its notes such lengths. The game then stops the sound first.
 
 A sequence loops when its main track jumps back to a command it has already played, or reaches the end of a loop that
 repeats forever. A jump back inside a subroutine doesn't count. The exception is a subroutine that the track can't leave
-while it holds a held note on a looping wave at its sustain level. The main track is the first track. Once the first
-track has ended, the main track is the first of the tracks still playing. Its loops count only if it played a note
-during the loop. A loop that completed without a sound ends the sequence at its last sound instead.
+while it holds a held note or a note of length 0 on a looping wave at its sustain level. A track's pass is what the
+track plays from the command it jumps back to until the jump. A pass of an outer loop includes the passes of the loops
+inside it. A pass changes the sound when the track plays a note, changes a setting of the track or the player, or opens a
+track. A tie that continues a note at the same key and velocity changes nothing. A pass that changes nothing is idle. A track that only polls or counts a variable makes idle passes. An
+idle pass is never a loop. Any other pass of the first track is a loop. A pass of a later track is a loop if the track
+played a note during it and is the main track. A pass that played no note is a loop too while the track holds a held
+note or a note of length 0 on a looping wave at its sustain level and every other track still playing rests. A track
+rests when it will never continue, or when its last pass was idle and it has changed nothing since. A track is the main
+track when no earlier track still playing has loops that would count. The first track's loops count unless its last pass
+was idle. A later track's loops count only if its last pass played a note and wasn't idle. A track that will never
+continue has no more loops. It waits forever, waits out a held note, or waits for its notes to end while one of them
+never will: a note of length 0 on a looping wave. Two loops count together only if they come from the same track and go
+back to the same command. A loop of another track, or one that goes back elsewhere, starts the count again. Loops that
+go round before the first sound don't count. A track may change a value over and over while a note fades in, or before
+another track starts. A loop that completed without a sound ends the sequence at its last sound instead.
 
-A track can't continue while its notes sound in three cases. It may wait for its notes of length 0 to end (on looping
-waves, they never do). It may wait out a held note. Or it may wait forever. A length taken from a variable left at its
-default of -1 causes that. When no track can continue, or the tempo is 0, the sequence becomes steady once nothing else
-changes: no note's envelope is in its attack, hold, decay or release, and no track's volume or pan is moving. A steady
-sequence loops when every running wave has looped twice. If it has made no sound since it became steady, it ended at its
-last sound instead. If no track will continue before the game stops the sequence, the sequence has ended when its last
-note has.
+A track can't change the sound while its notes sound in four cases: when it waits for its notes of length 0 to end (on
+looping waves, they never do), when it waits out a held note, when it waits forever, and when it makes still passes
+while none of its notes has length left to run out. A length taken from a variable left at its default of -1 makes a
+track wait forever. A still pass is idle and draws no random number. It also leaves every variable that a track reads
+with the value that the pass before left. When no track can change the sound, or the tempo is 0, the sequence becomes
+steady once nothing else changes: no note's envelope is in its attack, hold, decay or release, no track's volume or pan
+is moving, and no wave starts or stops. A steady sequence loops when every running wave has looped twice since the sound
+last changed. A steady sequence that has made no sound since then ended at its last sound instead. If no track will
+change the sound before the game stops the sequence, the sequence has ended when its last note has. A track that makes
+still passes with notes in them will still change the sound. Once its notes end, its next pass starts a new one.
 
 A sequence that stays busy without a sound for 180 seconds ended where it fell silent. An example is one whose music has
-ended while a track that plays no notes runs on. A sequence that never makes a sound gets only the half second. For a
-game whose AX microcode rejects the model's command lists, the model plays the sequence without the DSP. In place of the
-microcode, it follows each voice's position. A wave that doesn't loop then ends when it would on the DSP. Without the
-DSP, a note in use counts as sound.
+ended while a track that plays no notes runs on. The ripper skips a sequence that never makes a sound. For a game whose
+AX microcode rejects the model's command lists, the model plays the sequence without the DSP. In place of the microcode,
+it follows each voice's position. A wave that doesn't loop then ends when it would on the DSP. Without the DSP, a note
+in use counts as sound.
 
 Game profiles (function addresses) are specific to each game and version. They're matched by game ID and the SHA-1 of
 `main.dol`. Version 1 supports Wii Sports and Wii Play (both USA, revision 1), and WarioWare: Smooth Moves, Mario Kart
@@ -326,6 +366,15 @@ Wii, Wii Music and Animal Crossing: City Folk (all USA). The driver loads the ar
 sequence. It also loads the group with the sound's bank when that's another group. The last group in the archive's table
 holds the files that no other group does. That group can't be loaded. A sound whose sequence or bank only that group
 holds is skipped.
+
+A profile also holds a signature of each of its functions. A signature is the function's length up to its first `blr`,
+its first word and an FNV-1a hash of its words. In each word, the fields that the linker fills in are cleared: branch
+targets, and the immediates of `addis` and of the loads, stores and adds that don't address the stack. Another release
+or revision of a game may link the same functions at other addresses. Its game ID starts with the same three
+characters. For such a `main.dol`, the ripper looks for the functions of that game's profile by their signatures. It
+then derives a profile from the addresses it finds. A function that matches in several places takes the offset of the
+nearest function that matched in one. A profile whose library build checks the sound system's flag (the builds from
+2008) can't be derived this way.
 
 ### Archive mode
 

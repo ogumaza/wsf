@@ -162,8 +162,8 @@ Bank Bank::Parse(std::span<const uint8_t> file, std::span<const uint8_t> wave_da
         throw FormatError("an RBNK file has no DATA block");
     }
 
-    // The instrument table: a count, then a reference for each program, from the table's start. Tables and regions
-    // that several references share are read once.
+    // The instrument table: a count, then a reference for each program, from the table's start. Tables and regions that
+    // several references share are read once.
     const size_t base = data + 8;
     const uint32_t count = reader.U32(base);
     std::map<std::pair<uint8_t, uint32_t>, uint32_t> seen;
@@ -287,6 +287,7 @@ const Bank::Node* Bank::Choose(const Node& node, int key) const
     {
     case kRegion:
         return &node;
+
     case kRangeTable:
         {
             const Table& table = tables_[node.index];

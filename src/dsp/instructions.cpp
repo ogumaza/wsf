@@ -204,7 +204,7 @@ constexpr Pattern kPatterns[] = {
 
 const std::array<Op, 0x10000>& DecodeTable()
 {
-    static const std::array<Op, 0x10000> table = []
+    static const std::array<Op, 0x10000> kTable = []
     {
         std::array<Op, 0x10000> built{};
         for (uint32_t op = 0; op < 0x10000; op++)
@@ -222,7 +222,7 @@ const std::array<Op, 0x10000>& DecodeTable()
         return built;
     }();
 
-    return table;
+    return kTable;
 }
 
 Op Decode(uint16_t op)
@@ -354,6 +354,7 @@ void Dsp::BuildLoopMap()
     // outside IRAM. The polling loops are recognised by their words.
     std::fill(loop_end_.begin(), loop_end_.end(), uint8_t{0});
     std::fill(idle_.begin(), idle_.end(), uint8_t{0});
+
     const auto word = [this](uint32_t address) -> uint16_t
     {
         return address < kIramSize ? iram_[address] : 0;
@@ -408,7 +409,7 @@ void Dsp::UseGenericHandlers()
 
 const Dsp::Handler* Dsp::GenericHandlers()
 {
-    static const std::array<Handler, 0x10000> table = []
+    static const std::array<Handler, 0x10000> kTable = []
     {
         std::array<Handler, 0x10000> built;
         built.fill([](Dsp& dsp, uint16_t op) { dsp.Execute(op); });
@@ -416,12 +417,12 @@ const Dsp::Handler* Dsp::GenericHandlers()
         return built;
     }();
 
-    return table.data();
+    return kTable.data();
 }
 
 const Dsp::Handler* Dsp::Handlers()
 {
-    static const std::array<Handler, 0x10000> table = []
+    static const std::array<Handler, 0x10000> kTable = []
     {
         std::array<Handler, 0x10000> built;
         std::copy_n(GenericHandlers(), built.size(), built.begin());
@@ -433,7 +434,7 @@ const Dsp::Handler* Dsp::Handlers()
         return built;
     }();
 
-    return table.data();
+    return kTable.data();
 }
 
 template <uint16_t kOp>
@@ -531,12 +532,15 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
     case Op::kDar:
         r.ar[op & 3] = Decrement(r.ar[op & 3], r.wr[op & 3]);
         break;
+
     case Op::kIar:
         r.ar[op & 3] = Increment(r.ar[op & 3], r.wr[op & 3]);
         break;
+
     case Op::kSubarn:
         r.ar[op & 3] = SubtractIndex(r.ar[op & 3], r.ix[op & 3], r.wr[op & 3]);
         break;
+
     case Op::kAddarn:
         r.ar[op & 3] = AddIndex(r.ar[op & 3], r.ix[op >> 2 & 3], r.wr[op & 3]);
         break;
@@ -583,9 +587,11 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
     case Op::kLri:
         WriteRegLoad(op & 0x1f, FetchSecondWord());
         break;
+
     case Op::kLr:
         WriteRegLoad(op & 0x1f, ReadDmem(FetchSecondWord()));
         break;
+
     case Op::kSr:
         {
             const uint16_t address = FetchSecondWord();
@@ -618,16 +624,17 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
             default:
                 break;
             }
-
             break;
         }
 
     case Op::kXori:
         logic(bit8, AcM(bit8) ^ FetchSecondWord());
         break;
+
     case Op::kAndi:
         logic(bit8, AcM(bit8) & FetchSecondWord());
         break;
+
     case Op::kOri:
         logic(bit8, AcM(bit8) | FetchSecondWord());
         break;
@@ -637,7 +644,6 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
         {
             SkipNextInstruction();
         }
-
         break;
 
     case Op::kCmpi:
@@ -651,7 +657,6 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
             {
                 r.pc = target;
             }
-
             break;
         }
 
@@ -663,7 +668,6 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
                 Push(0, r.pc);
                 r.pc = target;
             }
-
             break;
         }
 
@@ -692,7 +696,6 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
         {
             r.pc = Pop(0);
         }
-
         break;
 
     case Op::kRti:
@@ -701,15 +704,16 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
             r.sr = Pop(1);
             r.pc = Pop(0);
         }
-
         break;
 
     case Op::kAddis:
         add(bit8, static_cast<int64_t>(static_cast<int8_t>(op & 0xff)) * 0x10000);
         break;
+
     case Op::kCmpis:
         compare(r.ac[bit8], static_cast<int64_t>(static_cast<int8_t>(op & 0xff)) * 0x10000);
         break;
+
     case Op::kLris:
         WriteRegLoad(0x18 + (op >> 8 & 7), static_cast<uint16_t>(static_cast<int8_t>(op & 0xff)));
         break;
@@ -717,6 +721,7 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
     case Op::kSbclr:
         r.sr &= static_cast<uint16_t>(~(1u << ((op & 7) + 6)));
         break;
+
     case Op::kSbset:
         r.sr |= static_cast<uint16_t>(1u << ((op & 7) + 6));
         break;
@@ -725,6 +730,7 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
     case Op::kAsl:
         set_acc(bit8, Shift(r.ac[bit8], op & 0x3f, false));
         break;
+
     case Op::kLsr:
     case Op::kAsr:
         {
@@ -747,7 +753,6 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
         {
             r.pc = ReadReg(op >> 5 & 7);
         }
-
         break;
 
     case Op::kCallr:
@@ -757,7 +762,6 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
             Push(0, r.pc);
             r.pc = target;
         }
-
         break;
 
     case Op::kLrr:
@@ -782,7 +786,6 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
             default:
                 break;
             }
-
             break;
         }
 
@@ -808,7 +811,6 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
             default:
                 break;
             }
-
             break;
         }
 
@@ -822,9 +824,11 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
     case Op::kLrs:
         WriteRegLoad(0x18 + (op >> 8 & 7), ReadDmem(static_cast<uint16_t>(r.cr << 8 | (op & 0xff))));
         break;
+
     case Op::kSrsh:
         WriteDmem(static_cast<uint16_t>(r.cr << 8 | (op & 0xff)), ReadReg(0x10 + bit8));
         break;
+
     case Op::kSrs:
         WriteDmem(static_cast<uint16_t>(r.cr << 8 | (op & 0xff)), ReadReg(0x1c + (op >> 8 & 3)));
         break;
@@ -832,21 +836,27 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
     case Op::kXorr:
         logic(bit8, AcM(bit8) ^ r.ax_h[op >> 9 & 1]);
         break;
+
     case Op::kXorc:
         logic(bit8, AcM(bit8) ^ AcM(1 - bit8));
         break;
+
     case Op::kNot:
         logic(bit8, AcM(bit8) ^ 0xffff);
         break;
+
     case Op::kAndr:
         logic(bit8, AcM(bit8) & r.ax_h[op >> 9 & 1]);
         break;
+
     case Op::kOrr:
         logic(bit8, AcM(bit8) | r.ax_h[op >> 9 & 1]);
         break;
+
     case Op::kAndc:
         logic(bit8, AcM(bit8) & AcM(1 - bit8));
         break;
+
     case Op::kOrc:
         logic(bit8, AcM(bit8) | AcM(1 - bit8));
         break;
@@ -856,6 +866,7 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
         // A positive amount shifts left.
         set_acc(bit8, Shift(r.ac[bit8], ShiftAmount(r.ax_h[op >> 9 & 1]), Decode(op) == Op::kAsrnrx));
         break;
+
     case Op::kLsrnr:
     case Op::kAsrnr:
         set_acc(bit8, Shift(r.ac[bit8], ShiftAmount(AcM(1 - bit8)), Decode(op) == Op::kAsrnr));
@@ -864,33 +875,43 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
     case Op::kAddr:
         add(bit8, Sext16(RawReg(0x18 + (op >> 9 & 3))) * 0x10000);
         break;
+
     case Op::kAddax:
         add(bit8, Ax(op >> 9 & 1));
         break;
+
     case Op::kAdd:
         add(bit8, r.ac[1 - bit8]);
         break;
+
     case Op::kAddp:
         add(bit8, Product());
         break;
+
     case Op::kSubr:
         sub(bit8, Sext16(RawReg(0x18 + (op >> 9 & 3))) * 0x10000);
         break;
+
     case Op::kSubax:
         sub(bit8, Ax(op >> 9 & 1));
         break;
+
     case Op::kSub:
         sub(bit8, r.ac[1 - bit8]);
         break;
+
     case Op::kSubp:
         sub(bit8, Product());
         break;
+
     case Op::kMovr:
         set_acc(bit8, Sext16(RawReg(0x18 + (op >> 9 & 3))) * 0x10000);
         break;
+
     case Op::kMovax:
         set_acc(bit8, Ax(op >> 9 & 1));
         break;
+
     case Op::kMov:
         set_acc(bit8, r.ac[1 - bit8]);
         break;
@@ -910,15 +931,19 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
     case Op::kAddaxl:
         add(bit8, r.ax_l[op >> 9 & 1]);
         break;
+
     case Op::kIncm:
         add(bit8, 0x10000);
         break;
+
     case Op::kInc:
         add(bit8, 1);
         break;
+
     case Op::kDecm:
         sub(bit8, 0x10000);
         break;
+
     case Op::kDec:
         sub(bit8, 1);
         break;
@@ -935,9 +960,11 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
     case Op::kClr:
         set_acc(op >> 11 & 1, 0);
         break;
+
     case Op::kCmp:
         compare(r.ac[0], r.ac[1]);
         break;
+
     case Op::kMulaxh:
         SetProduct(mul(r.ax_h[0], r.ax_h[0], true, true));
         break;
@@ -952,6 +979,7 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
     case Op::kTstprod:
         SetFlags40(Product(), false, false);
         break;
+
     case Op::kTstaxh:
         SetFlags16(r.ax_h[bit8], false);
         break;
@@ -959,18 +987,23 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
     case Op::kM2:
         r.sr &= ~kSrAm;
         break;
+
     case Op::kM0:
         r.sr |= kSrAm;
         break;
+
     case Op::kClr15:
         r.sr &= ~kSrSu;
         break;
+
     case Op::kSet15:
         r.sr |= kSrSu;
         break;
+
     case Op::kSet16:
         r.sr &= ~kSrSxm;
         break;
+
     case Op::kSet40:
         r.sr |= kSrSxm;
         break;
@@ -1086,6 +1119,7 @@ WSF_DSP_FORCE_INLINE void Dsp::ExecuteOp(uint16_t op, uint8_t kind)
     case Op::kLsl16:
         set_acc(bit8, Shift(r.ac[bit8], 16, false));
         break;
+
     case Op::kLsr16:
         set_acc(bit8, Shift(r.ac[bit8], -16, false));
         break;
@@ -1132,6 +1166,7 @@ WSF_DSP_FORCE_INLINE void Dsp::Extension(uint16_t op, uint8_t field, HeldWrites&
     // registers as they were before the step.
     (void)op;
     Registers& r = regs_;
+
     const auto increment = [this, &held](int i)
     {
         Hold(held, static_cast<uint8_t>(i), Increment(regs_.ar[i], regs_.wr[i]));
@@ -1240,6 +1275,7 @@ WSF_DSP_FORCE_INLINE void Dsp::Extension(uint16_t op, uint8_t field, HeldWrites&
         {
             increment(0);
         }
+
         if (variant & 2)
         {
             add_index(3);
@@ -1279,6 +1315,7 @@ WSF_DSP_FORCE_INLINE void Dsp::Extension(uint16_t op, uint8_t field, HeldWrites&
     {
         increment(s);
     }
+
     if (variant & 2)
     {
         add_index(3);
