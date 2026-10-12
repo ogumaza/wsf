@@ -7,11 +7,15 @@
 
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
+
+#include "ntdlib/flipper/file_disc.h"
+#include "xsflib/player/playback.h"
+#include "xsflib/player/player.h"
 
 #include "wsf/format.h"
 
@@ -20,110 +24,74 @@ namespace wsf
 namespace wii
 {
 
-class FileDisc;
 class System;
 
 } // namespace wii
 
 class ArchivePlayer;
 
-class Player
+class Player : public xsflib::player::PlayerBase<Player, LoadedSet>
 {
 public:
-    enum class State
-    {
-        kIdle,
-        kPlaying,
-        kFinished,
-        kError
-    };
+    // The source's part of a snapshot: the emulated Wii's state in game mode, or the model's in archive mode. Unchanged
+    // memory pages are shared with the snapshot taken before it. A snapshot can only be restored to the player that
+    // took it, before its next Start, with the audio that the player had rendered but not returned yet.
+    struct SourceSnapshot;
+    using Snapshot = xsflib::player::Snapshot<SourceSnapshot>;
 
     // The rate players report, the audio interface's DMA rate: 32,000 Hz.
     static constexpr int kSampleRate = kPlayerSampleRate;
 
-    // A snapshot of the player between emulation steps, with the audio that the player has rendered but not returned
-    // yet. Unchanged memory pages are shared with the snapshot taken before it. The snapshot points at this player's
-    // emulation and can only be restored to this player before the next Start.
-    struct Snapshot;
-
     Player();
     ~Player();
 
-    // Loads a file and its libraries, without starting emulation.
-    bool Load(const std::string& path, const FileReader& reader);
-
-    // Loads an already assembled set.
-    bool Load(LoadedSet set);
-
-    // Game mode: boots the emulated Wii and runs it until the sound starts (the silence before is skipped). Archive
-    // mode: starts the DSP and the sound. Can be called again to restart from the beginning.
-    bool Start();
-
-    // Renders up to `frames` stereo frames (interleaved L, R) into `out`. Returns the number of frames written. It's
-    // less than requested only after an error.
-    std::size_t Render(int16_t* out, std::size_t frames);
-
-    State GetState() const
+    // Game mode's emulated Wii after a start, for an analysis that watches the game's code while the sound plays. Null
+    // in archive mode.
+    wii::System* GameSystem()
     {
-        return state_;
+        return system_.get();
     }
-
-    // Returns the frame count at the end of the emulation step that first reported the sound finished, independent of
-    // Render's requested block size. Only meaningful in State::kFinished.
-    uint64_t FinishedFrame() const
-    {
-        return finished_frame_;
-    }
-
-    const std::string& Error() const
-    {
-        return error_;
-    }
-
-    const Tags& GetTags() const
-    {
-        return set_.tags;
-    }
-
-    // Tagged length and fade in milliseconds (-1 if absent).
-    long long LengthMs() const;
-    long long FadeMs() const;
-
-    // Tagged volume (linear gain, 1.0 if absent).
-    double Volume() const;
-
-    // The rip's files that the player loaded.
-    const LoadedSet& GetLoadedSet() const
-    {
-        return set_;
-    }
-
-    // Takes a snapshot that shares pages with `previous` (ideally the latest snapshot). Returns nullptr when the player
-    // isn't playing.
-    std::shared_ptr<const Snapshot> Save(const Snapshot* previous = nullptr);
-
-    // Restores `snapshot`, including any audio waiting to be handed out. Returns false if the snapshot belongs to an
-    // earlier run of the player or to another player, or if the emulation can't go back to it (see Error()).
-    bool Restore(const Snapshot& snapshot);
 
 private:
-    bool Fail(const std::string& message);
-    bool StartImpl();
-    uint32_t DriverStatus() const;
-    bool Step();
-    std::vector<int16_t>& Output();
+    friend class xsflib::player::PlayerBase<Player, LoadedSet>;
 
-    LoadedSet set_;
-    std::unique_ptr<wii::FileDisc> disc_; // declared before the system that reads it
+    // The error for a set with nothing to play, and the start of the message for a start or a step that threw.
+    static constexpr const char* kNotPlayable = "no process or archive descriptor";
+    static constexpr const char* kStartFailure = "emulation failed: ";
+    static constexpr const char* kStepFailure = "emulation failed: ";
+
+    static std::optional<std::string> LoadFile(const std::string& path, const FileReader& reader, Set& set)
+    {
+        return LoadSet(path, reader, set);
+    }
+
+    void Unload();
+    bool Playable() const;
+
+    // Game mode: boots the emulated Wii and runs it until the sound starts (the silence before is skipped). Archive
+    // mode: starts the DSP and the sound.
+    bool StartSource();
+
+    bool RunStep();
+
+    // Whether the sound has finished: the driver reports status 2.
+    bool Finished() const;
+
+    std::vector<int16_t>& Output();
+    uint32_t DriverStatus() const;
+    uint64_t EmulatedCycles() const;
+    std::shared_ptr<const SourceSnapshot> SaveSource(const SourceSnapshot* previous);
+    bool CanRestore(const SourceSnapshot* source) const;
+    void RestoreSource(const SourceSnapshot& source);
+
+    std::unique_ptr<ntdlib::flipper::FileDisc> disc_; // declared before the system that reads it
     std::unique_ptr<wii::System> system_;
     std::vector<int16_t> system_output_;
     std::unique_ptr<ArchivePlayer> archive_;
-    State state_ = State::kIdle;
-    std::string error_;
-    uint64_t run_ = 0;            // counts Start calls so that a snapshot stays with the run it was taken in
-    std::size_t consumed_ = 0;    // samples of Output() already handed out (two per frame)
-    uint64_t dropped_ = 0;        // samples dropped from the front of Output() since the sound started
-    uint64_t finished_frame_ = 0; // see FinishedFrame
 };
+
+// Playback of a WSF set: xsflib's playback for WSF's Player.
+using Playback = xsflib::player::Playback<Player>;
+using PlaybackOptions = xsflib::player::PlaybackOptions<Player>;
 
 } // namespace wsf

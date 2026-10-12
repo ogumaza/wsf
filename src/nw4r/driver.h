@@ -15,11 +15,14 @@
 #include <memory>
 #include <vector>
 
+#include "ntdlib/nwsnd/channel.h"
+#include "ntdlib/nwsnd/channel_impl.h"
+#include "ntdlib/nwsnd/console.h"
+#include "ntdlib/rsar/formats.h"
+#include "ntdlib/types.h"
+
 #include "ax/pb.h"
 #include "ax/voice.h"
-#include "common/common_types.h"
-#include "nw4r/envelope.h"
-#include "rsar/formats.h"
 
 namespace wsf::nw4r
 {
@@ -32,11 +35,11 @@ struct WaveData
 {
     struct Channel
     {
-        PAddr data = 0;
-        rsar::AdpcmInfo adpcm;
+        ntdlib::PAddr data = 0;
+        ntdlib::rsar::DspAdpcmInfo adpcm;
     };
 
-    rsar::WaveFormat format = rsar::WaveFormat::kPcm16;
+    ntdlib::rsar::WaveEncoding format = ntdlib::rsar::WaveEncoding::kPcm16;
     bool loop = false;
     int channel_count = 1;
     uint32_t sample_rate = 32000;
@@ -45,8 +48,11 @@ struct WaveData
     std::array<Channel, 2> channels;
 };
 
-// How the channels of a stereo wave pan (PanMode): together, each from its side (dual), or each held to its side
-// (balance).
+// AX's sample format for a wave's encoding.
+ax::SampleFormat ToAxFormat(ntdlib::rsar::WaveEncoding format);
+
+// How the channels of a stereo wave pan (PanMode). In dual mode, the pan moves both channels, each from its side. In
+// balance mode, each channel stays at its side.
 enum class PanMode : uint8_t
 {
     kDual = 0,
@@ -57,13 +63,9 @@ enum class PanMode : uint8_t
 class AxVoice
 {
 public:
-    enum class CallbackStatus
-    {
-        kCancel,
-        kDropDsp,
-    };
-
-    using Callback = std::function<void(AxVoice* voice, CallbackStatus status)>;
+    // The manager calls it from FreeAllReservedAxVoice after AX drops the voice: at the start of the next sound frame,
+    // or earlier when the manager next acquires an AX voice.
+    using Callback = std::function<void(AxVoice* voice)>;
 
     // The sample rate converter's settings (AxVoice::SrcType). With 4-tap, the polyphase coefficients are chosen
     // automatically for the pitch.
@@ -80,6 +82,8 @@ public:
     // The mix volumes of AxVoice::MixParam: L, R and S for the main bus and each aux bus.
     struct MixParam
     {
+        bool operator==(const MixParam&) const = default;
+
         uint16_t l = 0;
         uint16_t r = 0;
         uint16_t s = 0;
@@ -92,8 +96,6 @@ public:
         uint16_t aux_c_l = 0;
         uint16_t aux_c_r = 0;
         uint16_t aux_c_s = 0;
-
-        bool operator==(const MixParam&) const = default;
     };
 
     explicit AxVoice(Engine& engine) : engine_(&engine)
@@ -101,21 +103,23 @@ public:
     }
 
     // Setup (0x8003265c): sets the wave whose samples this voice plays.
-    void Setup(PAddr wave, ax::SampleFormat format, int sample_rate);
+    void Setup(ntdlib::PAddr wave, ax::SampleFormat format, int sample_rate);
 
     // IsPlayFinished (0x800326dc): whether the voice has played to its end. At the end, the microcode leaves it in the
     // zero buffer.
     bool IsPlayFinished() const;
 
-    // SetAddr (0x800332a0): sets where to start, loop and end, all in samples from `wave`.
-    void SetAddr(bool loop, PAddr wave, uint32_t offset, uint32_t loop_start, uint32_t loop_end);
+    // SetAddr (0x800332a0): sets where to loop and end, in samples from `wave`. The voice starts at the wave's start.
+    // The game's SetAddr also takes a start part way into the wave. A sequence's notes never use one.
+    void SetAddr(bool loop, ntdlib::PAddr wave, uint32_t loop_start, uint32_t loop_end);
 
     // SetSrcType (0x80033654).
     void SetSrcType(SrcType type, float pitch);
 
-    // SetAdpcm (0x80033734) and SetAdpcmLoop (0x80033884).
-    void SetAdpcm(const rsar::AdpcmInfo& info, uint16_t pred_scale, int16_t yn1, int16_t yn2);
-    void SetAdpcmLoop(const rsar::AdpcmInfo& info);
+    // SetAdpcm (0x80033734) and SetAdpcmLoop (0x80033884). SetAdpcm starts the decoder at the wave's start, with the
+    // info's predictor and history. The game's SetAdpcm takes them apart, for a start part way into the wave.
+    void SetAdpcm(const ntdlib::rsar::DspAdpcmInfo& info);
+    void SetAdpcmLoop(const ntdlib::rsar::DspAdpcmInfo& info);
 
     // SetMix (0x8003395c): ramps the mix from where the last frame left it towards `mix` over the next frame. Returns
     // whether the mix changed. If it did, the voice must ramp again in the next frame.
@@ -163,15 +167,11 @@ public:
         return IsAvailable() && vpb_->IsRunning();
     }
 
-    // The voice's address in the units of its format, for `samples` from `base` (GetDspAddressBySample), and the
-    // reverse (GetSampleByDspAddress, 0x80032fb4).
-    static uint32_t DspAddressBySample(PAddr base, uint32_t samples, ax::SampleFormat format);
-    static uint32_t SampleByDspAddress(PAddr base, uint32_t address, ax::SampleFormat format);
-
-    // The ADPCM decoder's state after decoding `offset` samples of a channel from its start (CalcOffsetAdpcmParam,
-    // 0x80034574).
-    static void CalcOffsetAdpcmParam(const Engine& engine, PAddr data, uint32_t offset, const rsar::AdpcmInfo& info,
-                                     uint16_t& pred_scale, int16_t& yn1, int16_t& yn2);
+    // The voice's address in the units of its format, for `samples` from `base` (GetDspAddressBySample).
+    // SampleByDspAddress gives the sample at `address`. That address counts in the same units from the wave's start
+    // (GetSampleByDspAddress, 0x80032fb4).
+    static uint32_t DspAddressBySample(ntdlib::PAddr base, uint32_t samples, ax::SampleFormat format);
+    static uint32_t SampleByDspAddress(uint32_t address, ax::SampleFormat format);
 
 private:
     friend class AxVoiceManager;
@@ -190,7 +190,7 @@ private:
     bool first_ve_update_ = false;          // + 0xc
     uint16_t volume_ = ax::kMaxVolume;      // + 0xe: the volume to reach
 
-    PAddr wave_data_ = 0;                                // + 0x10: 0 for none
+    ntdlib::PAddr wave_data_ = 0;                        // + 0x10: 0 for none
     ax::SampleFormat format_ = ax::SampleFormat::kPcm16; // + 0x14
     int sample_rate_ = 0;                                // + 0x18
     bool first_mix_update_ = false;                      // + 0x1c
@@ -204,8 +204,6 @@ private:
 class AxVoiceManager
 {
 public:
-    static constexpr int kVoiceCount = ax::kVoiceCount + 16;
-
     // The pool's state, for a snapshot of the engine: a copy of each AxVoice, and the lists that hold them.
     struct Snapshot
     {
@@ -214,6 +212,8 @@ public:
         std::list<AxVoice*> active;
         std::list<AxVoice*> reserved;
     };
+
+    static constexpr int kVoiceCount = ax::kVoiceCount + 16;
 
     explicit AxVoiceManager(Engine& engine);
 
@@ -228,7 +228,8 @@ public:
     // FreeAxVoice (0x800356a0).
     void FreeAxVoice(AxVoice* voice);
 
-    // ReserveForFreeAxVoice (0x8003576c): AX dropped the voice. Its owner is notified in the next frame.
+    // ReserveForFreeAxVoice (0x8003576c): AX dropped the voice. FreeAllReservedAxVoice calls the owner's callback later
+    // (see AxVoice::Callback).
     void ReserveForFreeAxVoice(AxVoice* voice);
 
     // FreeAllReservedAxVoice (0x80035800), the first step of the sound frame.
@@ -245,23 +246,23 @@ private:
     std::list<AxVoice*> reserved_;
 };
 
+// A voice's place among the engine's voices (VoiceManager), and a channel's among the engine's channels
+// (ChannelManager). kNoVoice and kNoChannel mark none.
+using ntdlib::nwsnd::ChannelId;
+using ntdlib::nwsnd::kNoChannel;
+using ntdlib::nwsnd::kNoVoice;
+using ntdlib::nwsnd::VoiceId;
+
 // A voice (Voice): the AX voices that play one note, one for each channel of its wave.
 class Voice
 {
 public:
-    enum class Status
-    {
-        kFinishWave,
-        kCancel,
-        kDropVoice, // dropped by NW4R SND's voice manager
-        kDropDsp,   // dropped by AX
-    };
-
-    using Callback = std::function<void(Voice* voice, Status status)>;
+    // Why the voice calls its channel back: kFinishWave when its wave has played to its end, kDropVoice when NW4R SND's
+    // voice manager drops it, kDropDsp when AX does.
+    using Status = ntdlib::nwsnd::VoiceCallbackStatus;
 
     // The voice's changes still to make to its AX voices (Voice::SyncFlag).
     static constexpr uint16_t kSyncSrcInitial = 1u << 0;
-    static constexpr uint16_t kSyncVoice = 1u << 1;
     static constexpr uint16_t kSyncSrc = 1u << 2;
     static constexpr uint16_t kSyncVe = 1u << 3;
     static constexpr uint16_t kSyncMix = 1u << 4;
@@ -270,12 +271,13 @@ public:
 
     static constexpr int kPriorityMax = 255;
 
-    explicit Voice(Engine& engine) : engine_(&engine)
+    Voice(Engine& engine, VoiceId place) : engine_(&engine), place_(place)
     {
     }
 
-    // Acquire (0x8004c14c): takes an AX voice for each of `channels`. Drops lower-priority voices to make room.
-    bool Acquire(int channels, int priority, Callback callback);
+    // Acquire (0x8004c14c): takes an AX voice for each of `channels`. Drops lower-priority voices to make room. The
+    // voice reports its events to the channel at `owner`. The game passes a callback and its data instead.
+    bool Acquire(int channels, int priority, ChannelId owner);
 
     // Free (0x8004c388).
     void Free();
@@ -285,11 +287,46 @@ public:
     void Calc();
     void Update();
 
-    // Setup (0x8004c454): sets the wave to play from `offset` samples in.
-    void Setup(const WaveData& data, uint32_t offset);
+    // Setup (0x8004c454): sets the wave to play from its start. The game's Setup also takes a start part way into the
+    // wave. ntdlib's channel always starts at the wave's start.
+    void Setup(const WaveData& data);
 
     void Start(); // 0x8004c704
     void Stop();  // 0x8004c724
+
+    // The calls of ntdlib's channel. Setup sets the wave's format, rate and loop. AppendWave plays the wave from its
+    // start. The interpolation is AX's.
+    void SetSampleFormat(ntdlib::rsar::WaveEncoding)
+    {
+    }
+
+    void SetSampleRate(uint32_t)
+    {
+    }
+
+    void SetInterpolationType(uint8_t)
+    {
+    }
+
+    void AppendWave(Engine&, const WaveData& wave)
+    {
+        Setup(wave);
+    }
+
+    void Stop(Engine&)
+    {
+        Stop();
+    }
+
+    void Free(Engine&)
+    {
+        Free();
+    }
+
+    void SetPriority(Engine&, uint32_t priority)
+    {
+        SetPriority(static_cast<int>(priority));
+    }
 
     void SetVolume(float volume);                // 0x8004c830
     void SetVeVolume(float target, float init);  // 0x8004c874
@@ -303,6 +340,9 @@ public:
     void SetMainOutVolume(float volume);         // 0x8004ca54
     void SetMainSend(float send);                // 0x8004ca98
     void SetFxSend(int bus, float send);         // 0x8004cae0
+
+    // The values of the channel's frame, set through the calls above in the order of Channel::Update (0x800378c8).
+    void SetParam(const ntdlib::nwsnd::RevolutionPolicy::ChannelVoiceParam& param);
 
     // SetPriority (0x8004cc14): re-sorts the voice. A releasing voice (priority 1) gets a lower AX priority.
     void SetPriority(int priority);
@@ -320,9 +360,9 @@ public:
         return channel_count_;
     }
 
-    bool IsActive() const
+    VoiceId Place() const
     {
-        return active_;
+        return place_;
     }
 
 private:
@@ -330,9 +370,11 @@ private:
 
     bool IsPlayFinished() const;
     void CalcAxSrc(bool initial);
+
     // CalcAxVe returns true in the build of October 2006 while the envelope ramps. The voice then sets it again in the
     // next frame. The ramp then lands on its target.
     bool CalcAxVe();
+
     bool CalcAxMix();
     void CalcAxLpf();
     void CalcAxBiquadFilter();
@@ -342,18 +384,17 @@ private:
     void StopAllAxVoice();
     void ResetDelta();
 
-    // AxVoiceCallbackFunc (0x8004d2a0): called when AX takes one of the voice's AX voices, or when NW4R SND cancels
-    // one.
-    void OnAxVoiceEvent(AxVoice* dropped, AxVoice::CallbackStatus status);
+    // AxVoiceCallbackFunc (0x8004d2a0): called when AX has dropped one of the voice's AX voices.
+    void OnAxVoiceDropped(AxVoice* dropped);
 
     Engine* engine_;
+    VoiceId place_;
     std::array<AxVoice*, 2> ax_voices_{}; // + 0xc, one for each channel
     int channel_count_ = 0;               // + 0x9c
-    Callback callback_;                   // + 0xa4
+    ChannelId owner_ = kNoChannel;        // + 0xa4, the callback
     bool active_ = false;                 // + 0xac
     bool starting_ = false;               // + 0xad
     bool started_ = false;                // + 0xae
-    bool pause_ = false;                  // + 0xaf
     uint16_t sync_flag_ = 0;              // + 0xb1
     int priority_ = 0;                    // + 0xb4
     float pan_ = 0.0f;                    // + 0xb8
@@ -378,15 +419,15 @@ private:
 class VoiceManager
 {
 public:
-    static constexpr int kVoiceCount = ax::kVoiceCount;
-
     // The pool's state, for a snapshot of the engine: a copy of each Voice, and the lists that hold them.
     struct Snapshot
     {
         std::vector<Voice> voices;
-        std::list<Voice*> free;
-        std::list<Voice*> prio_list;
+        std::list<VoiceId> free;
+        std::list<VoiceId> prio_list;
     };
+
+    static constexpr int kVoiceCount = ax::kVoiceCount;
 
     explicit VoiceManager(Engine& engine);
 
@@ -396,7 +437,10 @@ public:
 
     // AllocVoice (0x8004e358): returns a voice for `channels` at `priority`. If all voices are in use, drops the
     // lowest-priority voice first.
-    Voice* AllocVoice(int channels, int priority, Voice::Callback callback);
+    Voice* AllocVoice(int channels, int priority, ChannelId owner);
+
+    // The same, as ntdlib's channel asks for it: the voice's place, or kNoVoice.
+    VoiceId AllocVoice(Engine& engine, int channels, uint32_t priority, ChannelId owner);
 
     // FreeVoice (0x8004e514).
     void FreeVoice(Voice* voice);
@@ -411,8 +455,14 @@ public:
     // sound frame may not set new ramps.
     void NotifyVoiceUpdate();
 
+    // The voice at `place`.
+    Voice& At(VoiceId place)
+    {
+        return *pool_[place];
+    }
+
     // The voices in use, lowest priority first and oldest first among equals.
-    const std::list<Voice*>& PrioVoices() const
+    const std::list<VoiceId>& PrioVoices() const
     {
         return prio_list_;
     }
@@ -420,379 +470,50 @@ public:
 private:
     friend class Voice;
 
-    // DropLowestPriorityVoice (inlined in AllocVoice): drops the lowest-priority voice unless it outranks `priority`.
-    // Returns the number of AX voices that the dropped voice had, or 0 if no voice was dropped.
+    // DropLowestPriorityVoice (inlined in AllocVoice): when no voice is free, drops the lowest-priority voice unless it
+    // outranks `priority`. Returns the number of AX voices that the dropped voice had, or 0 if no voice was dropped.
     int DropLowestPriorityVoice(int priority);
+
     void AppendVoiceList(Voice* voice);
     void RemoveVoiceList(Voice* voice);
-    void UpdateEachVoicePriority(std::list<Voice*>::iterator begin);
+    void UpdateEachVoicePriority(std::list<VoiceId>::iterator begin);
 
     std::array<std::unique_ptr<Voice>, kVoiceCount> pool_;
-    std::list<Voice*> free_;
-    std::list<Voice*> prio_list_;
+    std::list<VoiceId> free_;
+    std::list<VoiceId> prio_list_;
+};
+
+// The Wii's policy of ntdlib's channels: NW4R SND's channel on WSF's voices, with RevolutionPolicy's frame
+// (UpdateChannel). The track sets the channel's pan, surround pan and sends in its one output, the TV's stereo mix.
+struct ChannelPolicy : ntdlib::nwsnd::RevolutionPolicy
+{
+    using Console = ntdlib::nwsnd::RevolutionPolicy;
+    using Engine = wsf::nw4r::Engine;
+    using WaveInfo = WaveData;
+
+    // The channel's output: the main out volume, the pan, the surround pan and the sends.
+    struct Outputs
+    {
+        float volume = 1.0f;
+        uint32_t mix_mode = 0;
+        float pan = 0.0f;
+        float span = 0.0f;
+        float main_send = 0.0f;
+        std::array<float, 3> fx_send{};
+    };
+
+    template <typename Function, typename... Each>
+    static void ForEachOutput(const Function& function, Each&... outputs)
+    {
+        function(outputs...);
+    }
 };
 
 // A channel (Channel): one note of a wave, with its envelope, LFO and sweep, played on a voice.
-class Channel
-{
-public:
-    enum class CallbackStatus
-    {
-        kStopped,
-        kDrop,
-        kFinish,
-        kCancel,
-    };
-
-    // The owner's callback. Callbacks are copied before they're called. An owner may free the channel (and clear its
-    // callback) from inside one.
-    using Callback = std::function<void(Channel* channel, CallbackStatus status)>;
-
-    enum class LfoTarget : uint8_t
-    {
-        kPitch,
-        kVolume,
-        kPan,
-    };
-
-    explicit Channel(Engine& engine) : engine_(&engine)
-    {
-    }
-
-    // AllocChannel (0x80038370): returns a channel on a new voice for `channels` channels of a wave, or nullptr.
-    static Channel* AllocChannel(Engine& engine, int channels, int priority, Callback callback);
-
-    // FreeChannel (0x8003856c): the channel's owner releases it. The owner gets no more callbacks from it.
-    static void FreeChannel(Channel* channel);
-
-    // InitParam (0x800377b0).
-    void InitParam(Callback callback);
-
-    // Update (0x800378c8): runs every frame. With `periodic` set, it advances the envelope, LFO and sweep by 3 ms.
-    void Update(bool periodic);
-
-    // Start (0x8003801c): plays `data` from `offset` samples in, for `length` ticks of the sequence (or -1).
-    void Start(const WaveData& data, int length, uint32_t offset);
-
-    // Release (0x8003809c): starts the release. Lowers the voice's priority unless release_priority_fix (from the
-    // archive) is set.
-    void Release();
-
-    // NoteOff (Mario Kart Wii, 0x80090600): the release at the end of the note's length. A 2008 build skips it for a
-    // note whose region ignores note-offs.
-    void NoteOff();
-
-    // Stop (0x80038104).
-    void Stop();
-
-    void SetAttack(int attack)
-    {
-        envelope_.SetAttack(attack);
-    }
-
-    void SetDecay(int decay)
-    {
-        envelope_.SetDecay(decay);
-    }
-
-    void SetSustain(int sustain)
-    {
-        envelope_.SetSustain(sustain);
-    }
-
-    void SetRelease(int release)
-    {
-        envelope_.SetRelease(release);
-    }
-
-    void SetHold(int hold)
-    {
-        envelope_.SetHold(hold);
-    }
-
-    // 2008 builds: the region's note-off type (1 ignores note-offs) and its alternate assign (Mario Kart Wii's
-    // Bank::NoteOn, 0x8008d490). The alternate assign is a key group. A new note in the group releases the group's
-    // other notes.
-    void SetIgnoreNoteOff(bool ignore)
-    {
-        ignore_note_off_ = ignore;
-    }
-
-    int KeyGroup() const
-    {
-        return key_group_;
-    }
-
-    void SetKeyGroup(int key_group)
-    {
-        key_group_ = key_group;
-    }
-
-    bool IsRelease() const
-    {
-        return envelope_.GetStatus() == Envelope::Status::kRelease;
-    }
-
-    bool IsSustain() const
-    {
-        return envelope_.GetStatus() == Envelope::Status::kSustain;
-    }
-
-    // Whether the channel's wave loops. A looping wave sounds until the note is released. The ripper's length analysis
-    // uses this.
-    bool WaveLoops() const
-    {
-        return wave_loops_;
-    }
-
-    void SetLfoParam(const LfoParam& param)
-    {
-        lfo_.SetParam(param);
-    }
-
-    void SetLfoTarget(LfoTarget target)
-    {
-        lfo_target_ = target;
-    }
-
-    void SetReleasePriorityFix(bool fix)
-    {
-        release_priority_fix_ = fix;
-    }
-
-    bool IsActive() const
-    {
-        return active_;
-    }
-
-    bool IsAutoUpdateSweep() const
-    {
-        return auto_sweep_;
-    }
-
-    void SetUserVolume(float volume)
-    {
-        user_volume_ = volume;
-    }
-
-    void SetUserPitch(float pitch)
-    {
-        user_pitch_ = pitch;
-    }
-
-    void SetUserPitchRatio(float ratio)
-    {
-        user_pitch_ratio_ = ratio;
-    }
-
-    void SetUserPan(float pan)
-    {
-        user_pan_ = pan;
-    }
-
-    void SetUserSurroundPan(float pan)
-    {
-        user_surround_pan_ = pan;
-    }
-
-    void SetUserLpfFreq(float freq)
-    {
-        user_lpf_freq_ = freq;
-    }
-
-    // SetBiquadFilter (Wii Music, 0x800b4d30).
-    void SetBiquadFilter(int type, float value)
-    {
-        biquad_type_ = static_cast<uint8_t>(type);
-        biquad_value_ = value;
-    }
-
-    void SetMainSend(float send)
-    {
-        main_send_ = send;
-    }
-
-    void SetFxSend(int bus, float send)
-    {
-        fx_send_[bus] = send;
-    }
-
-    // UpdateSweep (0x8003820c) and SetSweepParam (0x8003822c).
-    void UpdateSweep(int count);
-    void SetSweepParam(float pitch, int time, bool auto_update);
-
-    float InitVolume() const
-    {
-        return init_volume_;
-    }
-
-    void SetInitVolume(float volume)
-    {
-        init_volume_ = volume;
-    }
-
-    void SetInitPan(float pan)
-    {
-        init_pan_ = pan;
-    }
-
-    void SetInitSurroundPan(float pan)
-    {
-        init_surround_pan_ = pan;
-    }
-
-    void SetTune(float tune)
-    {
-        tune_ = tune;
-    }
-
-    int Key() const
-    {
-        return key_;
-    }
-
-    void SetKey(int key)
-    {
-        key_ = key;
-    }
-
-    void SetOriginalKey(int key)
-    {
-        original_key_ = key;
-    }
-
-    int Length() const
-    {
-        return length_;
-    }
-
-    void SetLength(int length)
-    {
-        length_ = length;
-    }
-
-    void SetPanMode(PanMode mode)
-    {
-        pan_mode_ = mode;
-    }
-
-    void SetPanCurve(uint8_t curve)
-    {
-        pan_curve_ = curve;
-    }
-
-    Channel* NextTrackChannel() const
-    {
-        return next_link_;
-    }
-
-    void SetNextTrackChannel(Channel* channel)
-    {
-        next_link_ = channel;
-    }
-
-private:
-    friend class ChannelManager;
-
-    // A value that moves to a target over a number of frames (MoveValue<u8, u16>), for the silence fade.
-    struct SilenceVolume
-    {
-        uint8_t origin = 255; // + 0x0
-        uint8_t target = 255; // + 0x1
-        uint16_t frame = 0;   // + 0x2
-        uint16_t counter = 0; // + 0x4
-
-        uint8_t Value() const;
-    };
-
-    float SweepValue() const;
-
-    // VoiceCallbackFunc (0x80038244).
-    void OnVoiceEvent(Voice* voice, Voice::Status status);
-
-    Engine* engine_;
-    Envelope envelope_;                        // + 0x0
-    Lfo lfo_;                                  // + 0x18
-    LfoTarget lfo_target_ = LfoTarget::kPitch; // + 0x30
-    bool pause_ = false;                       // + 0x31
-    bool active_ = false;                      // + 0x32
-    bool alloc_ = false;                       // + 0x33
-    bool auto_sweep_ = true;                   // + 0x34
-    bool release_priority_fix_ = false;        // + 0x35
-    float user_volume_ = 1.0f;                 // + 0x38
-    float user_pitch_ratio_ = 1.0f;            // + 0x3c
-    float user_pan_ = 0.0f;                    // + 0x40
-    float user_surround_pan_ = 0.0f;           // + 0x44
-    float user_lpf_freq_ = 0.0f;               // + 0x48
-    float main_out_volume_ = 1.0f;             // + 0x54
-    float main_send_ = 0.0f;                   // + 0x58
-    std::array<float, 3> fx_send_{};           // + 0x5c
-    float user_pitch_ = 0.0f;                  // + 0x98
-    float sweep_pitch_ = 0.0f;                 // + 0x9c
-    int sweep_counter_ = 0;                    // + 0xa0
-    int sweep_length_ = 0;                     // + 0xa4
-    float init_volume_ = 1.0f;                 // + 0xa8
-    float init_pan_ = 0.0f;                    // + 0xac
-    float init_surround_pan_ = 0.0f;           // + 0xb0
-    float tune_ = 1.0f;                        // + 0xb4
-    SilenceVolume silence_volume_;             // + 0xb8
-    int key_ = 60;                             // + 0xc0
-    int original_key_ = 60;                    // + 0xc4
-    int length_ = 0;                           // + 0xc8
-    PanMode pan_mode_ = PanMode::kDual;        // + 0xcc
-    uint8_t pan_curve_ = 0;                    // + 0xd0
-    Callback callback_;                        // + 0xd4
-    Voice* voice_ = nullptr;                   // + 0xdc
-    Channel* next_link_ = nullptr;             // + 0xe0
-    bool ignore_note_off_ = false;             // 2008 builds
-    int key_group_ = 0;                        // 2008 builds
-    uint8_t biquad_type_ = 0;                  // builds from June 2008
-    float biquad_value_ = 0.0f;                // builds from June 2008
-    bool wave_loops_ = false;                  // the wave's loop flag
-};
-
-// The pool of channels and the channels in use (ChannelManager): 97, one for each AX voice and one more.
-class ChannelManager
-{
-public:
-    static constexpr int kChannelCount = ax::kVoiceCount + 1;
-
-    // The pool's state, for a snapshot of the engine: a copy of each Channel, and the lists that hold them.
-    struct Snapshot
-    {
-        std::vector<Channel> channels;
-        std::list<Channel*> free;
-        std::list<Channel*> active;
-    };
-
-    explicit ChannelManager(Engine& engine);
-
-    // The pool's state between sound frames, and its restoration, as for AxVoiceManager.
-    Snapshot Save() const;
-    void Restore(const Snapshot& snapshot);
-
-    // Alloc and Free (inlined in AllocChannel and elsewhere). The pool is a stack. The channels in use form a list in
-    // the order they were taken.
-    Channel* Alloc();
-    void Free(Channel* channel);
-
-    // UpdateAllChannel (0x8003775c).
-    void UpdateAllChannel();
-
-    // The number of channels in use.
-    int ActiveCount() const
-    {
-        return static_cast<int>(channels_.size());
-    }
-
-    // Whether any channel in use is still changing. A channel is changing while its envelope is in its attack, hold,
-    // decay or release. After the release, the channel ends by itself.
-    bool AnyChanging() const;
-
-private:
-    std::array<std::unique_ptr<Channel>, kChannelCount> pool_;
-    std::list<Channel*> free_;
-    std::list<Channel*> channels_;
-};
+using Channel = ntdlib::nwsnd::Channel<ChannelPolicy>;
+
+// The pool of channels and the channels in use (ChannelManager): 97, one for each AX voice and one more
+// (RevolutionPolicy::kChannelCount). A channel that stops goes back to the pool at once.
+using ChannelManager = ntdlib::nwsnd::ChannelManager<ChannelPolicy>;
 
 } // namespace wsf::nw4r

@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <span>
 
-#include "dsp/dsp.h"
+#include "ntdlib/dsp/dsp.h"
 
 namespace wsf::ax
 {
@@ -31,8 +31,8 @@ constexpr uint64_t kBatchSteps = 256;
 bool DspLink::Start(std::span<const uint16_t> microcode, uint32_t address)
 {
     dsp_->StartMicrocode(microcode, address, 0x0010);
-    uint32_t mail = 0;
 
+    uint32_t mail = 0;
     return WaitForMail(mail) && mail == kDspInit;
 }
 
@@ -61,6 +61,7 @@ bool DspLink::SendMail(uint32_t mail)
 {
     dsp_->CpuWriteMailboxHigh(static_cast<uint16_t>(mail >> 16));
     dsp_->CpuWriteMailboxLow(static_cast<uint16_t>(mail));
+
     for (uint64_t steps = 0; dsp_->MailboxToDsp() & 0x80000000; steps += kBatchSteps)
     {
         if (steps >= kStepLimit || dsp_->Halted())

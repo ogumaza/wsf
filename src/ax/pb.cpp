@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <type_traits>
 
-#include "common/bytes.h"
+#include "xsflib/bytes.h"
 
 namespace wsf::ax
 {
@@ -42,7 +42,7 @@ Pb LoadPb(const uint8_t* bytes)
     std::array<uint16_t, kPbSize / 2> words;
     for (std::size_t i = 0; i < words.size(); i++)
     {
-        words[i] = LoadBe16(bytes + i * 2);
+        words[i] = xsflib::LoadBe16(bytes + i * 2);
     }
 
     return std::bit_cast<Pb>(words);
@@ -53,7 +53,7 @@ void StorePb(const Pb& pb, uint8_t* bytes)
     const auto words = std::bit_cast<std::array<uint16_t, kPbSize / 2>>(pb);
     for (std::size_t i = 0; i < words.size(); i++)
     {
-        StoreBe16(bytes + i * 2, words[i]);
+        xsflib::StoreBe16(bytes + i * 2, words[i]);
     }
 }
 
@@ -64,7 +64,7 @@ Pb LoadPbOctober2006(const uint8_t* bytes)
     {
         for (std::size_t i = 0; i < part.size; i += 2)
         {
-            words[(part.pb + i) / 2] = LoadBe16(bytes + part.october + i);
+            words[(part.pb + i) / 2] = xsflib::LoadBe16(bytes + part.october + i);
         }
     }
 
@@ -78,7 +78,7 @@ void StorePbOctober2006(const Pb& pb, uint8_t* bytes)
     {
         for (std::size_t i = 0; i < part.size; i += 2)
         {
-            StoreBe16(bytes + part.october + i, words[(part.pb + i) / 2]);
+            xsflib::StoreBe16(bytes + part.october + i, words[(part.pb + i) / 2]);
         }
     }
 }

@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -14,9 +13,9 @@
 #include <utility>
 #include <vector>
 
-#include "common/bytes.h"
-#include "dsp/main_memory.h"
-#include "wii/system.h"
+#include "ntdlib/disc/header.h"
+#include "ntdlib/dsp/memory.h"
+#include "xsflib/bytes.h"
 
 namespace wsf::wii
 {
@@ -53,9 +52,7 @@ constexpr int32_t kNoDevice = -6;
 constexpr int32_t kFsNotFound = -106;
 constexpr int32_t kFsExists = -105;
 
-// kDiscHeaderSize is the size of a disc's header (boot.bin and bi2.bin). That's the part of the disc outside the
-// partition that the drive reads. kDiscSize is the size of the whole disc. The drive reports a single-layer disc.
-constexpr uint64_t kDiscHeaderSize = 0x440;
+// The size of the whole disc. The drive reports a single-layer disc.
 constexpr uint64_t kDiscSize = 0x118240000;
 
 // The drive's errors in the form that RequestError gives: the drive's state (0, ready) in the top byte, then the sense
@@ -63,29 +60,20 @@ constexpr uint64_t kDiscSize = 0x118240000;
 constexpr uint32_t kDriveInvalidCommand = 0x052000;
 constexpr uint32_t kDriveOutOfRange = 0x052100;
 
-// How long IOS takes, in CPU cycles, to acknowledge a request and to carry out most requests.
+// How long IOS takes, in CPU cycles, to acknowledge a request and to carry it out.
 constexpr uint64_t kAckDelay = 1'000;
 constexpr uint64_t kReplyDelay = 20'000;
 
 // A buffer that a request names: a physical address and a size. The size may be 0.
-std::span<uint8_t> Buffer(MainMemory& memory, uint32_t address, uint32_t size)
+std::span<uint8_t> Buffer(ntdlib::dsp::WiiMemory& memory, uint32_t address, uint32_t size)
 {
     if (size == 0)
     {
         return {};
     }
 
-    uint8_t* bytes = memory.At(ToPhysical(address), size);
-
+    uint8_t* bytes = memory.At(ntdlib::dsp::ToPhysical(address), size);
     return bytes != nullptr ? std::span<uint8_t>(bytes, size) : std::span<uint8_t>();
-}
-
-std::string Hex(uint32_t value)
-{
-    char text[16];
-    std::snprintf(text, sizeof(text), "0x%x", value);
-
-    return text;
 }
 
 // The console's settings file, /shared2/sys/SYSCONF: "SCv0", the item count and each item's offset, then the items.
@@ -118,24 +106,26 @@ std::vector<uint8_t> MakeSysconf()
     std::vector<uint8_t> file(0x4000, 0);
     std::memcpy(file.data(), "SCv0", 4);
     constexpr uint16_t kCount = sizeof(kItems) / sizeof(kItems[0]);
-    StoreBe16(&file[4], kCount);
+    xsflib::StoreBe16(&file[4], kCount);
+
     uint32_t at = 6 + (kCount + 1) * 2;
     for (uint16_t i = 0; i < kCount; i++)
     {
         const Item& item = kItems[i];
         const auto name_length = static_cast<uint8_t>(std::strlen(item.name));
-        StoreBe16(&file[6 + i * 2], static_cast<uint16_t>(at));
+        xsflib::StoreBe16(&file[6 + i * 2], static_cast<uint16_t>(at));
         file[at++] = static_cast<uint8_t>(item.type | (name_length - 1));
         std::memcpy(&file[at], item.name, name_length);
         at += name_length;
+
         if (item.type == 0xa0)
         {
-            StoreBe32(&file[at], item.value);
+            xsflib::StoreBe32(&file[at], item.value);
             at += 4;
         }
         else if (item.type == 0x80)
         {
-            StoreBe16(&file[at], static_cast<uint16_t>(item.value));
+            xsflib::StoreBe16(&file[at], static_cast<uint16_t>(item.value));
             at += 2;
         }
         else
@@ -143,7 +133,9 @@ std::vector<uint8_t> MakeSysconf()
             file[at++] = static_cast<uint8_t>(item.value);
         }
     }
-    StoreBe16(&file[6 + kCount * 2], static_cast<uint16_t>(at));
+
+    // The offset table's last entry gives the end of the items. "SCed" marks the end of the file.
+    xsflib::StoreBe16(&file[6 + kCount * 2], static_cast<uint16_t>(at));
     std::memcpy(&file[0x3ffc], "SCed", 4);
 
     return file;
@@ -152,7 +144,7 @@ std::vector<uint8_t> MakeSysconf()
 } // namespace
 
 // A device or file that a descriptor refers to. Each operation sets the result and returns whether IOS replies. An
-// operation that the device doesn't support is reported and fails.
+// operation that the device doesn't support fails.
 class Ios::Device
 {
 public:
@@ -168,7 +160,6 @@ public:
     virtual bool Read(std::span<uint8_t> buffer, int32_t& result)
     {
         static_cast<void>(buffer);
-        ios_.Unknown(name_ + ": read");
         result = kInvalid;
 
         return true;
@@ -177,7 +168,6 @@ public:
     virtual bool Write(std::span<const uint8_t> buffer, int32_t& result)
     {
         static_cast<void>(buffer);
-        ios_.Unknown(name_ + ": write");
         result = kInvalid;
 
         return true;
@@ -187,7 +177,6 @@ public:
     {
         static_cast<void>(offset);
         static_cast<void>(whence);
-        ios_.Unknown(name_ + ": seek");
         result = kInvalid;
 
         return true;
@@ -195,8 +184,9 @@ public:
 
     virtual bool Ioctl(uint32_t number, std::span<const uint8_t> in, std::span<uint8_t> out, int32_t& result)
     {
-        ios_.Unknown(name_ + ": ioctl " + Hex(number) + " in " + Hex(static_cast<uint32_t>(in.size())) + " out " +
-                     Hex(static_cast<uint32_t>(out.size())));
+        static_cast<void>(number);
+        static_cast<void>(in);
+        static_cast<void>(out);
         result = kInvalid;
 
         return true;
@@ -205,8 +195,9 @@ public:
     virtual bool Ioctlv(uint32_t number, const std::vector<std::span<uint8_t>>& in,
                         const std::vector<std::span<uint8_t>>& io, int32_t& result)
     {
-        ios_.Unknown(name_ + ": ioctlv " + Hex(number) + " with " + std::to_string(in.size()) + " in, " +
-                     std::to_string(io.size()) + " out");
+        static_cast<void>(number);
+        static_cast<void>(in);
+        static_cast<void>(io);
         result = kInvalid;
 
         return true;
@@ -336,6 +327,7 @@ public:
         {
             data.resize(position_ + buffer.size());
         }
+
         std::copy(buffer.begin(), buffer.end(), data.begin() + static_cast<std::ptrdiff_t>(position_));
         position_ += buffer.size();
         result = static_cast<int32_t>(buffer.size());
@@ -366,8 +358,8 @@ public:
         // GetFileStats: the length and the position.
         if (number == 0x0b && out.size() >= 8)
         {
-            StoreBe32(&out[0], static_cast<uint32_t>(Data().size()));
-            StoreBe32(&out[4], static_cast<uint32_t>(position_));
+            xsflib::StoreBe32(&out[0], static_cast<uint32_t>(Data().size()));
+            xsflib::StoreBe32(&out[4], static_cast<uint32_t>(position_));
             result = 0;
 
             return true;
@@ -410,8 +402,8 @@ public:
             if (out.size() >= 8)
             {
                 std::fill(out.begin(), out.end(), uint8_t{0});
-                StoreBe32(&out[0], 0x00000002);
-                StoreBe32(&out[4], 0x20060526);
+                xsflib::StoreBe32(&out[0], 0x00000002);
+                xsflib::StoreBe32(&out[4], 0x20060526);
             }
 
             return true;
@@ -426,12 +418,10 @@ public:
 
         case 0x71: // Read: length, then the partition offset >> 2
             {
-                const uint32_t length = in.size() >= 8 ? LoadBe32(&in[4]) : 0;
-                const uint64_t offset = in.size() >= 12 ? uint64_t{LoadBe32(&in[8])} * 4 : 0;
+                const uint32_t length = in.size() >= 8 ? xsflib::LoadBe32(&in[4]) : 0;
+                const uint64_t offset = in.size() >= 12 ? uint64_t{xsflib::LoadBe32(&in[8])} * 4 : 0;
                 if (length > out.size() || !ios_.disc_.Read(offset, out.data(), length))
                 {
-                    ios_.Unknown(name_ + ": read of " + Hex(length) + " bytes at " +
-                                 Hex(static_cast<uint32_t>(offset)) + " failed");
                     result = 2;
                 }
 
@@ -442,8 +432,8 @@ public:
             {
                 // The disc's header is the partition's header. The rest of the disc outside the partition reads as
                 // zeros.
-                const uint32_t length = in.size() >= 8 ? LoadBe32(&in[4]) : 0;
-                const uint64_t offset = in.size() >= 12 ? uint64_t{LoadBe32(&in[8])} * 4 : 0;
+                const uint32_t length = in.size() >= 8 ? xsflib::LoadBe32(&in[4]) : 0;
+                const uint64_t offset = in.size() >= 12 ? uint64_t{xsflib::LoadBe32(&in[8])} * 4 : 0;
                 if (length > out.size())
                 {
                     result = 2;
@@ -460,15 +450,11 @@ public:
                 }
 
                 std::fill(out.begin(), out.begin() + length, uint8_t{0});
-                if (offset < kDiscHeaderSize)
+                if (offset < ntdlib::disc::kHeaderSize)
                 {
-                    const auto size = static_cast<std::size_t>(std::min<uint64_t>(length, kDiscHeaderSize - offset));
+                    const auto size =
+                        static_cast<std::size_t>(std::min<uint64_t>(length, ntdlib::disc::kHeaderSize - offset));
                     ios_.disc_.Read(offset, out.data(), size);
-                }
-                else
-                {
-                    ios_.Unknown(name_ + ": unencrypted read of " + Hex(length) + " bytes at " +
-                                 Hex(static_cast<uint32_t>(offset)));
                 }
 
                 return true;
@@ -477,7 +463,7 @@ public:
         case 0x88: // GetCoverStatus: closed, with a disc
             if (out.size() >= 4)
             {
-                StoreBe32(&out[0], 2);
+                xsflib::StoreBe32(&out[0], 2);
             }
 
             return true;
@@ -491,7 +477,7 @@ public:
         case 0xe0: // RequestError: the last request's error, if it was rejected
             if (out.size() >= 4)
             {
-                StoreBe32(&out[0], error_);
+                xsflib::StoreBe32(&out[0], error_);
             }
 
             error_ = 0;
@@ -532,7 +518,7 @@ public:
         {
             uint8_t header[4] = {};
             ios_.disc_.Read(0, header, sizeof(header));
-            StoreBe32(&io[0][0], 0x00010000);
+            xsflib::StoreBe32(&io[0][0], 0x00010000);
             std::copy(std::begin(header), std::end(header), &io[0][4]);
             result = 0;
 
@@ -543,7 +529,7 @@ public:
     }
 };
 
-Ios::Ios(MainMemory& memory, Disc& disc, ppc::Cpu& cpu) : memory_(memory), disc_(disc), cpu_(cpu)
+Ios::Ios(ntdlib::dsp::WiiMemory& memory, Disc& disc, ntdlib::ppc::Cpu& cpu) : memory_(memory), disc_(disc), cpu_(cpu)
 {
     nand_files_["/shared2/sys/SYSCONF"] = MakeSysconf();
 }
@@ -610,10 +596,9 @@ void Ios::Write(uint32_t offset, uint32_t value)
             if (value & kX1)
             {
                 int32_t result = 0;
-                uint64_t delay = kReplyDelay;
-                if (Execute(ppc_message_, result, delay))
+                if (Execute(ppc_message_, result))
                 {
-                    replies_.push_back({ppc_message_, result, cpu_.Cycles() + delay});
+                    replies_.push_back({ppc_message_, result, cpu_.Cycles() + kReplyDelay});
                 }
 
                 ack_due_ = cpu_.Cycles() + kAckDelay;
@@ -669,10 +654,10 @@ void Ios::Advance(uint64_t now)
         uint8_t* request = memory_.At(reply.address, 0x20);
         if (request != nullptr)
         {
-            const uint32_t command = LoadBe32(&request[0]);
-            StoreBe32(&request[0], kReply);
-            StoreBe32(&request[4], static_cast<uint32_t>(reply.result));
-            StoreBe32(&request[8], command);
+            const uint32_t command = xsflib::LoadBe32(&request[0]);
+            xsflib::StoreBe32(&request[0], kReply);
+            xsflib::StoreBe32(&request[4], static_cast<uint32_t>(reply.result));
+            xsflib::StoreBe32(&request[8], command);
         }
 
         arm_message_ = reply.address;
@@ -690,7 +675,7 @@ void Ios::SetIrq()
     }
 }
 
-bool Ios::Execute(PAddr address, int32_t& result, uint64_t& delay)
+bool Ios::Execute(ntdlib::PAddr address, int32_t& result)
 {
     const uint8_t* request = memory_.At(address, 0x20);
     if (request == nullptr)
@@ -700,12 +685,12 @@ bool Ios::Execute(PAddr address, int32_t& result, uint64_t& delay)
         return true;
     }
 
-    const uint32_t command = LoadBe32(&request[0]);
-    const auto fd = static_cast<int32_t>(LoadBe32(&request[8]));
+    const uint32_t command = xsflib::LoadBe32(&request[0]);
+    const auto fd = static_cast<int32_t>(xsflib::LoadBe32(&request[8]));
 
     const auto arg = [request](int i)
     {
-        return LoadBe32(&request[0x0c + i * 4]);
+        return xsflib::LoadBe32(&request[0x0c + i * 4]);
     };
 
     if (command == kOpen)
@@ -713,7 +698,7 @@ bool Ios::Execute(PAddr address, int32_t& result, uint64_t& delay)
         std::string path;
         for (uint32_t at = arg(0); path.size() < 64; at++)
         {
-            const uint8_t* c = memory_.At(ToPhysical(at), 1);
+            const uint8_t* c = memory_.At(ntdlib::dsp::ToPhysical(at), 1);
             if (c == nullptr || *c == 0)
             {
                 break;
@@ -722,7 +707,7 @@ bool Ios::Execute(PAddr address, int32_t& result, uint64_t& delay)
             path += static_cast<char>(*c);
         }
 
-        result = Open(path, arg(1), delay);
+        result = Open(path);
 
         return true;
     }
@@ -730,7 +715,6 @@ bool Ios::Execute(PAddr address, int32_t& result, uint64_t& delay)
     const auto it = descriptors_.find(fd);
     if (it == descriptors_.end())
     {
-        Unknown("a request for descriptor " + std::to_string(fd) + ". That descriptor isn't open");
         result = kInvalid;
 
         return true;
@@ -761,11 +745,11 @@ bool Ios::Execute(PAddr address, int32_t& result, uint64_t& delay)
             // The vectors: the inputs, then the buffers that IOS writes.
             std::vector<std::span<uint8_t>> in;
             std::vector<std::span<uint8_t>> io;
-            const uint8_t* vectors = memory_.At(ToPhysical(arg(3)), (arg(1) + arg(2)) * 8);
+            const uint8_t* vectors = memory_.At(ntdlib::dsp::ToPhysical(arg(3)), (arg(1) + arg(2)) * 8);
             for (uint32_t i = 0; vectors != nullptr && i < arg(1) + arg(2); i++)
             {
                 const std::span<uint8_t> buffer =
-                    Buffer(memory_, LoadBe32(&vectors[i * 8]), LoadBe32(&vectors[i * 8 + 4]));
+                    Buffer(memory_, xsflib::LoadBe32(&vectors[i * 8]), xsflib::LoadBe32(&vectors[i * 8 + 4]));
                 (i < arg(1) ? in : io).push_back(buffer);
             }
 
@@ -773,16 +757,13 @@ bool Ios::Execute(PAddr address, int32_t& result, uint64_t& delay)
         }
 
     default:
-        Unknown("command " + std::to_string(command));
         result = kInvalid;
         return true;
     }
 }
 
-int32_t Ios::Open(const std::string& path, uint32_t mode, uint64_t& delay)
+int32_t Ios::Open(const std::string& path)
 {
-    static_cast<void>(mode);
-    static_cast<void>(delay);
     std::unique_ptr<Device> device;
     if (path == "/dev/stm/immediate" || path == "/dev/stm/eventhook")
     {
@@ -805,8 +786,6 @@ int32_t Ios::Open(const std::string& path, uint32_t mode, uint64_t& delay)
         const auto file = nand_files_.find(path);
         if (file == nand_files_.end())
         {
-            Unknown("open " + path + ": no such file");
-
             return kFsNotFound;
         }
 
@@ -814,8 +793,6 @@ int32_t Ios::Open(const std::string& path, uint32_t mode, uint64_t& delay)
     }
     else
     {
-        Unknown("open " + path);
-
         return kNoDevice;
     }
 
@@ -825,17 +802,10 @@ int32_t Ios::Open(const std::string& path, uint32_t mode, uint64_t& delay)
     {
         fd++;
     }
+
     descriptors_[fd] = std::move(device);
 
     return fd;
-}
-
-void Ios::Unknown(const std::string& what)
-{
-    if (on_unknown)
-    {
-        on_unknown(what);
-    }
 }
 
 } // namespace wsf::wii

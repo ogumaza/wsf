@@ -1,102 +1,88 @@
 // SPDX-License-Identifier: MIT
 
-// NW4R SND's utilities (Util): pitch, volume and pan ratios, the low-pass filter's cutoff, the Wii Remote's filter
-// coefficients and the random numbers. Also the coefficients of the biquad filter that later builds add. Modelled on
-// Wii Sports' main.dol (NW4R SND of 2007). A function that follows one of the game's routines gives its address. NW4R
-// SND and the SDK are built without fused multiply-adds. The same single-precision operations in the same order
-// therefore give the game's results.
+// NW4R SND's utilities (Util): pan ratios, the low-pass filter's cutoff and the random numbers. Also the coefficients
+// of the biquad filter that later builds add. Modelled on Wii Sports' main.dol (NW4R SND of 2007). A function that
+// follows one of the game's routines gives its address. NW4R SND and the SDK are built without fused multiply-adds. The
+// same single-precision operations in the same order therefore give the game's results. The header also defines
+// SndBuild, the build of NW4R SND that a main.dol links. The checks for the builds of November 2008 and September 2009
+// are here too.
 
 #pragma once
 
 #include <array>
 #include <cstdint>
 #include <optional>
-#include <span>
+
+#include "ntdlib/nwsnd/console.h"
+#include "ntdlib/nwsnd/util.h"
+#include "ntdlib/sound_build.h"
 
 namespace wsf::nw4r
 {
 
-// A build of NW4R SND, by the date in its version banner in main.dol ("<< NW4R    - SND \tfinal   build: Mar  8 2008
-// 20:59:14 ..."), as YYYYMMDD. 0 means a build without a banner. The model follows Wii Sports' build (20070608). Where
-// builds from 20080308 (Mario Kart Wii) on differ, it checks Since2008. Where builds from 20080620 (Wii Music) on
-// differ again, it checks SinceJune2008. A build between two of these counts as the older kind because none has been
-// compared with the model.
-//
-// WarioWare: Smooth Moves links a build from 2006 without a banner. That build comes with AX of October 2006. AX's
-// microcode identifies the build (ArchiveModel::Start). Where that build differs, the model checks October2006.
-struct SndBuild
+// The build of NW4R SND that a main.dol links (ntdlib/sound_build.h).
+using SndBuild = ntdlib::SndBuild;
+
+// Builds from November 2008 on take the low-pass filter's cutoff from a table (see CalcLpfFreq). The earliest build
+// seen with the table is of November 20 2008. The latest build seen without it is of September 19 2008. The builds
+// between those dates haven't been checked. They count as the older kind.
+inline bool SinceNovember2008(const SndBuild& build)
 {
-    uint32_t date = 0;
-    bool october_2006 = false; // the build that comes with AX of October 2006
+    return build.date >= 20081120;
+}
 
-    bool October2006() const
-    {
-        return october_2006;
-    }
-
-    bool Since2008() const
-    {
-        return date >= 20080308;
-    }
-
-    bool SinceJune2008() const
-    {
-        return date >= 20080620;
-    }
-};
-
-// The build of NW4R SND that a main.dol links, from its banner.
-SndBuild FindSndBuild(std::span<const uint8_t> dol);
+// Builds from September 2009 on let a voice's volume and envelope go above full level (see Voice::SetVolume). The
+// earliest build seen that does is of September 24 2009. The latest build seen that doesn't is of November 20 2008. The
+// builds between those dates haven't been checked. They count as the older kind.
+inline bool SinceSeptember2009(const SndBuild& build)
+{
+    return build.date >= 20090924;
+}
 
 // The random numbers (Util::CalcRandom, 0x8004ec58): x = x * 0x19660D + 0x3C6EF35F from 0x12345678. A draw gives x's
 // top 16 bits. The game has one generator for the whole sound system.
-class Random
-{
-public:
-    uint16_t Next()
-    {
-        state_ = state_ * 0x19660D + 0x3C6EF35F;
-
-        return static_cast<uint16_t>(state_ >> 16);
-    }
-
-private:
-    uint32_t state_ = 0x12345678;
-};
-
-enum class PanCurve : uint8_t
-{
-    kSqrt = 0,
-    kSinCos = 1,
-    kLinear = 2,
-};
+using Random = ntdlib::nwsnd::Random;
 
 // How a pan becomes a ratio (Util::PanInfo): the curve, whether the centre gives 1 (rather than the curve's value
 // there), and whether ratios stop at 1 (rather than 2).
-struct PanInfo
+using PanInfo = ntdlib::nwsnd::PanInfo;
+
+// The ratio for one side at a pan of -1 (left) to 1 (right), in the Wii's stereo mix (Util::CalcPanRatio, 0x8004ea24).
+inline float CalcPanRatio(float pan, const PanInfo& info)
 {
-    PanCurve curve = PanCurve::kSqrt;
-    bool center_zero = false;
-    bool zero_clamp = false;
-};
-
-// 2^(pitch / 3072): `pitch` in 256ths of a semitone (Util::CalcPitchRatio, 0x8004e83c).
-float CalcPitchRatio(int pitch);
-
-// 10^(dB / 20), from a table in 0.1 dB steps, for dB clamped to -90.4..6.0 (Util::CalcVolumeRatio, 0x8004e9cc).
-float CalcVolumeRatio(float db);
-
-// The ratio for one side at a pan of -1 (left) to 1 (right) (Util::CalcPanRatio, 0x8004ea24).
-float CalcPanRatio(float pan, const PanInfo& info);
+    return ntdlib::nwsnd::CalcPanRatio<ntdlib::nwsnd::RevolutionPolicy>(pan, info, ntdlib::nwsnd::OutputMode::kStereo);
+}
 
 // The low-pass filter's cutoff in Hz for a scale of 0..1: 32000 * 2^(10 (scale - 1)) (Util::CalcLpfFreq, 0x8004eb98).
-// The game computes the power with its C library's pow in double precision.
-int CalcLpfFreq(float scale);
+// The game computes the power with its C library's pow in double precision. Builds from November 2008 on take the
+// cutoff from a table instead. The Wii U's library (CafePolicy) reads the table in the same way: 80 Hz below
+// 0.13561438, 16000 Hz from 0.9, and steps a thirtieth apart between them. These builds hold the scale to 0 and 1 here,
+// not in Voice::SetLpfFreq. The model holds it in both places. The cutoffs come out the same.
+inline uint16_t CalcLpfFreq(float scale, const SndBuild& build)
+{
+    if (SinceNovember2008(build))
+    {
+        return ntdlib::nwsnd::CalcLpfFreq<ntdlib::nwsnd::CafePolicy>(scale);
+    }
+
+    return ntdlib::nwsnd::CalcLpfFreq<ntdlib::nwsnd::RevolutionPolicy>(scale);
+}
 
 // The biquad filter's coefficients b0, b1, b2, a1 and a2 for a filter `type` at a `value` of 0 (mildest) to 1, in
-// builds from June 2008 on. Type 1 is a low-pass filter, 2 a high-pass and 3 to 5 band-passes. Other types have no
-// coefficients. Type 0 is no filter. For any other type it uses, the game registers a function. The model can't run
-// that function.
-std::optional<std::array<uint16_t, 5>> BiquadFilterCoefs(int type, float value);
+// builds from June 2008 on. AX takes them as unsigned 16-bit values. Type 1 is a low-pass filter, 2 a high-pass and 3
+// to 5 band-passes (ntdlib's BiquadPresetCoefficients). Other types have no coefficients. Type 0 is no filter. For any
+// other type it uses, the game registers a function. The model can't run that function.
+inline std::optional<std::array<uint16_t, 5>> BiquadFilterCoefs(int type, float value)
+{
+    const int16_t* row = ntdlib::nwsnd::BiquadPresetCoefficients<ntdlib::nwsnd::RevolutionPolicy>(type, value);
+    if (row == nullptr)
+    {
+        return std::nullopt;
+    }
+
+    return std::array<uint16_t, 5>{static_cast<uint16_t>(row[0]), static_cast<uint16_t>(row[1]),
+                                   static_cast<uint16_t>(row[2]), static_cast<uint16_t>(row[3]),
+                                   static_cast<uint16_t>(row[4])};
+}
 
 } // namespace wsf::nw4r

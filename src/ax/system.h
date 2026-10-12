@@ -17,10 +17,12 @@
 #include <functional>
 #include <utility>
 
+#include "ntdlib/ax/voices.h"
+#include "ntdlib/dsp/memory.h"
+#include "ntdlib/types.h"
+
 #include "ax/pb.h"
 #include "ax/voice.h"
-#include "common/common_types.h"
-#include "dsp/main_memory.h"
 
 namespace wsf::ax
 {
@@ -29,15 +31,15 @@ namespace wsf::ax
 namespace layout
 {
 
-constexpr PAddr kCompressorTable = 0x003ab880; // 0xfc0 bytes
-constexpr PAddr kCommandLists = 0x0042e280;    // two lists of 0x80 bytes
-constexpr PAddr kRemoteBuffers = 0x0042e3c0;   // 4 rings of 180 samples
-constexpr PAddr kSurroundBuffer = 0x0042e960;  // 0x300 bytes
-constexpr PAddr kOutputBuffers = 0x0042ec60;   // 3 frames of 96 stereo samples
-constexpr PAddr kStudio = 0x0042f180;          // 0x78 bytes
-constexpr PAddr kPbs = 0x0042f200;             // 96 PBs
-constexpr PAddr kItdBuffers = 0x00436a00;      // 96 buffers of 0x40 bytes
-constexpr PAddr kUpdateBuffers = 0x00438200;   // October 2006: 64 buffers of 0x100 bytes, after the ITD buffers
+constexpr ntdlib::PAddr kCompressorTable = 0x003ab880; // 0xfc0 bytes
+constexpr ntdlib::PAddr kCommandLists = 0x0042e280;    // two lists of 0x80 bytes
+constexpr ntdlib::PAddr kRemoteBuffers = 0x0042e3c0;   // 4 rings of 180 samples
+constexpr ntdlib::PAddr kSurroundBuffer = 0x0042e960;  // 0x300 bytes
+constexpr ntdlib::PAddr kOutputBuffers = 0x0042ec60;   // 3 frames of 96 stereo samples
+constexpr ntdlib::PAddr kStudio = 0x0042f180;          // 0x78 bytes
+constexpr ntdlib::PAddr kPbs = 0x0042f200;             // 96 PBs
+constexpr ntdlib::PAddr kItdBuffers = 0x00436a00;      // 96 buffers of 0x40 bytes
+constexpr ntdlib::PAddr kUpdateBuffers = 0x00438200;   // October 2006: 64 buffers of 0x100 bytes, after the ITD buffers
 
 constexpr uint32_t kCompressorTableSize = 0xfc0;
 constexpr uint32_t kCommandListSize = 0x80;
@@ -53,7 +55,7 @@ constexpr uint32_t kUpdateBufferSize = 0x100;
 struct Frame
 {
     uint32_t command_list = 0; // the cached address that AX mails
-    PAddr output = 0;
+    ntdlib::PAddr output = 0;
 };
 
 // A copy of a System is a snapshot of AX's state. Assigning the copy back to the original System restores that state.
@@ -61,7 +63,7 @@ struct Frame
 class System
 {
 public:
-    explicit System(MainMemory& memory);
+    explicit System(ntdlib::dsp::WiiMemory& memory);
 
     // AXInit (main.dol 0x80104450), without booting the DSP. Sets up the voices, the depop block and the command list
     // state. Writes the compressor table to the address where the microcode reads it. Builds the first command list
@@ -88,6 +90,12 @@ public:
 
     // AXSetVoicePriority (0x801048c0): moves the voice to the newest end of the stack for its new priority.
     void SetVoicePriority(Voice* voice, uint32_t priority);
+
+    // The voice's priority, or 0 for a free voice.
+    uint32_t VoicePriority(const Voice* voice) const
+    {
+        return allocation_.Priority(voice->index);
+    }
 
     // AXSetMasterVolume (0x80105bd0): sets the volume of the OUTPUT command. The next command list built uses it.
     void SetMasterVolume(uint16_t volume);
@@ -125,15 +133,10 @@ private:
         int16_t delta = 0; // AXSTUDIO.dL and so on
     };
 
-    void PushFreeStack(Voice* voice);
-    Voice* PopFreeStack();
     void PushCallbackStack(Voice* voice);
     Voice* PopCallbackStack();
-    void RemoveFromStack(Voice* voice);
-    void PushStackHead(Voice* voice, uint32_t priority);
-    Voice* PopStackFromBottom(uint32_t priority);
 
-    PAddr PbAddress(uint32_t index) const;
+    ntdlib::PAddr PbAddress(uint32_t index) const;
     void SetPbDefault(Voice* voice);
     void SyncPbs(uint32_t base_cycles);
     uint32_t RunningCycles(const Pb& pb) const;
@@ -145,10 +148,11 @@ private:
     uint32_t CommandListAddress();
     void WriteCommand(uint16_t word);
     void WriteCommand32(uint32_t value);
-    void NextFrame(PAddr surround, PAddr output, const std::array<PAddr, kRemoteCount>& remote);
-    void NextFrameOctober2006(PAddr surround, PAddr output, const std::array<PAddr, kRemoteCount>& remote);
+    void NextFrame(ntdlib::PAddr surround, ntdlib::PAddr output, const std::array<ntdlib::PAddr, kRemoteCount>& remote);
+    void NextFrameOctober2006(ntdlib::PAddr surround, ntdlib::PAddr output,
+                              const std::array<ntdlib::PAddr, kRemoteCount>& remote);
 
-    MainMemory* memory_;
+    ntdlib::dsp::WiiMemory* memory_;
     Build build_ = Build::kDecember2006;
     uint32_t voice_count_ = kVoiceCount;
     std::function<void()> frame_callback_;
@@ -158,10 +162,11 @@ private:
     // frame.
     std::array<Pb, kVoiceCount> dsp_pbs_;
 
-    // The priority stacks: newest voice at the head, oldest at the tail. The free stack (priority 0) only uses its
-    // head.
-    std::array<Voice*, kPriorityMax + 1> stack_head_{};
-    std::array<Voice*, kPriorityMax + 1> stack_tail_{};
+    // The priority stacks and the free stack (priority 0), by voice index: newest voice at the head, oldest at the
+    // tail.
+    ntdlib::ax::Voices allocation_;
+
+    // The voices that SyncPbs dropped, newest first. ServiceCallbackStack runs their callbacks.
     Voice* callback_stack_ = nullptr;
 
     uint32_t max_dsp_cycles_ = 0;
@@ -170,9 +175,9 @@ private:
 
     // The command lists: AX writes one while the DSP reads the other.
     uint32_t command_list_position_ = 0;
-    PAddr command_list_write_ = 0;
+    ntdlib::PAddr command_list_write_ = 0;
     uint32_t command_list_cycles_ = 0;
-    std::array<PAddr, 2> list_output_{}; // the output buffer named in each list
+    std::array<ntdlib::PAddr, 2> list_output_{}; // the output buffer named in each list
     uint16_t master_volume_ = kMaxVolume;
 
     uint32_t output_frame_ = 0;

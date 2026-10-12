@@ -5,14 +5,14 @@ the game's AX microcode on an emulated GameCube/Wii DSP. In game mode, the game'
 Wii. In archive mode, WSF's model of the SDK's sound player drives it.
 
 **Status:** the component builds with Apple Clang for foobar2000 on macOS. It's set up to build with clang-cl (or MSVC)
-for 32-bit and 64-bit foobar2000 on Windows, like 3SF's component. The Windows build hasn't been tested in foobar2000
-yet. `ctest` covers the player core.
+for 32-bit and 64-bit foobar2000 on Windows. The Windows build hasn't been tested in foobar2000 yet. `ctest` covers
+the player core.
 
 ## Features
 
 - Like kode54's PSF-family components, the component shows tags as metadata: `game` as album, `year` as date, and
-  `replaygain_*` as ReplayGain. Tags can be edited. Editing rewrites the tag area and keeps `_lib`, `length`, `fade` and
-  `volume`.
+  `replaygain_*` as ReplayGain. Tags can be edited. Editing rewrites the tag area and keeps `_lib`, `length`, `fade`,
+  `volume` and `utf8`.
 - Length and fade come from the `length` and `fade` tags. Files without a length tag play for the default length and
   fade. They stop early when the sound ends by itself.
 - Advanced preferences › Decoding › WSF decoder: default length and fade, endless playback, and rendering ahead. Endless
@@ -31,7 +31,7 @@ yet. `ctest` covers the player core.
 
 You need the foobar2000 SDK, from <https://www.foobar2000.org/SDK>. Unpack it and use the folder containing `pfc` and
 `foobar2000` as the SDK path below. A newer SDK than the one the component was last built with may require changes to
-`plugins/foobar2000/CMakeLists.txt`.
+xsflib's `cmake/XsflibApps.cmake`.
 
 **On macOS:** you need the Xcode command line tools (`xcode-select --install`), CMake 3.20 or later, and the SDK
 unpacked somewhere (macOS's `tar -xf SDK-<date>.7z` unpacks it).
@@ -66,7 +66,7 @@ selects MSVC. MSVC should produce the same audio. Its build runs more slowly.
 The build compiles the SDK's `pfc`, `foobar2000/SDK` and `foobar2000/foobar2000_component_client` sources directly. On
 Windows it links `foobar2000/shared/shared-<arch>.lib` (or `shared.lib`). On macOS it compiles the parts of
 `foobar2000/shared` and the Objective-C++ files that the SDK's Xcode projects build. If the SDK layout has changed,
-adjust `plugins/foobar2000/CMakeLists.txt`.
+adjust xsflib's `cmake/XsflibApps.cmake`.
 
 On Windows everything is built with the static C runtime (`/MT`). The component then requires no runtime DLLs. On macOS
 it uses only the system's libraries.

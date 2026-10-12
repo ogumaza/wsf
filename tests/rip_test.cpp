@@ -1,40 +1,55 @@
 // SPDX-License-Identifier: MIT
 
-// Tests the ripper's choice of music (rip::IsMusic) on an archive of sounds and players that tests/rsar_files.h builds.
-// Also tests the length analysis on sequences in which one track plays while another polls or counts a variable or
-// marks beats for the game.
+// Tests the ripper's choice of music (rip::IsMusic) on an archive of sounds and players that
+// ntdlib/testing/rsar_files.h builds. Also tests the length analysis on sequences in which one track plays while
+// another polls or counts a variable or marks beats for the game. TestLibraryNames checks the names of libraries in a
+// folder that holds earlier rips (rip::LibraryName).
 
 #include "rip/rip.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <exception>
+#include <filesystem>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <vector>
 
-#include "ax/microcode.h"
-#include "check.h"
+#include "ntdlib/rsar/formats.h"
+#include "ntdlib/sound_build.h"
+#include "ntdlib/testing/rsar_files.h"
+#include "xsflib/rip/file_names.h"
+#include "xsflib/rip/tool.h"
+#include "xsflib/testing/check.h"
+
+#include "nw4r/rsar_options.h"
 #include "nw4r/util.h"
-#include "rsar/formats.h"
-#include "rsar_files.h"
+
+using xsflib::testing::Check;
 
 using namespace wsf;
-using namespace wsf::test;
+using ntdlib::testing::rsar_files::Bytes;
+using ntdlib::testing::rsar_files::MakeArchive;
+using ntdlib::testing::rsar_files::MakeSequence;
+using ntdlib::testing::rsar_files::MakeSoundTable;
+using ntdlib::testing::rsar_files::TableSound;
+
+namespace fs = std::filesystem;
 
 namespace
 {
 
 // The length analysis of a sequence of `commands`, with the tracks in the mask `tracks`, in an archive that
-// tests/rsar_files.h builds. The archive's waves loop unless `loop` is false, and play at `sample_rate` Hz. The model
-// can't drive an empty microcode. The analyzer then runs the model alone. A frame then has sound while any note plays.
+// ntdlib/testing/rsar_files.h builds. The archive's waves loop unless `loop` is false, and play at `sample_rate` Hz.
+// The model can't drive an empty microcode. The analyzer then runs the model alone. A frame then has sound while any
+// note plays.
 std::optional<rip::Timing> Measure(const Bytes& commands, uint32_t tracks, bool loop = true,
                                    uint16_t sample_rate = 32000)
 {
     const rip::LengthAnalyzer analyzer(MakeArchive(MakeSequence(commands), 0, tracks, loop, sample_rate),
-                                       ax::Microcode{}, nw4r::SndBuild{20070608});
-
+                                       ntdlib::Microcode{}, nw4r::SndBuild{20070608});
     return analyzer.Analyze(0);
 }
 
@@ -58,11 +73,11 @@ void TestLengths()
     // In the first three sequences, track 0 opens track 1 at 22 and then polls variable 0 once a tick. It compares the
     // variable with 1 (F0 90), would jump to its end at 21 if they were equal (A2 89), waits a tick and jumps back to
     // 5. Variable 0 stays at its default of -1.
-    const Bytes poll = {0x88, 1,    0x00, 0x00, 22,   0xF0, 0x90, 0x00, 0x00, 0x01, 0xA2,
-                        0x89, 0x00, 0x00, 21,   0x80, 1,    0x89, 0x00, 0x00, 5,    0xFF};
-    const auto with_poll = [&poll](const Bytes& track1)
+    const Bytes kPoll = {0x88, 1,    0x00, 0x00, 22,   0xF0, 0x90, 0x00, 0x00, 0x01, 0xA2,
+                         0x89, 0x00, 0x00, 21,   0x80, 1,    0x89, 0x00, 0x00, 5,    0xFF};
+    const auto with_poll = [&kPoll](const Bytes& track1)
     {
-        Bytes commands = poll;
+        Bytes commands = kPoll;
         commands.insert(commands.end(), {0xD1, 0x7F, 0xD2, 0x7F, 0xD3, 0x7F});
         commands.insert(commands.end(), track1.begin(), track1.end());
 
@@ -273,6 +288,99 @@ void TestInnerLoops()
     CheckTiming("an inner loop doesn't hide the notes of the loop around it", counted, 490, 510, 10000);
 }
 
+// Tests the ripper's choice of music (rip::IsMusic).
+void TestIsMusic()
+{
+    // The players: some named for music by a word in their names, one of them followed by digits. One sound effects
+    // player also has MUSIC in its name. The others have unrelated names.
+    const std::vector<const char*> kPlayers = {"PLAYER_BGM_MAIN", "MUSIC_SE_PLAYER", "SONG_PLAYER",   "PLAYER_SFX",
+                                               "PLAYER_FANFARE",  "PLAYER_BGM2",     "MUSICAL_PLAYER"};
+
+    // The sounds, with their names, types and players, and whether each is music.
+    struct Case
+    {
+        TableSound sound;
+        bool music;
+    };
+
+    const Case kCases[] = {
+        {{"SEQ_FIELD", 1, 0}, true},       // on a BGM player
+        {{"SE_CURSOR", 1, 1}, false},      // on a player whose name has SE
+        {{"SEQ_ODE", 1, 2}, true},         // on a SONG player
+        {{"SEQ_JUNGLE_BGM1", 1, 3}, true}, // its label contains BGM
+        {{"SEQ_WHISTLE", 1, 3}, false},    // a sound effect
+        {{"STRM_RACE", 2, 0}, false},      // a stream, which isn't ripped
+        {{"SEQ_GOAL", 1, 4}, true},        // on a FANFARE player
+        {{"SEQ_BOSS", 1, 5}, true},        // on a BGM2 player
+        {{"SEQ_TUNE", 1, 6}, false},       // MUSICAL isn't MUSIC
+        {{"seq_bgm_menu", 1, 3}, true},    // labels are matched ignoring case
+        {{"SEQ_NOWHERE", 1, 9}, false},    // on a player the archive doesn't have
+    };
+    std::vector<TableSound> sounds;
+    for (const Case& c : kCases)
+    {
+        sounds.push_back(c.sound);
+    }
+
+    const Bytes bytes = MakeSoundTable(sounds, kPlayers);
+    const ntdlib::rsar::SoundArchive archive = ntdlib::rsar::SoundArchive::Load(bytes, wsf::nw4r::kRsarOptions);
+
+    for (std::size_t i = 0; i < sounds.size(); ++i)
+    {
+        Check(rip::IsMusic(archive, static_cast<uint32_t>(i)) == kCases[i].music,
+              std::string(sounds[i].name) + (kCases[i].music ? " is music" : " isn't music"));
+    }
+
+    Check(!rip::IsMusic(archive, static_cast<uint32_t>(sounds.size())), "a sound the archive doesn't have");
+}
+
+// The name that rip::LibraryName gives `library` in `folder`, from a registry that holds no names yet. Each run of the
+// ripper starts with such a registry.
+std::string NameInFolder(const fs::path& folder, const std::string& base, const std::vector<uint8_t>& library)
+{
+    xsflib::rip::FileNames names(".wsflib", ".miniwsf");
+    return rip::LibraryName(folder, names, base, library);
+}
+
+// Tests the names of libraries in a folder that holds earlier rips (rip::LibraryName).
+void TestLibraryNames()
+{
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path folder = fs::temp_directory_path() / ("wsf_rip_test_" + std::to_string(stamp));
+    fs::create_directories(folder);
+
+    // The earlier rips: two libraries of 3 bytes, one of over 1 MiB and a folder with a library's name. FileHolds
+    // compares the large one in blocks.
+    std::vector<uint8_t> large((std::size_t{1} << 20) + 1, 7);
+    const bool written = xsflib::rip::WriteFile(folder / "Game.wsflib", {1, 2, 3}) &&
+                         xsflib::rip::WriteFile(folder / "Game_2.wsflib", {1, 2, 4}) &&
+                         xsflib::rip::WriteFile(folder / "Large.wsflib", large);
+    fs::create_directories(folder / "Folder.wsflib");
+
+    const std::string free_name = NameInFolder(folder, "New", {1});
+    const std::string same = NameInFolder(folder, "Game", {1, 2, 3});
+    const std::string same_as_second = NameInFolder(folder, "Game", {1, 2, 4});
+    const std::string other = NameInFolder(folder, "Game", {1, 2, 5});
+    const std::string shorter = NameInFolder(folder, "Game", {1, 2});
+    const std::string large_same = NameInFolder(folder, "Large", large);
+    large.back() = 8;
+    const std::string large_other = NameInFolder(folder, "Large", large);
+    const std::string over_folder = NameInFolder(folder, "Folder", {1});
+
+    Check(written, "the earlier rips are written");
+    Check(free_name == "New.wsflib", "a free name is taken");
+    Check(same == "Game.wsflib", "a file with the same bytes is replaced");
+    Check(same_as_second == "Game_2.wsflib", "the first name whose file holds the same bytes is taken");
+    Check(other == "Game_3.wsflib", "files of the same size with other bytes are passed over");
+    Check(shorter == "Game_3.wsflib", "longer files are passed over");
+    Check(large_same == "Large.wsflib", "a file over 1 MiB with the same bytes is replaced");
+    Check(large_other == "Large_2.wsflib", "a file over 1 MiB that differs in its last byte is passed over");
+    Check(over_folder == "Folder_2.wsflib", "a folder with the name is passed over");
+
+    std::error_code ec;
+    fs::remove_all(folder, ec);
+}
+
 } // namespace
 
 int main()
@@ -284,58 +392,13 @@ int main()
         TestTracksThatWaitForEver();
         TestSwells();
         TestInnerLoops();
-
-        // The players: some named for music by a word in their names, one of them followed by digits. One sound effects
-        // player also has MUSIC in its name. The others have unrelated names.
-        const std::vector<const char*> players = {"PLAYER_BGM_MAIN", "MUSIC_SE_PLAYER", "SONG_PLAYER",   "PLAYER_SFX",
-                                                  "PLAYER_FANFARE",  "PLAYER_BGM2",     "MUSICAL_PLAYER"};
-        struct Case
-        {
-            TableSound sound;
-            bool music;
-        };
-
-        const Case cases[] = {
-            {{"SEQ_FIELD", 1, 0}, true},       // on a BGM player
-            {{"SE_CURSOR", 1, 1}, false},      // on a player whose name has SE
-            {{"SEQ_ODE", 1, 2}, true},         // on a SONG player
-            {{"SEQ_JUNGLE_BGM1", 1, 3}, true}, // its label contains BGM
-            {{"SEQ_WHISTLE", 1, 3}, false},    // a sound effect
-            {{"STRM_RACE", 2, 0}, false},      // a stream, which isn't ripped
-            {{"SEQ_GOAL", 1, 4}, true},        // on a FANFARE player
-            {{"SEQ_BOSS", 1, 5}, true},        // on a BGM2 player
-            {{"SEQ_TUNE", 1, 6}, false},       // MUSICAL isn't MUSIC
-            {{"seq_bgm_menu", 1, 3}, true},    // labels are matched ignoring case
-            {{"SEQ_NOWHERE", 1, 9}, false},    // on a player the archive doesn't have
-        };
-        std::vector<TableSound> sounds;
-        for (const Case& c : cases)
-        {
-            sounds.push_back(c.sound);
-        }
-
-        const Bytes bytes = MakeSoundTable(sounds, players);
-        const rsar::SoundArchive archive = rsar::SoundArchive::Load(bytes);
-
-        for (std::size_t i = 0; i < sounds.size(); ++i)
-        {
-            Check(rip::IsMusic(archive, static_cast<uint32_t>(i)) == cases[i].music,
-                  std::string(sounds[i].name) + (cases[i].music ? " is music" : " isn't music"));
-        }
-
-        Check(!rip::IsMusic(archive, static_cast<uint32_t>(sounds.size())), "a sound the archive doesn't have");
+        TestIsMusic();
+        TestLibraryNames();
     }
     catch (const std::exception& e)
     {
         Check(false, std::string("unexpected error: ") + e.what());
     }
 
-    if (failures)
-    {
-        std::fprintf(stderr, "%d check(s) failed\n", failures);
-
-        return 1;
-    }
-
-    return 0;
+    return xsflib::testing::Summary("rip");
 }

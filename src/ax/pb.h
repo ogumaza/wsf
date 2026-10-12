@@ -14,16 +14,14 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "ntdlib/ax/ax.h"
+#include "ntdlib/sound_build.h"
+
 namespace wsf::ax
 {
 
-// The builds of AX's CPU side that the model follows. The microcode is built with the CPU side. The microcode therefore
-// identifies the build (IdentifyBuild in ax/microcode.h).
-enum class Build
-{
-    kOctober2006,  // 64 voices, 0x120-byte PBs and other command numbers
-    kDecember2006, // and the later builds: they take the same command lists and PBs
-};
+// The build of AX's CPU side. AX's microcode identifies it (ntdlib/sound_build.h).
+using Build = ntdlib::AxBuild;
 
 // One AX frame is 3 ms long and holds 96 stereo samples at 32 kHz. The Wii Remote speakers get 18 samples per frame at
 // 6 kHz.
@@ -32,42 +30,31 @@ constexpr int kRemoteSamplesPerFrame = 18;
 constexpr int kSampleRate = 32000;
 constexpr int kRemoteCount = 4;
 
-// AX has 96 voices (AX_VOICE_MAX) and 32 priorities. Priority 0 marks a free voice. Priority 31 is the highest. The
-// build of October 2006 has 64 voices.
-constexpr int kVoiceCount = 96;
+// AX has 96 voices (AX_VOICE_MAX) and 32 priorities, as the Wii U's AX has (ntdlib::ax). Priority 0 marks a free voice.
+// Priority 31 is the highest. The build of October 2006 has 64 voices.
+using ntdlib::ax::kPriorityFree;
+using ntdlib::ax::kPriorityMax;
+using ntdlib::ax::kVoiceCount;
 constexpr int kVoiceCountOctober2006 = 64;
-constexpr uint32_t kPriorityFree = 0;
-constexpr uint32_t kPriorityMin = 1;
-constexpr uint32_t kPriorityMax = 31;
 
 // The volume value for a gain of 1.0 in the mixer and the command list (AX_MAX_VOLUME).
 constexpr uint16_t kMaxVolume = 0x8000;
 
 // The sample formats in PbAddr::format.
-enum class SampleFormat : uint16_t
-{
-    kAdpcm = 0,
-    kPcm16 = 10,
-    kPcm8 = 25,
-};
+using ntdlib::ax::SampleFormat;
 
 // For ADPCM, the addresses in PbAddr count nibbles. Each 8-byte ADPCM frame holds a header byte and 14 samples.
-constexpr uint32_t kAdpcmFrameSize = 8;
 constexpr uint32_t kAdpcmSamplesPerFrame = 14;
 constexpr uint32_t kAdpcmNibblesPerFrame = 16;
 
-enum class VoiceState : uint16_t
-{
-    kStop = 0,
-    kRun = 1,
-};
+using ntdlib::ax::VoiceState;
 
 // Values of the `on` word in PbLpf, PbBiquad and the remote filter. The remote filter can be either type.
 constexpr uint16_t kLpfOn = 1;
 constexpr uint16_t kBiquadOn = 2;
 
-// Bits of Pb::mixer_ctrl. They select which of the voice's mixes are on and which of them ramp (DELTA). The C bits also
-// serve as the rear left and right channels of Dolby Pro Logic II.
+// Bits of Pb::MixerCtrl(). They select which of the voice's mixes are on and which of them ramp (DELTA). The C bits
+// also serve as the rear left and right channels of Dolby Pro Logic II.
 namespace mixer
 {
 
@@ -96,43 +83,7 @@ constexpr uint32_t kDeltaCS = 1u << 30;
 
 // The parts of a voice's PB that the CPU has changed since the last frame (AXVPB::sync, AX_PBSYNC_*). __AXSyncPBs
 // copies only these parts into the PB in main memory. It leaves the rest as the microcode wrote them.
-namespace sync
-{
-
-constexpr uint32_t kSelect = 1u << 0;
-constexpr uint32_t kMixerCtrl = 1u << 1;
-constexpr uint32_t kState = 1u << 2;
-constexpr uint32_t kType = 1u << 3;
-constexpr uint32_t kMix = 1u << 4;
-constexpr uint32_t kItd = 1u << 5;
-constexpr uint32_t kItdShift = 1u << 6;
-constexpr uint32_t kDpop = 1u << 7;
-constexpr uint32_t kVe = 1u << 8;
-constexpr uint32_t kVeDelta = 1u << 9;
-constexpr uint32_t kAddr = 1u << 10;
-constexpr uint32_t kLoopFlag = 1u << 11;
-constexpr uint32_t kLoopAddr = 1u << 12;
-constexpr uint32_t kEndAddr = 1u << 13;
-constexpr uint32_t kCurrAddr = 1u << 14;
-constexpr uint32_t kAdpcm = 1u << 15;
-constexpr uint32_t kSrc = 1u << 16;
-constexpr uint32_t kSrcRatio = 1u << 17;
-constexpr uint32_t kAdpcmLoop = 1u << 18;
-constexpr uint32_t kLpf = 1u << 19;
-constexpr uint32_t kLpfCoefs = 1u << 20;
-constexpr uint32_t kBiquad = 1u << 21;
-constexpr uint32_t kBiquadCoefs = 1u << 22;
-constexpr uint32_t kRemote = 1u << 23;
-constexpr uint32_t kRmtMixerCtrl = 1u << 24;
-constexpr uint32_t kRmtMix = 1u << 25;
-constexpr uint32_t kRmtDpop = 1u << 26;
-constexpr uint32_t kRmtSrc = 1u << 27;
-constexpr uint32_t kRmtIir = 1u << 28;
-constexpr uint32_t kRmtIirLpfCoefs = 1u << 29;
-constexpr uint32_t kRmtIirBiquadCoefs = 1u << 30;
-constexpr uint32_t kAll = 1u << 31;
-
-} // namespace sync
+namespace sync = ntdlib::ax::sync;
 
 // The mix: a volume and a per-sample ramp for each bus and channel.
 struct PbMix
@@ -303,6 +254,17 @@ struct PbRmtSrc
 
 struct Pb
 {
+    uint32_t MixerCtrl() const
+    {
+        return uint32_t{mixer_ctrl_hi} << 16 | mixer_ctrl_lo;
+    }
+
+    void SetMixerCtrl(uint32_t ctrl)
+    {
+        mixer_ctrl_hi = static_cast<uint16_t>(ctrl >> 16);
+        mixer_ctrl_lo = static_cast<uint16_t>(ctrl);
+    }
+
     uint16_t next_hi = 0; // + 0x0: the next PB in the microcode's list, or 0 for the last
     uint16_t next_lo = 0;
     uint16_t curr_hi = 0; // + 0x4: this PB's address
@@ -330,17 +292,6 @@ struct Pb
     PbRmtSrc rmt_src;            // + 0x10a
     PbBiquad rmt_iir;            // + 0x114: as a low-pass filter (on = 1), the words are on, yn1, a0 and b0
     std::array<uint16_t, 12> padding{};
-
-    uint32_t MixerCtrl() const
-    {
-        return uint32_t{mixer_ctrl_hi} << 16 | mixer_ctrl_lo;
-    }
-
-    void SetMixerCtrl(uint32_t ctrl)
-    {
-        mixer_ctrl_hi = static_cast<uint16_t>(ctrl >> 16);
-        mixer_ctrl_lo = static_cast<uint16_t>(ctrl);
-    }
 };
 
 constexpr std::size_t kPbSize = 0x140;

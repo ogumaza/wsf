@@ -4,18 +4,19 @@
 // library and AX do around each frame (__AXOutNewFrame at main.dol 0x80105c00 and __DSPHandler at 0x80138d8c in Wii
 // Sports).
 //
-// The microcode starts in the state that the boot ROM leaves it in (dsp::Dsp::StartMicrocode). It mails 0xDCD10000 when
-// it's ready. Each frame, AX mails 0xBABE0000 with the size of the command list, then the address of the list. The
-// microcode mixes the list. Along the way it sends a request mail (0xDCD10004) that AX ignores. At the end of the list
-// the microcode mails 0xDCD10002 (yield). The DSP library's interrupt handler has no other task to run. It answers
-// 0xCDD10003 (continue).
+// The microcode starts in the state that the boot ROM leaves it in (ntdlib::dsp::Dsp::StartMicrocode). It mails
+// 0xDCD10000 when it's ready. Each frame, AX mails 0xBABE0000 with the size of the command list, then the address of
+// the list. The microcode mixes the list. Along the way it sends a request mail (0xDCD10004) that AX ignores. At the
+// end of the list the microcode mails 0xDCD10002 (yield). The DSP library's interrupt handler has no other task to run.
+// It answers 0xCDD10003 (continue).
 
 #pragma once
 
 #include <cstdint>
 #include <span>
 
-#include "dsp/dsp.h"
+#include "ntdlib/dsp/dsp.h"
+#include "ntdlib/dsp/memory.h"
 
 namespace wsf::ax
 {
@@ -23,7 +24,7 @@ namespace wsf::ax
 class DspLink
 {
 public:
-    explicit DspLink(dsp::Dsp& dsp) : dsp_(&dsp)
+    explicit DspLink(ntdlib::dsp::Dsp<ntdlib::dsp::WiiMemory>& dsp) : dsp_(&dsp)
     {
     }
 
@@ -42,7 +43,7 @@ private:
     // Runs the DSP until it sends a mail. Reads the mail into `mail`.
     bool WaitForMail(uint32_t& mail);
 
-    dsp::Dsp* dsp_;
+    ntdlib::dsp::Dsp<ntdlib::dsp::WiiMemory>* dsp_;
 };
 
 } // namespace wsf::ax

@@ -19,20 +19,21 @@
 
 #include <cstdint>
 #include <deque>
-#include <functional>
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "common/common_types.h"
-#include "dsp/main_memory.h"
-#include "ppc/cpu.h"
+#include "ntdlib/dsp/memory.h"
+#include "ntdlib/flipper/disc.h"
+#include "ntdlib/ppc/cpu.h"
+#include "ntdlib/types.h"
 
 namespace wsf::wii
 {
 
-class Disc;
+// The disc that the drive reads: the game partition's data (ntdlib::flipper).
+using Disc = ntdlib::flipper::Disc;
 
 // IOS's state apart from its open devices. A snapshot of the system copies it (see Ios::Save).
 class IosState
@@ -40,7 +41,7 @@ class IosState
 protected:
     struct Request
     {
-        PAddr address = 0;
+        ntdlib::PAddr address = 0;
         int32_t result = 0;
         uint64_t due = 0;
     };
@@ -73,7 +74,7 @@ public:
         std::map<int32_t, std::shared_ptr<const Device>> descriptors;
     };
 
-    Ios(MainMemory& memory, Disc& disc, ppc::Cpu& cpu);
+    Ios(ntdlib::dsp::WiiMemory& memory, Disc& disc, ntdlib::ppc::Cpu& cpu);
     ~Ios();
 
     // A 32-bit register at `offset` from 0x0D000000.
@@ -91,9 +92,6 @@ public:
     Snapshot Save() const;
     void Restore(const Snapshot& snapshot);
 
-    // Called with a line of text for each request that no device handles. Useful when bringing up games.
-    std::function<void(const std::string&)> on_unknown;
-
 private:
     class Stm;
     class FileSystem;
@@ -102,15 +100,14 @@ private:
     class Es;
 
     // Carries out the request at `address`. Returns false for one that stays pending, such as an event hook.
-    bool Execute(PAddr address, int32_t& result, uint64_t& delay);
+    bool Execute(ntdlib::PAddr address, int32_t& result);
 
-    int32_t Open(const std::string& path, uint32_t mode, uint64_t& delay);
-    void Unknown(const std::string& what);
+    int32_t Open(const std::string& path);
     void SetIrq();
 
-    MainMemory& memory_;
+    ntdlib::dsp::WiiMemory& memory_;
     Disc& disc_;
-    ppc::Cpu& cpu_;
+    ntdlib::ppc::Cpu& cpu_;
     std::map<int32_t, std::unique_ptr<Device>> descriptors_;
 };
 

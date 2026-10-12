@@ -20,8 +20,8 @@ namespace wsf
 class ArchivePlayer
 {
 public:
-    // A snapshot of the model between frames, without output_. It can only be restored to this player before its next
-    // Start.
+    // A snapshot of the model between frames, without the output. It can only be restored to this player before its
+    // next Start.
     struct Snapshot;
 
     ArchivePlayer();
@@ -43,12 +43,16 @@ public:
     void Restore(const Snapshot& snapshot);
 
     // The DSP's output (interleaved L, R), appended by RunFrame.
-    std::vector<int16_t> output_;
+    std::vector<int16_t>& Output()
+    {
+        return output_;
+    }
 
 private:
     struct State;
 
     std::unique_ptr<State> state_;
+    std::vector<int16_t> output_;
 };
 
 } // namespace wsf

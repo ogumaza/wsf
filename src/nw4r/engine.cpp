@@ -12,31 +12,20 @@
 #include <utility>
 #include <vector>
 
-#include "ax/microcode.h"
+#include "ntdlib/dsp/memory.h"
+#include "ntdlib/rsar/formats.h"
+#include "ntdlib/sound_build.h"
+#include "xsflib/bytes.h"
+
 #include "ax/pb.h"
 #include "ax/system.h"
-#include "common/bytes.h"
-#include "dsp/main_memory.h"
+#include "nw4r/rsar_options.h"
 #include "nw4r/sequence.h"
-#include "rsar/formats.h"
 
 namespace wsf::nw4r
 {
 namespace
 {
-
-ax::SampleFormat ToAxFormat(rsar::WaveFormat format)
-{
-    switch (format)
-    {
-    case rsar::WaveFormat::kPcm16:
-        return ax::SampleFormat::kPcm16;
-    case rsar::WaveFormat::kPcm8:
-        return ax::SampleFormat::kPcm8;
-    default:
-        return ax::SampleFormat::kAdpcm;
-    }
-}
 
 // A sample's index from a PB address. The index counts from address 0 in the format's units. ADPCM indices skip the two
 // header nibbles of each 16-nibble frame.
@@ -48,16 +37,6 @@ uint64_t SampleAt(uint32_t address, ax::SampleFormat format)
     }
 
     return address;
-}
-
-uint32_t AddressOf(uint64_t sample, ax::SampleFormat format)
-{
-    if (format == ax::SampleFormat::kAdpcm)
-    {
-        return static_cast<uint32_t>(sample / 14 * 16 + sample % 14 + 2);
-    }
-
-    return static_cast<uint32_t>(sample);
 }
 
 // Does the microcode's work on a running voice's position over a frame, without the DSP. The voice advances by its
@@ -85,15 +64,22 @@ void AdvanceWithoutDsp(ax::Pb& pb)
         }
     }
 
-    const uint32_t address = AddressOf(sample, format);
+    const uint32_t address = AxVoice::DspAddressBySample(0, static_cast<uint32_t>(sample), format);
     pb.addr.current_address_hi = static_cast<uint16_t>(address >> 16);
     pb.addr.current_address_lo = static_cast<uint16_t>(address);
 }
 
 } // namespace
 
-Engine::Engine(MainMemory& memory, ax::System& ax, const rsar::SoundArchive& archive, SndBuild build)
-    : memory_(memory), ax_(ax), archive_(archive), ax_voices_(*this), voices_(*this), channels_(*this), build_(build)
+Engine::Engine(ntdlib::dsp::WiiMemory& memory, ax::System& ax, const ntdlib::rsar::SoundArchive& archive,
+               SndBuild build)
+    : memory_(memory),
+      ax_(ax),
+      archive_(archive),
+      ax_voices_(*this),
+      voices_(*this),
+      channels_(ChannelPolicy::kChannelCount),
+      build_(build)
 {
     std::memset(memory_.At(kZeroBuffer, kZeroBufferSize), 0, kZeroBufferSize);
 
@@ -118,72 +104,109 @@ SeqPlayer* Engine::StartSequence(uint32_t index)
         return nullptr;
     }
 
-    const rsar::SoundInfo& sound = archive_.Sounds()[index];
-    if (sound.type != rsar::SoundType::kSequence)
+    const ntdlib::rsar::SoundInfo& sound = archive_.Sounds()[index];
+    if (sound.type != ntdlib::rsar::SoundType::kSequence)
     {
         return nullptr;
     }
 
-    const std::optional<rsar::FileData> file = archive_.File(sound.file_id);
-    const LoadedBank* bank = GetBank(sound.bank_id);
+    const std::optional<ntdlib::rsar::FileData> file = archive_.File(sound.file_id);
+    const LoadedBank* bank = GetBank(sound.bank);
     if (!file || bank == nullptr)
     {
         return nullptr;
     }
 
-    sequences_.push_back(std::make_unique<rsar::Sequence>(rsar::Sequence::Parse(file->file)));
-    players_.push_back(std::make_unique<SeqPlayer>(*this, sound, *sequences_.back(), bank));
+    sequences_.push_back(
+        std::make_unique<ntdlib::rsar::Sequence>(ntdlib::rsar::Sequence::Parse(file->file, wsf::nw4r::kRsarOptions)));
+    players_.push_back(
+        std::make_unique<SeqPlayer>(static_cast<int>(players_.size()), SequenceInfo(sound), sequences_.back()->data));
     SeqPlayer* player = players_.back().get();
+    player->SetBuild(build_);
     player->Start();
 
     return player;
 }
 
-Channel* Engine::NoteOn(const LoadedBank& bank, const NoteOnInfo& info)
+Channel* Engine::NoteOn(const std::vector<uint32_t>& banks, int slot, const NoteOnInfo& info)
 {
+    // The sequence's bank was loaded when the sound started.
+    if (slot < 0 || static_cast<std::size_t>(slot) >= banks.size())
+    {
+        return nullptr;
+    }
+
+    const LoadedBank* found = GetBank(banks[static_cast<std::size_t>(slot)]);
+    if (found == nullptr)
+    {
+        return nullptr;
+    }
+
     // BankFileReader::ReadInstInfo and ReadWaveParam, then a channel for the wave's channels at the note's priority.
-    const rsar::Region* region = bank.bank.Find(info.program, info.key, info.velocity);
+    const LoadedBank& bank = *found;
+    const ntdlib::rsar::Region* region = bank.bank.Find(static_cast<int>(info.prg_no), info.key, info.velocity);
     if (region == nullptr || static_cast<size_t>(region->wave_index) >= bank.bank.Waves().size())
     {
         return nullptr;
     }
 
     const WaveData wave = ReadWaveParam(bank, bank.bank.Waves()[region->wave_index]);
-    Channel* channel = Channel::AllocChannel(*this, std::min(wave.channel_count, 2), info.priority, info.callback);
+    Channel* channel =
+        channels_.AllocChannel(*this, std::min(wave.channel_count, 2), static_cast<uint32_t>(info.priority),
+                               info.owner_player, info.owner_track);
     if (channel == nullptr)
     {
         return nullptr;
     }
 
-    // The note's volume is the velocity squared times the region's volume. Its pan is the region's pan plus the track's
-    // initial pan.
-    channel->SetKey(info.key);
-    channel->SetOriginalKey(region->original_key);
-    float init_volume = static_cast<float>(info.velocity) / 127.0f;
-    init_volume *= init_volume;
-    init_volume *= static_cast<float>(region->volume) / 127.0f;
-    channel->SetInitVolume(init_volume);
-    channel->SetTune(region->tune);
-    channel->SetAttack(region->attack);
-    channel->SetDecay(region->decay);
-    channel->SetSustain(region->sustain);
-    channel->SetRelease(region->release);
+    channel->key = static_cast<uint8_t>(info.key);
+    channel->original_key = static_cast<uint8_t>(region->original_key);
+
+    // The note's volume is the velocity squared times the region's volume. The channel keeps it as its velocity volume.
+    // A tie replaces it with the velocity's alone.
+    float velocity_volume = static_cast<float>(info.velocity) / 127.0f;
+    velocity_volume *= velocity_volume;
+    velocity_volume *= static_cast<float>(region->volume) / 127.0f;
+    channel->velocity_volume = velocity_volume;
+
+    channel->tune = region->tune;
+    channel->envelope.SetAttack(region->attack);
+    channel->envelope.SetDecay(region->decay);
+    channel->envelope.SetSustain(region->sustain);
+    channel->envelope.SetRelease(region->release);
     if (build_.Since2008())
     {
         // Bank::NoteOn sets the region's hold, note-off type and key group too (Mario Kart Wii, 0x8008d41c and
         // 0x8008d490).
-        channel->SetHold(region->hold);
-        channel->SetIgnoreNoteOff(region->note_off_type == 1);
-        channel->SetKeyGroup(region->alternate_assign);
+        channel->envelope.SetHold(region->hold);
+        channel->ignore_note_off = region->note_off_type == 1;
+        channel->key_group = static_cast<uint8_t>(region->key_group);
     }
 
+    // The note's pan is the region's pan plus the track's initial pan.
     float init_pan = static_cast<float>(region->pan - 64) / 63.0f;
     init_pan += static_cast<float>(info.init_pan) / 63.0f;
-    channel->SetInitPan(init_pan);
-    channel->SetInitSurroundPan(0.0f);
-    channel->Start(wave, info.length, 0);
+    channel->init_pan = init_pan;
+    channel->init_span = 0.0f;
+
+    channel->Start(*this, wave, info.length);
 
     return channel;
+}
+
+void Engine::ChannelEvent(int player, int track, Channel& channel, Channel::CallbackStatus status)
+{
+    if (on_channel_event_)
+    {
+        on_channel_event_(channel, status);
+    }
+
+    players_[static_cast<std::size_t>(player)]->ChannelEvent(*this, track, channel);
+}
+
+void Engine::OnVoiceEvent(ChannelId owner, Voice::Status status)
+{
+    channels_.At(owner).OnVoiceEvent(*this, status);
 }
 
 void Engine::FrameProcess()
@@ -197,10 +220,10 @@ void Engine::FrameProcess()
     // The players that have started, in the order they started (SoundThread's player callbacks).
     for (const std::unique_ptr<SeqPlayer>& player : players_)
     {
-        player->Update();
+        player->Update(*this);
     }
 
-    channels_.UpdateAllChannel();
+    channels_.UpdateAllChannel(*this);
     random_.Next();
     voices_.UpdateAllVoices();
 }
@@ -217,11 +240,10 @@ bool Engine::IsBusy() const
 
 Engine::Snapshot Engine::Save() const
 {
-    Snapshot snapshot{ax_voices_.Save(), voices_.Save(), channels_.Save(), random_, global_variables_, {},
-                      banks_.size()};
+    Snapshot snapshot{ax_voices_.Save(), voices_.Save(), channels_, random_, global_variables_, {}, banks_.size()};
     for (const std::unique_ptr<SeqPlayer>& player : players_)
     {
-        snapshot.players.push_back(player->Save());
+        snapshot.players.push_back(*player);
     }
 
     return snapshot;
@@ -236,12 +258,12 @@ void Engine::Restore(const Snapshot& snapshot)
 
     ax_voices_.Restore(snapshot.ax_voices);
     voices_.Restore(snapshot.voices);
-    channels_.Restore(snapshot.channels);
+    channels_ = snapshot.channels;
     random_ = snapshot.random;
     global_variables_ = snapshot.global_variables;
     for (std::size_t i = 0; i < players_.size(); i++)
     {
-        players_[i]->Restore(snapshot.players[i]);
+        *players_[i] = snapshot.players[i];
     }
 }
 
@@ -258,45 +280,46 @@ const LoadedBank* Engine::GetBank(uint32_t bank_id)
         return nullptr;
     }
 
-    const std::optional<rsar::FileData> file = archive_.File(archive_.Banks()[bank_id].file_id);
+    const std::optional<ntdlib::rsar::FileData> file = archive_.File(archive_.Banks()[bank_id].file_id);
     if (!file)
     {
         return nullptr;
     }
 
-    auto bank =
-        std::make_unique<LoadedBank>(LoadedBank{rsar::Bank::Parse(file->file, file->wave_data), file->wave_data});
+    auto bank = std::make_unique<LoadedBank>(
+        LoadedBank{ntdlib::rsar::Bank::Parse(file->file, file->wave_data, wsf::nw4r::kRsarOptions), file->wave_data});
     bank->wave_address = memory_.Store(file->wave_data.data(), file->wave_data.size());
 
     return banks_.emplace(bank_id, std::move(bank)).first->second.get();
 }
 
-WaveData Engine::ReadWaveParam(const LoadedBank& bank, const rsar::Wave& wave) const
+WaveData Engine::ReadWaveParam(const LoadedBank& bank, const ntdlib::rsar::Wave& wave) const
 {
     // The loop's addresses become sample counts from the wave's start. The end is one past the last sample played.
-    const ax::SampleFormat format = ToAxFormat(wave.format);
+    const ax::SampleFormat format = ToAxFormat(wave.encoding);
     WaveData data;
-    data.format = wave.format;
+    data.format = wave.encoding;
     data.loop = wave.loop;
     data.channel_count = static_cast<int>(wave.channels.size());
     data.sample_rate = wave.sample_rate;
-    data.loop_start = AxVoice::SampleByDspAddress(0, wave.loop_start, format);
-    data.loop_end = AxVoice::SampleByDspAddress(0, wave.loop_end, format) + 1;
+    data.loop_start = AxVoice::SampleByDspAddress(wave.loop_start_address, format);
+    data.loop_end = AxVoice::SampleByDspAddress(wave.loop_end_address, format) + 1;
     for (size_t i = 0; i < std::min<size_t>(wave.channels.size(), data.channels.size()); i++)
     {
-        const rsar::WaveChannel& channel = wave.channels[i];
-        data.channels[i].data = bank.wave_address + static_cast<PAddr>(channel.data.data() - bank.wave_data.data());
-        data.channels[i].adpcm = channel.adpcm;
+        const ntdlib::rsar::WaveChannel& channel = wave.channels[i];
+        data.channels[i].data =
+            bank.wave_address + static_cast<ntdlib::PAddr>(channel.data.data() - bank.wave_data.data());
+        data.channels[i].adpcm = channel.adpcm.value_or(ntdlib::rsar::DspAdpcmInfo{});
     }
 
     return data;
 }
 
-bool ArchiveModel::Start(const ax::Microcode& microcode, const rsar::SoundArchive& archive)
+bool ArchiveModel::Start(const ntdlib::Microcode& microcode, const ntdlib::rsar::SoundArchive& archive)
 {
     // AXInit boots the DSP with AX's microcode. Then NW4R SND's AxManager sets up its side. The microcode identifies
     // the build of AX that it comes with. AX of October 2006 comes with a build of NW4R SND that has no banner.
-    const ax::Build ax_build = ax::IdentifyBuild(microcode);
+    const ax::Build ax_build = ntdlib::IdentifyBuild(microcode);
     ax.Init(ax_build);
     if (!link.Start(microcode.words, microcode.address))
     {
@@ -325,8 +348,8 @@ bool ArchiveModel::RunFrame(std::vector<int16_t>& output)
     const uint8_t* samples = memory.At(frame.output, ax::layout::kOutputBufferSize);
     for (int i = 0; i < ax::kSamplesPerFrame; i++)
     {
-        output.push_back(static_cast<int16_t>(LoadBe16(samples + i * 4 + 2)));
-        output.push_back(static_cast<int16_t>(LoadBe16(samples + i * 4)));
+        output.push_back(static_cast<int16_t>(xsflib::LoadBe16(samples + i * 4 + 2)));
+        output.push_back(static_cast<int16_t>(xsflib::LoadBe16(samples + i * 4)));
     }
 
     // The rest of AX's frame, then NW4R SND's sound thread.
@@ -336,7 +359,7 @@ bool ArchiveModel::RunFrame(std::vector<int16_t>& output)
     return true;
 }
 
-void ArchiveModel::StartWithoutDsp(const rsar::SoundArchive& archive)
+void ArchiveModel::StartWithoutDsp(const ntdlib::rsar::SoundArchive& archive)
 {
     ax.Init();
     engine.emplace(memory, ax, archive, build);

@@ -47,19 +47,6 @@ uint32_t ZeroBufferUnits(ax::SampleFormat format)
     }
 }
 
-ax::SampleFormat ToAxFormat(rsar::WaveFormat format)
-{
-    switch (format)
-    {
-    case rsar::WaveFormat::kPcm16:
-        return ax::SampleFormat::kPcm16;
-    case rsar::WaveFormat::kPcm8:
-        return ax::SampleFormat::kPcm8;
-    default:
-        return ax::SampleFormat::kAdpcm;
-    }
-}
-
 // The ramp that moves a mix volume from `from` to `to` over a frame (CalcAxvpbDelta).
 int MixDelta(uint16_t from, uint16_t to)
 {
@@ -92,58 +79,29 @@ uint16_t MixVolume(float volume)
     return static_cast<uint16_t>(std::min<uint32_t>(0xffff, ToUnsigned(static_cast<float>(ax::kMaxVolume) * volume)));
 }
 
-// The pan curves of the sound archive (PanCurve) and how Util computes each.
-PanInfo PanInfoFor(uint8_t curve)
+// Voice::SetVolume (0x8004c830), SetVeVolume and SetMainOutVolume hold a gain from the channel to 0 and 1. Builds from
+// September 2009 on hold it only to 0. The gain can then go above full level.
+float HeldGain(float gain, const SndBuild& build)
 {
-    switch (curve)
-    {
-    case 1:
-        return {PanCurve::kSqrt, true, false};
-    case 2:
-        return {PanCurve::kSqrt, true, true};
-    case 3:
-        return {PanCurve::kSinCos, false, false};
-    case 4:
-        return {PanCurve::kSinCos, true, false};
-    case 5:
-        return {PanCurve::kSinCos, true, true};
-    case 6:
-        return {PanCurve::kLinear, false, false};
-    case 7:
-        return {PanCurve::kLinear, true, false};
-    case 8:
-        return {PanCurve::kLinear, true, true};
-    default:
-        return {PanCurve::kSqrt, false, false};
-    }
-}
-
-// The ADPCM decoder's step for one nibble (DecodeDspAdpcm, 0x800505c0), on the PB's ADPCM block.
-void DecodeDspAdpcm(ax::PbAdpcm& adpcm, uint8_t nibble)
-{
-    const auto yn1 = static_cast<int16_t>(adpcm.yn1);
-    const auto yn2 = static_cast<int16_t>(adpcm.yn2);
-    const auto scale = static_cast<int16_t>(1 << (adpcm.pred_scale & 0xf));
-    const auto bits = static_cast<int16_t>(nibble << 12);
-    const int index = adpcm.pred_scale >> 4;
-    const auto coef0 = static_cast<int16_t>(adpcm.a[index * 2]);
-    const auto coef1 = static_cast<int16_t>(adpcm.a[index * 2 + 1]);
-
-    int32_t sample = coef0 * yn1;
-    sample += coef1 * yn2;
-    sample += scale * (bits >> 1);
-    sample >>= 10;
-    sample += 1;
-    sample >>= 1;
-    sample = std::clamp(sample, -32768, 32767);
-
-    adpcm.yn2 = adpcm.yn1;
-    adpcm.yn1 = static_cast<uint16_t>(sample);
+    return SinceSeptember2009(build) ? std::max(gain, 0.0f) : std::clamp(gain, 0.0f, 1.0f);
 }
 
 } // namespace
 
-void AxVoice::Setup(PAddr wave, ax::SampleFormat format, int sample_rate)
+ax::SampleFormat ToAxFormat(ntdlib::rsar::WaveEncoding format)
+{
+    switch (format)
+    {
+    case ntdlib::rsar::WaveEncoding::kPcm16:
+        return ax::SampleFormat::kPcm16;
+    case ntdlib::rsar::WaveEncoding::kPcm8:
+        return ax::SampleFormat::kPcm8;
+    default:
+        return ax::SampleFormat::kAdpcm;
+    }
+}
+
+void AxVoice::Setup(ntdlib::PAddr wave, ax::SampleFormat format, int sample_rate)
 {
     wave_data_ = wave;
     format_ = format;
@@ -162,36 +120,22 @@ bool AxVoice::IsPlayFinished() const
     const uint32_t address =
         IsAvailable() ? ax::Join(vpb_->pb.addr.current_address_hi, vpb_->pb.addr.current_address_lo) : 0;
     const uint32_t begin = DspAddressBySample(engine_->ZeroBuffer(), 0, format_);
-
     return begin <= address && address < begin + ZeroBufferUnits(format_);
 }
 
-void AxVoice::SetAddr(bool loop, PAddr wave, uint32_t offset, uint32_t loop_start, uint32_t loop_end)
+void AxVoice::SetAddr(bool loop, ntdlib::PAddr wave, uint32_t loop_start, uint32_t loop_end)
 {
     if (!IsAvailable())
     {
         return;
     }
 
-    // Starting past the end plays a sample of silence. A wave that doesn't loop continues into the zero buffer. The
-    // microcode stops it there.
-    uint32_t start = 0;
-    uint32_t end = 0;
-    uint32_t loop_address = 0;
-    const PAddr zero = engine_->ZeroBuffer();
-    if (offset > loop_end)
-    {
-        loop = false;
-        start = DspAddressBySample(zero, 0, format_);
-        loop_address = DspAddressBySample(zero, 0, format_);
-        end = DspAddressBySample(zero, 1, format_);
-    }
-    else
-    {
-        loop_address = loop ? DspAddressBySample(wave, loop_start, format_) : DspAddressBySample(zero, 0, format_);
-        start = DspAddressBySample(wave, offset, format_);
-        end = DspAddressBySample(wave, loop_end - 1, format_);
-    }
+    // A wave that doesn't loop continues into the zero buffer. The microcode stops it there.
+    const ntdlib::PAddr zero = engine_->ZeroBuffer();
+    const uint32_t loop_address =
+        loop ? DspAddressBySample(wave, loop_start, format_) : DspAddressBySample(zero, 0, format_);
+    const uint32_t start = DspAddressBySample(wave, 0, format_);
+    const uint32_t end = DspAddressBySample(wave, loop_end - 1, format_);
 
     ax::PbAddr address;
     address.loop_flag = loop ? 1 : 0;
@@ -265,7 +209,7 @@ void AxVoice::SetSrcType(SrcType type, float pitch)
     sync_ |= ax::sync::kSelect;
 }
 
-void AxVoice::SetAdpcm(const rsar::AdpcmInfo& info, uint16_t pred_scale, int16_t yn1, int16_t yn2)
+void AxVoice::SetAdpcm(const ntdlib::rsar::DspAdpcmInfo& info)
 {
     if (!IsAvailable())
     {
@@ -283,9 +227,9 @@ void AxVoice::SetAdpcm(const rsar::AdpcmInfo& info, uint16_t pred_scale, int16_t
         }
 
         adpcm.gain = info.gain;
-        adpcm.pred_scale = pred_scale;
-        adpcm.yn1 = static_cast<uint16_t>(yn1);
-        adpcm.yn2 = static_cast<uint16_t>(yn2);
+        adpcm.pred_scale = info.pred_scale;
+        adpcm.yn1 = static_cast<uint16_t>(info.yn1);
+        adpcm.yn2 = static_cast<uint16_t>(info.yn2);
         break;
 
     case ax::SampleFormat::kPcm16:
@@ -301,7 +245,7 @@ void AxVoice::SetAdpcm(const rsar::AdpcmInfo& info, uint16_t pred_scale, int16_t
     sync_ |= ax::sync::kAdpcm;
 }
 
-void AxVoice::SetAdpcmLoop(const rsar::AdpcmInfo& info)
+void AxVoice::SetAdpcmLoop(const ntdlib::rsar::DspAdpcmInfo& info)
 {
     if (!IsAvailable())
     {
@@ -430,14 +374,23 @@ void AxVoice::SetVe(float volume, float init_volume)
         return;
     }
 
-    // AxVoiceParamBlock::SetVoiceVe: the first call also sets where the envelope starts.
+    // AxVoiceParamBlock::SetVoiceVe: the first call also sets where the envelope starts. A gain of 1 is 32767. In older
+    // builds, Voice's setters have already held the gain to 1 (see HeldGain). Builds from September 2009 on hold the
+    // envelope's volume within 0 to 0xffff here.
+    const bool above_full = SinceSeptember2009(engine_->Build());
+    const auto to_volume = [above_full](float gain)
+    {
+        const int32_t value = ntdlib::nwsnd::RevolutionPolicy::ToInt32(32767.0f * gain);
+        return static_cast<uint16_t>(above_full ? std::clamp(value, 0, 0xffff) : value);
+    };
+
     if (first_ve_update_)
     {
-        prev_volume_ = static_cast<uint16_t>(static_cast<int32_t>(32767.0f * init_volume));
+        prev_volume_ = to_volume(init_volume);
         first_ve_update_ = false;
     }
 
-    volume_ = static_cast<uint16_t>(static_cast<int32_t>(32767.0f * volume));
+    volume_ = to_volume(volume);
 }
 
 void AxVoice::SetVeOctober2006(uint16_t volume, int16_t delta)
@@ -571,9 +524,9 @@ void AxVoice::Sync()
     int16_t delta = std::abs(volume_ - predicted_in) < std::abs(volume_ - predicted_out) ? delta_in : delta_out;
 
     // A step of 0, after one, lands on the target at once. The ramp mustn't take the volume out of 0 to 32767 by the
-    // end of the frame. Builds from 2008 keep the step in range first (Mario Kart Wii, AxVoiceParamBlock::Sync,
-    // 0x8008bd60). A step that the range cuts to 0 then lands on the target too. A releasing note's last frame shows
-    // this.
+    // end of the frame. Builds from September 2009 on allow 0 to 0xffff. Builds from 2008 keep the step in range first
+    // (Mario Kart Wii, AxVoiceParamBlock::Sync, 0x8008bd60). A step that the range cuts to 0 then lands on the target
+    // too. A releasing note's last frame shows this.
     const auto land = [&]
     {
         if (delta == 0 && prev_delta_ == 0)
@@ -582,6 +535,7 @@ void AxVoice::Sync()
         }
     };
 
+    const int max_volume = SinceSeptember2009(engine_->Build()) ? 0xffff : 32767;
     const auto keep_in_range = [&]
     {
         const int next_volume = prev_volume_ + delta * ax::kSamplesPerFrame;
@@ -589,9 +543,9 @@ void AxVoice::Sync()
         {
             delta = static_cast<int16_t>(-prev_volume_ / ax::kSamplesPerFrame);
         }
-        else if (next_volume > 32767)
+        else if (next_volume > max_volume)
         {
-            delta = static_cast<int16_t>((32767 - prev_volume_) / ax::kSamplesPerFrame);
+            delta = static_cast<int16_t>((max_volume - prev_volume_) / ax::kSamplesPerFrame);
         }
     };
 
@@ -631,7 +585,7 @@ void AxVoice::Stop()
     }
 }
 
-uint32_t AxVoice::DspAddressBySample(PAddr base, uint32_t samples, ax::SampleFormat format)
+uint32_t AxVoice::DspAddressBySample(ntdlib::PAddr base, uint32_t samples, ax::SampleFormat format)
 {
     switch (format)
     {
@@ -647,61 +601,22 @@ uint32_t AxVoice::DspAddressBySample(PAddr base, uint32_t samples, ax::SampleFor
     return 0;
 }
 
-uint32_t AxVoice::SampleByDspAddress(PAddr base, uint32_t address, ax::SampleFormat format)
+uint32_t AxVoice::SampleByDspAddress(uint32_t address, ax::SampleFormat format)
 {
     switch (format)
     {
     case ax::SampleFormat::kAdpcm:
         {
-            const uint32_t nibbles = address - base * 2;
-
-            return nibbles % ax::kAdpcmNibblesPerFrame +
-                   nibbles / ax::kAdpcmNibblesPerFrame * ax::kAdpcmSamplesPerFrame - 2;
+            const uint32_t frames = address / ax::kAdpcmNibblesPerFrame;
+            return frames * ax::kAdpcmSamplesPerFrame + address % ax::kAdpcmNibblesPerFrame - 2;
         }
 
     case ax::SampleFormat::kPcm8:
-        return address - base;
-
     case ax::SampleFormat::kPcm16:
-        return address - base / 2;
+        return address;
     }
 
     return 0;
-}
-
-void AxVoice::CalcOffsetAdpcmParam(const Engine& engine, PAddr data, uint32_t offset, const rsar::AdpcmInfo& info,
-                                   uint16_t& pred_scale, int16_t& yn1, int16_t& yn2)
-{
-    // Decode up to `offset` to find the decoder's state there. Read each frame's header on the way.
-    ax::PbAdpcm adpcm;
-    for (int i = 0; i < 16; i++)
-    {
-        adpcm.a[i] = static_cast<uint16_t>(info.coefs[i]);
-    }
-
-    adpcm.gain = info.gain;
-    adpcm.pred_scale = info.pred_scale;
-    adpcm.yn1 = static_cast<uint16_t>(info.yn1);
-    adpcm.yn2 = static_cast<uint16_t>(info.yn2);
-
-    uint32_t address = DspAddressBySample(data, 0, ax::SampleFormat::kAdpcm);
-    const uint32_t end = DspAddressBySample(data, offset, ax::SampleFormat::kAdpcm);
-    while (address < end)
-    {
-        if (address % ax::kAdpcmNibblesPerFrame == 0)
-        {
-            adpcm.pred_scale = *engine.Memory().At(address / 2);
-            address += 2;
-        }
-
-        const uint8_t byte = *engine.Memory().At(address / 2);
-        DecodeDspAdpcm(adpcm, address % 2 != 0 ? byte & 0xf : byte >> 4);
-        address++;
-    }
-
-    pred_scale = adpcm.pred_scale;
-    yn1 = static_cast<int16_t>(adpcm.yn1);
-    yn2 = static_cast<int16_t>(adpcm.yn2);
 }
 
 void AxVoice::SetVoiceMix(const ax::PbMix& mix, bool sync_now)
@@ -843,7 +758,6 @@ AxVoice* AxVoiceManager::AcquireAxVoice(uint32_t priority, AxVoice::Callback cal
         voice->sync_ = 0;
         ReserveForFreeAxVoice(voice);
     };
-
     ax::Voice* vpb = engine_.Ax().AcquireVoice(priority, on_drop);
     if (vpb == nullptr)
     {
@@ -889,7 +803,7 @@ void AxVoiceManager::FreeAllReservedAxVoice()
         if (voice->callback_)
         {
             const AxVoice::Callback callback = voice->callback_;
-            callback(voice, AxVoice::CallbackStatus::kDropDsp);
+            callback(voice);
         }
 
         FreeAxVoice(voice);
@@ -928,7 +842,7 @@ void AxVoiceManager::Free(AxVoice* voice)
     free_.push_back(voice);
 }
 
-bool Voice::Acquire(int channels, int priority, Callback callback)
+bool Voice::Acquire(int channels, int priority, ChannelId owner)
 {
     channels = std::clamp(channels, 1, 2);
 
@@ -937,25 +851,25 @@ bool Voice::Acquire(int channels, int priority, Callback callback)
     const uint32_t ax_priority = priority == kPriorityMax ? kAxPriorityTop : kAxPriorityNormal;
     AxVoiceManager& manager = engine_->AxVoices();
     std::array<AxVoice*, 2> table{};
-    const auto on_event = [this](AxVoice* dropped, AxVoice::CallbackStatus status)
+    const auto on_drop = [this](AxVoice* dropped)
     {
-        OnAxVoiceEvent(dropped, status);
+        OnAxVoiceDropped(dropped);
     };
-
     for (int i = 0; i < channels; i++)
     {
-        AxVoice* voice = manager.AcquireAxVoice(ax_priority, on_event);
+        AxVoice* voice = manager.AcquireAxVoice(ax_priority, on_drop);
         if (voice == nullptr)
         {
             int rest = channels - i;
-            for (const Voice* other : engine_->Voices().PrioVoices())
+            for (const VoiceId id : engine_->Voices().PrioVoices())
             {
-                if (priority < other->Priority())
+                const Voice& other = engine_->Voices().At(id);
+                if (priority < other.Priority())
                 {
                     break;
                 }
 
-                rest -= other->AxVoiceCount();
+                rest -= other.AxVoiceCount();
                 if (rest <= 0)
                 {
                     break;
@@ -972,7 +886,7 @@ bool Voice::Acquire(int channels, int priority, Callback callback)
                 return false;
             }
 
-            voice = manager.AcquireAxVoice(ax_priority == kAxPriorityTop ? kAxPriorityTop : kAxPriorityDrop, on_event);
+            voice = manager.AcquireAxVoice(ax_priority == kAxPriorityTop ? kAxPriorityTop : kAxPriorityDrop, on_drop);
         }
 
         if (voice == nullptr)
@@ -996,9 +910,8 @@ bool Voice::Acquire(int channels, int priority, Callback callback)
 
     // InitParam (0x8004ba80).
     channel_count_ = channels;
-    callback_ = std::move(callback);
+    owner_ = owner;
     sync_flag_ = 0;
-    pause_ = false;
     started_ = false;
     volume_ = 1.0f;
     ve_init_volume_ = 0.0f;
@@ -1046,10 +959,9 @@ void Voice::StopFinished()
 {
     if (active_ && started_ && IsPlayFinished())
     {
-        if (callback_)
+        if (owner_ != kNoChannel)
         {
-            const Callback callback = callback_;
-            callback(this, Status::kFinishWave);
+            engine_->OnVoiceEvent(owner_, Status::kFinishWave);
         }
 
         started_ = false;
@@ -1117,25 +1029,11 @@ void Voice::Update()
 
     if (started_)
     {
-        if ((sync_flag_ & kSyncVoice) && starting_)
-        {
-            if (pause_)
-            {
-                StopAllAxVoice();
-            }
-            else
-            {
-                RunAllAxVoice();
-            }
-
-            sync_flag_ &= ~kSyncVoice;
-        }
-
         SyncAxVoice();
     }
 }
 
-void Voice::Setup(const WaveData& data, uint32_t offset)
+void Voice::Setup(const WaveData& data)
 {
     const ax::SampleFormat format = ToAxFormat(data.format);
     for (int i = 0; i < channel_count_; i++)
@@ -1146,21 +1044,12 @@ void Voice::Setup(const WaveData& data, uint32_t offset)
             continue;
         }
 
-        // A start part way into an ADPCM wave requires the decoder's state there.
         const WaveData::Channel& channel = data.channels[i];
-        uint16_t pred_scale = channel.adpcm.pred_scale;
-        int16_t yn1 = channel.adpcm.yn1;
-        int16_t yn2 = channel.adpcm.yn2;
-        if (format == ax::SampleFormat::kAdpcm)
-        {
-            AxVoice::CalcOffsetAdpcmParam(*engine_, channel.data, offset, channel.adpcm, pred_scale, yn1, yn2);
-        }
-
         voice->Setup(channel.data, format, static_cast<int>(data.sample_rate));
-        voice->SetAddr(data.loop, channel.data, offset, data.loop_start, data.loop_end);
+        voice->SetAddr(data.loop, channel.data, data.loop_start, data.loop_end);
         if (format == ax::SampleFormat::kAdpcm)
         {
-            voice->SetAdpcm(channel.adpcm, pred_scale, yn1, yn2);
+            voice->SetAdpcm(channel.adpcm);
             voice->SetAdpcmLoop(channel.adpcm);
         }
 
@@ -1168,7 +1057,6 @@ void Voice::Setup(const WaveData& data, uint32_t offset)
         voice->SetVoiceType(0);
     }
 
-    pause_ = false;
     starting_ = false;
     started_ = false;
     sync_flag_ |= kSyncLpf | kSyncMix | kSyncVe;
@@ -1177,7 +1065,6 @@ void Voice::Setup(const WaveData& data, uint32_t offset)
 void Voice::Start()
 {
     starting_ = true;
-    pause_ = false;
     sync_flag_ |= kSyncSrcInitial;
 }
 
@@ -1189,13 +1076,12 @@ void Voice::Stop()
         started_ = false;
     }
 
-    pause_ = false;
     starting_ = false;
 }
 
 void Voice::SetVolume(float volume)
 {
-    volume = std::clamp(volume, 0.0f, 1.0f);
+    volume = HeldGain(volume, engine_->Build());
     if (volume != volume_)
     {
         volume_ = volume;
@@ -1205,8 +1091,8 @@ void Voice::SetVolume(float volume)
 
 void Voice::SetVeVolume(float target, float init)
 {
-    target = std::clamp(target, 0.0f, 1.0f);
-    init = std::clamp(init, 0.0f, 1.0f);
+    target = HeldGain(target, engine_->Build());
+    init = HeldGain(init, engine_->Build());
     if (init == ve_init_volume_ && target == ve_target_volume_)
     {
         return;
@@ -1285,7 +1171,7 @@ void Voice::SetBiquadFilter(int type, float value)
 
 void Voice::SetMainOutVolume(float volume)
 {
-    volume = std::clamp(volume, 0.0f, 1.0f);
+    volume = HeldGain(volume, engine_->Build());
     if (volume != main_out_volume_)
     {
         main_out_volume_ = volume;
@@ -1295,7 +1181,9 @@ void Voice::SetMainOutVolume(float volume)
 
 void Voice::SetMainSend(float send)
 {
-    // The main send is relative: 0 is the full send.
+    // The main send is relative: 0 is the full send. Builds from September 2009 on hold the sends only to 0 here. Their
+    // CalcMixParam holds the sends to 0 and 1. The model holds them to 0 and 1 here in every build. The mix comes out
+    // the same.
     send = std::clamp(send + 1.0f, 0.0f, 1.0f);
     if (send != main_send_)
     {
@@ -1306,11 +1194,33 @@ void Voice::SetMainSend(float send)
 
 void Voice::SetFxSend(int bus, float send)
 {
+    // The model holds the send to 0 and 1 here in every build (see SetMainSend).
     send = std::clamp(send, 0.0f, 1.0f);
     if (send != fx_send_[bus])
     {
         fx_send_[bus] = send;
         sync_flag_ |= kSyncMix;
+    }
+}
+
+void Voice::SetParam(const ntdlib::nwsnd::RevolutionPolicy::ChannelVoiceParam& param)
+{
+    engine_->OnVoiceParam(owner_, param);
+
+    SetPanMode(static_cast<PanMode>(param.pan_mode));
+    SetPanCurve(static_cast<uint8_t>(param.pan_curve));
+    SetVolume(param.volume);
+    SetVeVolume(param.ve_target_volume, param.ve_init_volume);
+    SetPitch(param.pitch);
+    SetPan(param.pan);
+    SetSurroundPan(param.surround_pan);
+    SetLpfFreq(param.lpf_freq);
+    SetBiquadFilter(param.biquad_type, param.biquad_value);
+    SetMainOutVolume(param.main_out_volume);
+    SetMainSend(param.main_send);
+    for (std::size_t bus = 0; bus < param.fx_send.size(); bus++)
+    {
+        SetFxSend(static_cast<int>(bus), param.fx_send[bus]);
     }
 }
 
@@ -1432,7 +1342,7 @@ bool Voice::CalcAxMix()
 
 void Voice::CalcAxLpf()
 {
-    const int freq = CalcLpfFreq(lpf_freq_);
+    const int freq = CalcLpfFreq(lpf_freq_, engine_->Build());
     for (int i = 0; i < channel_count_; i++)
     {
         if (ax_voices_[i] != nullptr)
@@ -1455,42 +1365,28 @@ void Voice::CalcAxBiquadFilter()
 
 void Voice::CalcMixParam(int channel, AxVoice::MixParam& mix) const
 {
-    // CalcMixParam (0x8004d590), for the stereo output mode on the main line. Each channel of a stereo wave pans from
-    // its side. The archive's balance mode holds each channel to its side instead.
+    // CalcMixParam (0x8004d590), for the stereo output mode on the main line. The Wii's policy places each channel of
+    // the wave: its pan, the sides that it reaches, and the pan curve.
     const float main_volume = main_out_volume_;
     const float main = main_volume * main_send_;
     const float fx_a = main_volume * fx_send_[0];
     const float fx_b = main_volume * fx_send_[1];
     const float fx_c = main_volume * fx_send_[2];
 
-    // The build of October 2006 (0x800dd970 in Smooth Moves' main.dol) has no pan curves and no balance mode. It pans
-    // by the square root curve, and each channel of a stereo wave pans from its side.
-    const bool october = engine_->Build().October2006();
-    const PanInfo info = PanInfoFor(october ? 0 : pan_curve_);
+    using Policy = ntdlib::nwsnd::RevolutionPolicy;
+    const Policy::WavePlacement placement = Policy::PlacementOfWaveChannel(
+        pan_, channel, channel_count_, static_cast<uint32_t>(pan_mode_), pan_curve_, engine_->Build());
+    const PanInfo info = ntdlib::nwsnd::PanInfoOf(placement.curve);
     float left = 0.0f;
     float right = 0.0f;
-    if (channel_count_ > 1 && pan_mode_ == PanMode::kBalance && !october)
+    if (placement.side != Policy::WaveSide::kRightOnly)
     {
-        if (channel == 0)
-        {
-            left = CalcPanRatio(pan_, info);
-        }
-        else
-        {
-            right = CalcPanRatio(-pan_, info);
-        }
+        left = CalcPanRatio(placement.pan, info);
     }
-    else
-    {
-        float voice_pan = 0.0f;
-        if (channel_count_ == 2)
-        {
-            voice_pan = channel == 0 ? -1.0f : 1.0f;
-        }
 
-        const float pan = pan_ + voice_pan;
-        left = CalcPanRatio(pan, info);
-        right = CalcPanRatio(-pan, info);
+    if (placement.side != Policy::WaveSide::kLeftOnly)
+    {
+        right = CalcPanRatio(-placement.pan, info);
     }
 
     mix.l = MixVolume(main * left);
@@ -1551,27 +1447,13 @@ void Voice::ResetDelta()
     }
 }
 
-void Voice::OnAxVoiceEvent(AxVoice* dropped, AxVoice::CallbackStatus status)
+void Voice::OnAxVoiceDropped(AxVoice* dropped)
 {
-    // AxVoiceCallbackFunc (0x8004d2a0). Stop and free the voice's other AX voices. AX has freed the one it dropped. A
-    // cancelled one is freed here.
-    const bool drop = status == AxVoice::CallbackStatus::kDropDsp;
+    // AxVoiceCallbackFunc (0x8004d2a0). Stop and free the voice's other AX voices. AX has freed the one it dropped.
     for (int i = 0; i < channel_count_; i++)
     {
         AxVoice* voice = ax_voices_[i];
-        if (voice == nullptr)
-        {
-            continue;
-        }
-
-        if (voice == dropped)
-        {
-            if (!drop)
-            {
-                engine_->AxVoices().FreeAxVoice(voice);
-            }
-        }
-        else
+        if (voice != nullptr && voice != dropped)
         {
             voice->Stop();
             engine_->AxVoices().FreeAxVoice(voice);
@@ -1580,27 +1462,21 @@ void Voice::OnAxVoiceEvent(AxVoice* dropped, AxVoice::CallbackStatus status)
         ax_voices_[i] = nullptr;
     }
 
-    pause_ = false;
     starting_ = false;
     channel_count_ = 0;
-    if (drop)
+    Free();
+    if (owner_ != kNoChannel)
     {
-        Free();
-    }
-
-    if (callback_)
-    {
-        const Callback callback = callback_;
-        callback(this, drop ? Status::kDropDsp : Status::kCancel);
+        engine_->OnVoiceEvent(owner_, Status::kDropDsp);
     }
 }
 
 VoiceManager::VoiceManager(Engine& engine)
 {
-    for (std::unique_ptr<Voice>& voice : pool_)
+    for (int place = 0; place < kVoiceCount; place++)
     {
-        voice = std::make_unique<Voice>(engine);
-        free_.push_back(voice.get());
+        pool_[place] = std::make_unique<Voice>(engine, place);
+        free_.push_back(place);
     }
 }
 
@@ -1627,22 +1503,22 @@ void VoiceManager::Restore(const Snapshot& snapshot)
     prio_list_ = snapshot.prio_list;
 }
 
-Voice* VoiceManager::AllocVoice(int channels, int priority, Voice::Callback callback)
+Voice* VoiceManager::AllocVoice(int channels, int priority, ChannelId owner)
 {
     if (free_.empty() && DropLowestPriorityVoice(priority) == 0)
     {
         return nullptr;
     }
 
-    Voice* voice = free_.front();
-    if (!voice->Acquire(channels, priority, std::move(callback)))
+    Voice* voice = &At(free_.front());
+    if (!voice->Acquire(channels, priority, owner))
     {
         return nullptr;
     }
 
     voice->priority_ = priority & Voice::kPriorityMax;
     AppendVoiceList(voice);
-    UpdateEachVoicePriority(std::find(prio_list_.begin(), prio_list_.end(), voice));
+    UpdateEachVoicePriority(std::find(prio_list_.begin(), prio_list_.end(), voice->place_));
 
     return voice;
 }
@@ -1654,13 +1530,13 @@ void VoiceManager::FreeVoice(Voice* voice)
 
 void VoiceManager::UpdateAllVoices()
 {
-    // Like the game's safe iteration, each pass goes over a copy of the list. A voice may free itself.
+    // As in the game's safe iteration, each pass moves past a voice before its step. The step may free the voice.
     const auto for_each = [this](void (Voice::*step)())
     {
         for (auto it = prio_list_.begin(); it != prio_list_.end();)
         {
-            Voice* voice = *it++;
-            (voice->*step)();
+            Voice& voice = At(*it++);
+            (voice.*step)();
         }
     };
 
@@ -1673,26 +1549,20 @@ void VoiceManager::ChangeVoicePriority(Voice* voice)
 {
     RemoveVoiceList(voice);
     AppendVoiceList(voice);
-    UpdateEachVoicePriority(std::find(prio_list_.begin(), prio_list_.end(), voice));
+    UpdateEachVoicePriority(std::find(prio_list_.begin(), prio_list_.end(), voice->place_));
 }
 
 void VoiceManager::NotifyVoiceUpdate()
 {
     for (auto it = prio_list_.begin(); it != prio_list_.end();)
     {
-        Voice* voice = *it++;
-        voice->ResetDelta();
+        At(*it++).ResetDelta();
     }
 }
 
 int VoiceManager::DropLowestPriorityVoice(int priority)
 {
-    if (!free_.empty())
-    {
-        return 0;
-    }
-
-    Voice* voice = prio_list_.front();
+    Voice* voice = &At(prio_list_.front());
     if (voice->Priority() > priority)
     {
         return 0;
@@ -1701,10 +1571,9 @@ int VoiceManager::DropLowestPriorityVoice(int priority)
     const int dropped = voice->AxVoiceCount();
     voice->Stop();
     voice->Free();
-    if (voice->callback_)
+    if (voice->owner_ != kNoChannel)
     {
-        const Voice::Callback callback = voice->callback_;
-        callback(voice, Voice::Status::kDropVoice);
+        voice->engine_->OnVoiceEvent(voice->owner_, Voice::Status::kDropVoice);
     }
 
     return dropped;
@@ -1712,433 +1581,44 @@ int VoiceManager::DropLowestPriorityVoice(int priority)
 
 void VoiceManager::AppendVoiceList(Voice* voice)
 {
+    free_.remove(voice->place_);
+
     // Insert after the last voice of no higher priority. The list runs from the lowest priority, oldest first.
-    free_.remove(voice);
     auto it = prio_list_.end();
-    while (it != prio_list_.begin() && (*std::prev(it))->Priority() > voice->Priority())
+    while (it != prio_list_.begin() && At(*std::prev(it)).Priority() > voice->Priority())
     {
         --it;
     }
 
-    prio_list_.insert(it, voice);
+    prio_list_.insert(it, voice->place_);
 }
 
 void VoiceManager::RemoveVoiceList(Voice* voice)
 {
-    prio_list_.remove(voice);
-    free_.push_back(voice);
+    prio_list_.remove(voice->place_);
+    free_.push_back(voice->place_);
 }
 
-void VoiceManager::UpdateEachVoicePriority(std::list<Voice*>::iterator begin)
+void VoiceManager::UpdateEachVoicePriority(std::list<VoiceId>::iterator begin)
 {
     for (auto it = begin; it != prio_list_.end(); ++it)
     {
-        if ((*it)->Priority() <= 1)
+        if (At(*it).Priority() <= 1)
         {
             return;
         }
-        if ((*it)->Priority() != Voice::kPriorityMax)
+
+        if (At(*it).Priority() != Voice::kPriorityMax)
         {
-            (*it)->UpdateVoicesPriority();
+            At(*it).UpdateVoicesPriority();
         }
     }
 }
 
-Channel* Channel::AllocChannel(Engine& engine, int channels, int priority, Callback callback)
+VoiceId VoiceManager::AllocVoice(Engine&, int channels, uint32_t priority, ChannelId owner)
 {
-    Channel* channel = engine.Channels().Alloc();
-    channel->alloc_ = true;
-    const auto on_voice = [channel](Voice* voice, Voice::Status status)
-    {
-        channel->OnVoiceEvent(voice, status);
-    };
-
-    Voice* voice = engine.Voices().AllocVoice(channels, priority, on_voice);
-    if (voice == nullptr)
-    {
-        engine.Channels().Free(channel);
-
-        return nullptr;
-    }
-
-    channel->voice_ = voice;
-    channel->InitParam(std::move(callback));
-
-    return channel;
-}
-
-void Channel::FreeChannel(Channel* channel)
-{
-    if (channel != nullptr)
-    {
-        channel->callback_ = nullptr;
-    }
-}
-
-void Channel::InitParam(Callback callback)
-{
-    next_link_ = nullptr;
-    callback_ = std::move(callback);
-    pause_ = false;
-    auto_sweep_ = true;
-    release_priority_fix_ = false;
-    ignore_note_off_ = false;
-    key_group_ = 0;
-    length_ = 0;
-    key_ = 60;
-    original_key_ = 60;
-    init_volume_ = 1.0f;
-    init_pan_ = 0.0f;
-    init_surround_pan_ = 0.0f;
-    tune_ = 1.0f;
-    user_volume_ = 1.0f;
-    user_pitch_ = 0.0f;
-    user_pitch_ratio_ = 1.0f;
-    user_pan_ = 0.0f;
-    user_surround_pan_ = 0.0f;
-    user_lpf_freq_ = 0.0f;
-    biquad_type_ = 0;
-    biquad_value_ = 0.0f;
-    main_out_volume_ = 1.0f;
-    main_send_ = 0.0f;
-    fx_send_ = {};
-    silence_volume_ = SilenceVolume{};
-    sweep_pitch_ = 0.0f;
-    sweep_length_ = 0;
-    sweep_counter_ = 0;
-    envelope_.Init();
-    lfo_.SetParam(LfoParam{});
-    lfo_target_ = LfoTarget::kPitch;
-    pan_mode_ = PanMode::kDual;
-    pan_curve_ = 0;
-}
-
-void Channel::Update(bool periodic)
-{
-    if (!active_)
-    {
-        return;
-    }
-    if (pause_)
-    {
-        periodic = false;
-    }
-
-    // The values at the start of the frame: the volume, and the envelope (with a volume LFO) where the ramp starts.
-    const float lfo_value = lfo_.Value();
-    if (silence_volume_.counter < silence_volume_.frame)
-    {
-        silence_volume_.counter++;
-    }
-
-    float volume = 1.0f;
-    volume *= init_volume_;
-    volume *= user_volume_;
-    volume *= static_cast<float>(silence_volume_.Value()) / 255.0f;
-
-    float ve_init_volume = 1.0f;
-    ve_init_volume *= CalcVolumeRatio(envelope_.Value());
-    if (lfo_target_ == LfoTarget::kVolume)
-    {
-        ve_init_volume *= CalcVolumeRatio(6.0f * lfo_value);
-    }
-
-    // A released note stops once it's silent. A channel with an owner falls silent when its envelope reaches 0. A
-    // channel without an owner falls silent when its volume times its envelope reaches 0. The build of October 2006
-    // (0x800e039c in Smooth Moves' main.dol) always takes the volume times the envelope.
-    if (envelope_.GetStatus() == Envelope::Status::kRelease)
-    {
-        const bool owner = callback_ && !engine_->Build().October2006();
-        if (owner ? ve_init_volume == 0.0f : volume * ve_init_volume == 0.0f)
-        {
-            Stop();
-
-            return;
-        }
-    }
-
-    // The pitch in semitones from the key, the sweep, the bend and a pitch LFO.
-    float cent = 0.0f;
-    cent += static_cast<float>(key_ - original_key_);
-    cent += SweepValue();
-    cent += user_pitch_;
-    if (lfo_target_ == LfoTarget::kPitch)
-    {
-        cent += lfo_value;
-    }
-
-    float pitch_ratio = 1.0f;
-    pitch_ratio *= tune_;
-    pitch_ratio *= user_pitch_ratio_;
-    float pitch = CalcPitchRatio(static_cast<int>(256.0f * cent));
-    pitch *= pitch_ratio;
-
-    float pan = 0.0f;
-    pan += init_pan_;
-    pan += user_pan_;
-    if (lfo_target_ == LfoTarget::kPan)
-    {
-        pan += lfo_value;
-    }
-
-    float surround_pan = 0.0f;
-    surround_pan += init_surround_pan_;
-    surround_pan += user_surround_pan_;
-    float lpf_freq = 1.0f;
-    lpf_freq += user_lpf_freq_;
-    float main_out_volume = 1.0f;
-    main_out_volume *= main_out_volume_;
-    float main_send = 0.0f;
-    main_send += main_send_;
-    std::array<float, 3> fx_send{};
-    for (int i = 0; i < 3; i++)
-    {
-        fx_send[i] += fx_send_[i];
-    }
-
-    // Advance by the frame's 3 ms. The envelope there (with a volume LFO) is where the ramp ends.
-    if (periodic)
-    {
-        if (auto_sweep_)
-        {
-            UpdateSweep(3);
-        }
-
-        lfo_.Update(3);
-        envelope_.Update(3);
-    }
-
-    const float next_lfo_value = lfo_.Value();
-    float ve_target_volume = 1.0f;
-    ve_target_volume *= CalcVolumeRatio(envelope_.Value());
-    if (lfo_target_ == LfoTarget::kVolume)
-    {
-        ve_target_volume *= CalcVolumeRatio(6.0f * next_lfo_value);
-    }
-
-    if (voice_ == nullptr)
-    {
-        return;
-    }
-
-    voice_->SetPanMode(pan_mode_);
-    voice_->SetPanCurve(pan_curve_);
-    voice_->SetVolume(volume);
-    voice_->SetVeVolume(ve_target_volume, ve_init_volume);
-    voice_->SetPitch(pitch);
-    voice_->SetPan(pan);
-    voice_->SetSurroundPan(surround_pan);
-    voice_->SetLpfFreq(lpf_freq);
-    voice_->SetBiquadFilter(biquad_type_, biquad_value_);
-    voice_->SetMainOutVolume(main_out_volume);
-    voice_->SetMainSend(main_send);
-    for (int i = 0; i < 3; i++)
-    {
-        voice_->SetFxSend(i, fx_send[i]);
-    }
-}
-
-void Channel::Start(const WaveData& data, int length, uint32_t offset)
-{
-    length_ = length;
-    wave_loops_ = data.loop;
-    lfo_.Reset();
-    envelope_.Reset();
-    sweep_counter_ = 0;
-    voice_->Setup(data, offset);
-    voice_->Start();
-    active_ = true;
-}
-
-void Channel::Release()
-{
-    if (envelope_.GetStatus() != Envelope::Status::kRelease)
-    {
-        if (voice_ != nullptr && !release_priority_fix_)
-        {
-            voice_->SetPriority(1);
-        }
-
-        envelope_.SetStatus(Envelope::Status::kRelease);
-    }
-
-    pause_ = false;
-}
-
-void Channel::NoteOff()
-{
-    if (ignore_note_off_)
-    {
-        return;
-    }
-
-    Release();
-}
-
-void Channel::Stop()
-{
-    if (voice_ == nullptr)
-    {
-        return;
-    }
-
-    voice_->Stop();
-    voice_->Free();
-    voice_ = nullptr;
-    pause_ = false;
-    active_ = false;
-    if (alloc_)
-    {
-        alloc_ = false;
-        engine_->Channels().Free(this);
-    }
-
-    if (callback_)
-    {
-        const Callback callback = callback_;
-        callback(this, CallbackStatus::kStopped);
-    }
-}
-
-void Channel::UpdateSweep(int count)
-{
-    sweep_counter_ = std::min(sweep_counter_ + count, sweep_length_);
-}
-
-void Channel::SetSweepParam(float pitch, int time, bool auto_update)
-{
-    sweep_pitch_ = pitch;
-    sweep_length_ = time;
-    auto_sweep_ = auto_update;
-    sweep_counter_ = 0;
-}
-
-uint8_t Channel::SilenceVolume::Value() const
-{
-    if (counter >= frame)
-    {
-        return target;
-    }
-
-    return static_cast<uint8_t>(origin + counter * (target - origin) / frame);
-}
-
-float Channel::SweepValue() const
-{
-    // GetSweepValue (inlined in Update): the sweep's pitch. The pitch falls to 0 over the sweep's length.
-    if (sweep_pitch_ == 0.0f || sweep_counter_ >= sweep_length_)
-    {
-        return 0.0f;
-    }
-
-    float sweep = sweep_pitch_;
-    sweep *= static_cast<float>(sweep_length_ - sweep_counter_);
-    sweep /= static_cast<float>(sweep_length_);
-
-    return sweep;
-}
-
-void Channel::OnVoiceEvent(Voice* voice, Voice::Status status)
-{
-    // A voice that finished or was cancelled is freed here. A dropped voice has been freed already.
-    CallbackStatus channel_status = CallbackStatus::kDrop;
-    switch (status)
-    {
-    case Voice::Status::kFinishWave:
-        channel_status = CallbackStatus::kFinish;
-        voice->Free();
-        break;
-
-    case Voice::Status::kCancel:
-        channel_status = CallbackStatus::kCancel;
-        voice->Free();
-        break;
-
-    case Voice::Status::kDropVoice:
-    case Voice::Status::kDropDsp:
-        channel_status = CallbackStatus::kDrop;
-        break;
-    }
-
-    if (callback_)
-    {
-        const Callback callback = callback_;
-        callback(this, channel_status);
-    }
-
-    voice_ = nullptr;
-    pause_ = false;
-    active_ = false;
-    alloc_ = false;
-    engine_->Channels().Free(this);
-}
-
-ChannelManager::ChannelManager(Engine& engine)
-{
-    // The pool is a stack built from the end of its memory. The first channel out is the last in the block.
-    for (std::unique_ptr<Channel>& channel : pool_)
-    {
-        channel = std::make_unique<Channel>(engine);
-        free_.push_front(channel.get());
-    }
-}
-
-ChannelManager::Snapshot ChannelManager::Save() const
-{
-    Snapshot snapshot{{}, free_, channels_};
-    snapshot.channels.reserve(pool_.size());
-    for (const std::unique_ptr<Channel>& channel : pool_)
-    {
-        snapshot.channels.push_back(*channel);
-    }
-
-    return snapshot;
-}
-
-void ChannelManager::Restore(const Snapshot& snapshot)
-{
-    for (std::size_t i = 0; i < pool_.size(); i++)
-    {
-        *pool_[i] = snapshot.channels[i];
-    }
-
-    free_ = snapshot.free;
-    channels_ = snapshot.active;
-}
-
-Channel* ChannelManager::Alloc()
-{
-    Channel* channel = free_.front();
-    free_.pop_front();
-    channels_.push_back(channel);
-
-    return channel;
-}
-
-void ChannelManager::Free(Channel* channel)
-{
-    channels_.remove(channel);
-    free_.push_front(channel);
-}
-
-void ChannelManager::UpdateAllChannel()
-{
-    // Like the game's safe iteration, go over a copy. A channel may stop and free itself.
-    for (auto it = channels_.begin(); it != channels_.end();)
-    {
-        Channel* channel = *it++;
-        channel->Update(true);
-    }
-}
-
-bool ChannelManager::AnyChanging() const
-{
-    const auto changing = [](const Channel* channel)
-    {
-        return !channel->IsSustain();
-    };
-
-    return std::any_of(channels_.begin(), channels_.end(), changing);
+    const Voice* voice = AllocVoice(channels, static_cast<int>(priority), owner);
+    return voice != nullptr ? voice->Place() : kNoVoice;
 }
 
 } // namespace wsf::nw4r

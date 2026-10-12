@@ -1,186 +1,34 @@
 // SPDX-License-Identifier: MIT
 
-// Unit tests for the WSF file format code (src/wsf/format.*): PSF container, tags, times, program chunks, process and
-// archive descriptors, the driver block's check and _lib loading.
+// Unit tests for the WSF file format code (src/wsf/format.*): the version byte, the process and archive descriptors,
+// and what WSF's format gives xsflib's set loader: its PSF version, its descriptors and its driver block. xsflib's
+// psf_test and psf_set_test cover the PSF container, tags, times, program chunks and the loader.
 
 #include "wsf/format.h"
 
-#include <zlib.h>
-
-#include <algorithm>
-#include <clocale>
-#include <cmath>
-#include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "check.h"
-#include "common/bytes.h"
+#include "xsflib/bytes.h"
+#include "xsflib/psf/psf.h"
+#include "xsflib/testing/check.h"
+#include "xsflib/testing/sets.h"
+
+using xsflib::testing::LoadError;
 
 using namespace wsf;
 
-static void TestTimes()
+static void TestVersionByte()
 {
-    WSF_CHECK(ParseTime("") == -1);
-    WSF_CHECK(ParseTime("abc") == -1);
-    WSF_CHECK(ParseTime("5") == 5000);
-    WSF_CHECK(ParseTime("1.5") == 1500);
-    WSF_CHECK(ParseTime("1,25") == 1250);
-    WSF_CHECK(ParseTime("2:03") == 123000);
-    WSF_CHECK(ParseTime("2:03.5") == 123500);
-    WSF_CHECK(ParseTime("1:00:00") == 3600000);
-    WSF_CHECK(ParseTime(" 0:10.000 ") == 10000);
-    WSF_CHECK(ParseTime("1:2:3:4") == -1);
-    WSF_CHECK(ParseTime("-1") == -1);
-    WSF_CHECK(ParseTime("nan") == -1);
-    WSF_CHECK(ParseTime("inf") == -1);
-    WSF_CHECK(ParseTime("1e300") == -1);
-    WSF_CHECK(ParseTime("99999999999999999999:00") == -1);
+    // A file that WSF writes has version byte 0x27 (docs/wsf.md, "Version byte"). xsflib's psf_test checks the PSF
+    // container with another version byte.
+    const auto file = xsflib::psf::WritePsf(kPsfVersionWsf, {}, {}, {});
 
-    WSF_CHECK(FormatTime(0) == "0:00.000");
-    WSF_CHECK(FormatTime(65998) == "1:05.998");
-    WSF_CHECK(FormatTime(600000) == "10:00.000");
-
-    for (long long ms : {0LL, 1LL, 999LL, 59999LL, 61001LL, 3599999LL})
-    {
-        WSF_CHECK(ParseTime(FormatTime(ms)) == ms);
-    }
-}
-
-// Numbers in tags: an optional sign, digits with '.' or ',' before decimals, and an optional exponent, with the values
-// that std::strtod gives in the C locale. Text after the number is left unread.
-static void TestDecimals()
-{
-    for (const char* text : {"0", "0.5", "1,25", "-1.5", "+2", ".5", "5.", "123.456", "0.000123", "2.718281828459045",
-                             "1e3", "1.5E-3", "1e22", "1e-22", "9007199254740992", "0.1", "0.3", "62.226"})
-    {
-        std::string c_text = text;
-        std::replace(c_text.begin(), c_text.end(), ',', '.');
-
-        const auto number = ReadDecimal(text);
-
-        Check(number && number->length == std::strlen(text) && number->value == std::strtod(c_text.c_str(), nullptr),
-              std::string(text) + " reads as std::strtod reads it");
-    }
-
-    const auto with_unit = ReadDecimal("0.5dB");
-    const auto bare_exponent = ReadDecimal("1e+x");
-    const auto hex = ReadDecimal("0x10");
-    const auto huge = ReadDecimal("1e999");
-    const auto tiny = ReadDecimal("1e-999");
-
-    WSF_CHECK(with_unit && with_unit->value == 0.5 && with_unit->length == 3);
-    WSF_CHECK(bare_exponent && bare_exponent->value == 1 && bare_exponent->length == 1);
-    WSF_CHECK(hex && hex->value == 0 && hex->length == 1);
-    WSF_CHECK(huge && std::isinf(huge->value));
-    WSF_CHECK(tiny && tiny->value == 0);
-    for (const char* text : {"", ".", "-", "+.", "e5", " 1", "nan", "inf", "x1"})
-    {
-        Check(!ReadDecimal(text), std::string("\"") + text + "\" isn't a number");
-    }
-}
-
-// Under a locale that writes decimals with a comma, std::strtod stops at '.'. Tags still read the same. The check runs
-// only where such a locale is installed.
-static void TestDecimalsUnderCommaLocale()
-{
-    const char* comma_locale = nullptr;
-    for (const char* name : {"de_DE.UTF-8", "de_DE.utf8", "de_DE", "fr_FR.UTF-8", "de-DE", "German_Germany.1252"})
-    {
-        if (std::setlocale(LC_NUMERIC, name) && std::strtod("0.5", nullptr) == 0)
-        {
-            comma_locale = name;
-            break;
-        }
-    }
-
-    if (!comma_locale)
-    {
-        std::setlocale(LC_NUMERIC, "C");
-        std::printf("no locale with decimal commas is installed. Tags weren't read under one.\n");
-        return;
-    }
-
-    const auto volume = ReadDecimal("0.5");
-    const long long length = ParseTime("1:02.226");
-    std::setlocale(LC_NUMERIC, "C");
-
-    Check(volume && volume->value == 0.5, std::string("a volume of 0.5 reads as 0.5 under ") + comma_locale);
-    Check(length == 62226, std::string("a length of 1:02.226 reads as 62,226 ms under ") + comma_locale);
-}
-
-static void TestPsfRoundTrip()
-{
-    std::vector<uint8_t> reserved = {1, 2, 3, 4, 5};
-    Tags tags = {{"title", "Test"}, {"comment", "line one\nline two"}, {"_lib", "x.wsflib"}};
-    std::vector<uint8_t> program(100000);
-    for (std::size_t i = 0; i < program.size(); i++)
-    {
-        program[i] = static_cast<uint8_t>(i * 7 + (i >> 8));
-    }
-
-    const auto file = WritePsf(kPsfVersionWsf, reserved, program, tags);
-    PsfFile psf;
-    const auto err = ParsePsf(file, psf);
-
-    WSF_CHECK(file.size() > 16 && std::memcmp(file.data(), "PSF", 3) == 0 && file[3] == 0x27);
-    WSF_CHECK(!err);
-    WSF_CHECK(psf.version == kPsfVersionWsf);
-    WSF_CHECK(psf.reserved == reserved);
-    WSF_CHECK(psf.program == program);
-    WSF_CHECK(psf.tags == tags);
-
-    // Corruption of the compressed program is detected by the CRC.
-    auto bad = file;
-    bad[16 + reserved.size() + 10] ^= 0x55;
-
-    WSF_CHECK(ParsePsf(bad, psf) == "program CRC mismatch");
-
-    // Truncation.
-    auto cut = file;
-    cut.resize(20);
-
-    WSF_CHECK(ParsePsf(cut, psf) == "truncated PSF file");
-    WSF_CHECK(ParsePsf(std::vector<uint8_t>{'P', 'S'}, psf) == "not a PSF file");
-
-    // A program whose zlib stream stops short, with a size and CRC that match what's left of it.
-    const uint32_t half = LoadLe32(&file[8]) / 2;
-    std::vector<uint8_t> short_stream(file.begin(), file.begin() + 16 + reserved.size() + half);
-    StoreLe32(&short_stream[8], half);
-    StoreLe32(&short_stream[12], static_cast<uint32_t>(crc32(0, &short_stream[16 + reserved.size()], half)));
-
-    WSF_CHECK(ParsePsf(short_stream, psf) == "truncated program data");
-}
-
-static void TestTagParsing()
-{
-    const std::string kHeader = std::string("PSF") + static_cast<char>(kPsfVersionWsf) + std::string(12, '\0');
-    const std::string kTaggedPsf = kHeader +
-                                   "[TAG]Title = Hello \nTITLE2=x\ncomment=a\ncomment=b\nartist=me\ncomment=c\n"
-                                   "no equals sign\n=empty name\nlength=1:00\r\n";
-    std::vector<uint8_t> data(kTaggedPsf.begin(), kTaggedPsf.end());
-    PsfFile psf;
-
-    WSF_CHECK(!ParsePsf(data, psf));
-    WSF_CHECK(psf.tags["title"] == "Hello");
-    WSF_CHECK(psf.tags["title2"] == "x");
-    WSF_CHECK(psf.tags["comment"] == "c"); // a and b join, and the later c replaces them
-    WSF_CHECK(psf.tags["artist"] == "me");
-    WSF_CHECK(psf.tags["length"] == "1:00");
-    WSF_CHECK(psf.tags.count("") == 0);
-
-    // Consecutive lines with the same name join.
-    const std::string kRepeatedTagPsf = kHeader + "[TAG]comment=a\ncomment=b\n";
-    std::vector<uint8_t> data2(kRepeatedTagPsf.begin(), kRepeatedTagPsf.end());
-
-    WSF_CHECK(!ParsePsf(data2, psf));
-    WSF_CHECK(psf.tags["comment"] == "a\nb");
+    XSFLIB_CHECK(file.size() >= 16 && std::memcmp(file.data(), "PSF", 3) == 0 && file[3] == 0x27);
 }
 
 static void TestDescriptor()
@@ -195,239 +43,81 @@ static void TestDescriptor()
     const auto bytes = d.Serialize();
     const auto back = ProcessDescriptor::Parse(bytes);
 
-    WSF_CHECK(bytes.size() == 24);
-    WSF_CHECK(std::memcmp(bytes.data(), "WSFP", 4) == 0);
-    WSF_CHECK(back.has_value());
-    WSF_CHECK(back->version == d.version && back->entry == d.entry && back->status_address == d.status_address &&
-              back->ios_version == d.ios_version && back->flags == d.flags);
+    XSFLIB_CHECK(bytes.size() == 24);
+    XSFLIB_CHECK(std::memcmp(bytes.data(), "WSFP", 4) == 0);
+    XSFLIB_CHECK(back.has_value());
+    XSFLIB_CHECK(back->version == d.version && back->entry == d.entry && back->status_address == d.status_address &&
+                 back->ios_version == d.ios_version && back->flags == d.flags);
 
     // Data without the magic, or too short, isn't a descriptor.
-    WSF_CHECK(!ProcessDescriptor::Parse(std::vector<uint8_t>(24, 0)).has_value());
-    WSF_CHECK(!ProcessDescriptor::Parse(std::vector<uint8_t>(8, 0)).has_value());
-}
-
-static void TestChunks()
-{
-    ProgramBuilder b;
-    constexpr uint8_t kMemoryBytes[] = {1, 2, 3};
-    b.AddMemory(0x80004000, kMemoryBytes, sizeof(kMemoryBytes));
-    b.AddFile("Sound/a.brsar", std::vector<uint8_t>{9, 8, 7, 6, 5});
-    b.AddMemory(0x8170001c, std::vector<uint8_t>{0, 0, 0, 1});
-
-    ProgramChunks chunks;
-    const auto err = ParseProgram(b.Data(), chunks);
-    const auto& mem = chunks.memory;
-    const auto& files = chunks.files;
-
-    WSF_CHECK(b.Data().size() % 4 == 0);
-    WSF_CHECK(!err);
-    WSF_CHECK(mem.size() == 2 && files.size() == 1);
-    WSF_CHECK(mem[0].address == 0x80004000 && mem[0].data == std::vector<uint8_t>(kMemoryBytes, kMemoryBytes + 3));
-    WSF_CHECK(mem[1].address == 0x8170001c && mem[1].data.size() == 4);
-    WSF_CHECK(files[0].path == "Sound/a.brsar" && files[0].data == (std::vector<uint8_t>{9, 8, 7, 6, 5}));
-
-    // Unknown chunks are skipped.
-    std::vector<uint8_t> prog = {'X', 'X', 'X', 'X', 4, 0, 0, 0, 1, 2, 3, 4};
-    prog.insert(prog.end(), b.Data().begin(), b.Data().end());
-    ProgramChunks skipped;
-
-    WSF_CHECK(!ParseProgram(prog, skipped));
-    WSF_CHECK(skipped.memory.size() == 2 && skipped.files.size() == 1);
-
-    // A truncated chunk is an error. That holds even when its size is so large that adding it to the position wraps
-    // around on a 32-bit host.
-    std::vector<uint8_t> trunc = {'M', 'E', 'M', ' ', 100, 0, 0, 0, 1, 2};
-    std::vector<uint8_t> huge = {'M', 'E', 'M', ' ', 0xf8, 0xff, 0xff, 0xff, 1, 2, 3, 4};
-    ProgramChunks truncated;
-
-    WSF_CHECK(ParseProgram(trunc, truncated).has_value());
-    WSF_CHECK(ParseProgram(huge, truncated).has_value());
-}
-
-// The error LoadSet gives for `path`, or an empty string if the set loads.
-static std::string LoadError(const std::string& path, const FileReader& reader)
-{
-    LoadedSet set;
-    const auto err = LoadSet(path, reader, set);
-
-    return err ? *err : std::string();
+    XSFLIB_CHECK(!ProcessDescriptor::Parse(std::vector<uint8_t>(24, 0)).has_value());
+    XSFLIB_CHECK(!ProcessDescriptor::Parse(std::vector<uint8_t>(8, 0)).has_value());
 }
 
 static void TestLoadSet()
 {
-    // dir/lib.wsflib holds the descriptor and the base memory. dir/sub/x.miniwsf loads it with _lib=../lib.wsflib, and
-    // loads extra.miniwsf from the same directory with _lib2.
     std::map<std::string, std::vector<uint8_t>> fs;
+    const FileReader reader = xsflib::testing::MapReader(fs);
+
+    // A .miniwsf and its .wsflib, with the library's process descriptor.
     ProcessDescriptor d;
     d.status_address = 0x1234;
-
-    {
-        ProgramBuilder b;
-        b.AddMemory(0x1000, std::vector<uint8_t>{1, 1, 1, 1});
-        b.AddFile("f", std::vector<uint8_t>{1});
-        fs["dir/lib.wsflib"] = WritePsf(kPsfVersionWsf, d.Serialize(), b.Data(), {{"game", "G"}});
-    }
-
-    {
-        ProgramBuilder b;
-        b.AddMemory(0x1000, std::vector<uint8_t>{2});
-        fs["dir/sub/x.miniwsf"] =
-            WritePsf(kPsfVersionWsf, {}, b.Data(),
-                     {{"_lib", "../lib.wsflib"}, {"_lib2", "extra.miniwsf"}, {"title", "X"}, {"length", "1:00"}});
-    }
-
-    {
-        ProgramBuilder b;
-        b.AddMemory(0x1000, std::vector<uint8_t>{3});
-        fs["dir/sub/extra.miniwsf"] = WritePsf(kPsfVersionWsf, {}, b.Data(), {{"title", "extra"}});
-    }
-
-    const FileReader reader = [&](const std::string& path, std::vector<uint8_t>& out)
-    {
-        auto it = fs.find(std::filesystem::path(path).lexically_normal().generic_string());
-        if (it == fs.end())
-        {
-            return false;
-        }
-
-        out = it->second;
-
-        return true;
-    };
+    fs["dir/lib.wsflib"] = xsflib::psf::WritePsf(kPsfVersionWsf, d.Serialize(), {}, {});
+    fs["dir/x.miniwsf"] = xsflib::psf::WritePsf(kPsfVersionWsf, {}, {}, {{"_lib", "lib.wsflib"}});
 
     LoadedSet set;
-    const auto err = LoadSet("dir/sub/x.miniwsf", reader, set);
+    XSFLIB_CHECK(!LoadSet("dir/x.miniwsf", reader, set));
+    XSFLIB_CHECK(set.descriptor && set.descriptor->status_address == 0x1234);
 
-    WSF_CHECK(!err);
-    if (err || set.sources.size() != 3 || set.memory.size() != 3)
-    {
-        std::fprintf(stderr, "LoadSet: %s\n", err ? err->c_str() : "wrong result");
-        failures++;
-        return;
-    }
+    // Another format's file and a set without a descriptor are errors.
+    fs["dir/z.minincsf"] = xsflib::psf::WritePsf(0x25, {}, {}, {{"_lib", "lib.wsflib"}});
+    fs["dir/w.miniwsf"] = xsflib::psf::WritePsf(kPsfVersionWsf, {}, {}, {{"title", "w"}});
 
-    WSF_CHECK(set.sources[0] == "dir/sub/../lib.wsflib");
-    WSF_CHECK(set.sources[1] == "dir/sub/x.miniwsf");
-    WSF_CHECK(set.sources[2] == "dir/sub/extra.miniwsf");
-    WSF_CHECK(set.memory[0].data[0] == 1 && set.memory[1].data[0] == 2 && set.memory[2].data[0] == 3);
-    WSF_CHECK(set.files.size() == 1);
-    WSF_CHECK(set.descriptor && set.descriptor->status_address == 0x1234);
-    WSF_CHECK(set.tags["title"] == "X" && set.tags["length"] == "1:00" && set.tags.count("game") == 0);
-
-    // An empty _lib2 names no library, like an empty _lib, and _lib3 still loads.
-    {
-        ProgramBuilder b;
-        b.AddMemory(0x1000, std::vector<uint8_t>{4});
-        fs["dir/sub/v.miniwsf"] = WritePsf(kPsfVersionWsf, {}, b.Data(),
-                                           {{"_lib", "../lib.wsflib"}, {"_lib2", ""}, {"_lib3", "extra.miniwsf"}});
-    }
-
-    LoadedSet gap;
-    WSF_CHECK(!LoadSet("dir/sub/v.miniwsf", reader, gap));
-    WSF_CHECK(gap.sources.size() == 3 && gap.sources[2] == "dir/sub/extra.miniwsf");
-
-    // A missing library, a wrong PSF version and a set without a descriptor are errors.
-    fs["dir/y.miniwsf"] = WritePsf(kPsfVersionWsf, {}, {}, {{"_lib", "missing.wsflib"}});
-    fs["dir/z.minincsf"] = WritePsf(0x25, {}, {}, {{"_lib", "lib.wsflib"}});
-    fs["dir/w.miniwsf"] = WritePsf(kPsfVersionWsf, {}, {}, {{"title", "w"}});
-
-    WSF_CHECK(LoadError("dir/y.miniwsf", reader) == "can't read dir/missing.wsflib");
-    WSF_CHECK(LoadError("dir/z.minincsf", reader).find("not a WSF file") != std::string::npos);
-    WSF_CHECK(LoadError("dir/w.miniwsf", reader).starts_with("no process or archive descriptor"));
+    XSFLIB_CHECK(LoadError<SetFormat>("dir/z.minincsf", reader).find("not a WSF file") != std::string::npos);
+    XSFLIB_CHECK(LoadError<SetFormat>("dir/w.miniwsf", reader).starts_with("no process or archive descriptor"));
 
     // So is a descriptor with an unsupported version.
     ProcessDescriptor v2;
     v2.version = 2;
-    fs["dir/v2.wsflib"] = WritePsf(kPsfVersionWsf, v2.Serialize(), {}, {});
+    fs["dir/v2.wsflib"] = xsflib::psf::WritePsf(kPsfVersionWsf, v2.Serialize(), {}, {});
 
-    WSF_CHECK(LoadSet("dir/v2.wsflib", reader, set).has_value());
+    XSFLIB_CHECK(LoadSet("dir/v2.wsflib", reader, set).has_value());
 
     // Or flags other than bit 0 alone.
     for (const uint32_t flags : {0u, 3u, 0x80000001u})
     {
         ProcessDescriptor odd;
         odd.flags = flags;
-        fs["dir/flags.wsflib"] = WritePsf(kPsfVersionWsf, odd.Serialize(), {}, {});
-        WSF_CHECK(LoadSet("dir/flags.wsflib", reader, set).has_value());
+        fs["dir/flags.wsflib"] = xsflib::psf::WritePsf(kPsfVersionWsf, odd.Serialize(), {}, {});
+
+        XSFLIB_CHECK(LoadSet("dir/flags.wsflib", reader, set).has_value());
     }
 
-    // A driver block of version 1 plays. A block of another version doesn't. Neither does a block whose version a
-    // .miniwsf patches to another. Like the rest of the Wii's memory, the block's words are big-endian.
+    // A driver block of version 1 (NW4R SND's driver) or 2 (JAudio2's) plays. A block of another version doesn't. Like
+    // the rest of the Wii's memory, the block's words are big-endian.
     const auto driver_block = [](uint32_t version)
     {
         std::vector<uint8_t> block(0x20, 0);
-        StoreBe32(&block[0], DriverBlock::kMagic);
-        StoreBe32(&block[DriverBlock::kVersionOffset], version);
+        xsflib::StoreBe32(&block[0], DriverBlock::kMagic);
+        xsflib::StoreBe32(&block[DriverBlock::kVersionOffset], version);
         ProgramBuilder b;
         b.AddMemory(DriverBlock::kAddress, block);
 
         return b.Data();
     };
 
-    fs["dir/driver1.wsflib"] = WritePsf(kPsfVersionWsf, d.Serialize(), driver_block(1), {});
-    fs["dir/driver2.wsflib"] = WritePsf(kPsfVersionWsf, d.Serialize(), driver_block(2), {});
-    {
-        ProgramBuilder b;
-        b.AddMemory(DriverBlock::kAddress + DriverBlock::kVersionOffset, std::vector<uint8_t>{0, 0, 0, 2});
-        fs["dir/patched.miniwsf"] = WritePsf(kPsfVersionWsf, {}, b.Data(), {{"_lib", "driver1.wsflib"}});
-    }
+    fs["dir/driver1.wsflib"] = xsflib::psf::WritePsf(kPsfVersionWsf, d.Serialize(), driver_block(1), {});
+    fs["dir/driver2.wsflib"] = xsflib::psf::WritePsf(kPsfVersionWsf, d.Serialize(), driver_block(2), {});
+    fs["dir/driver3.wsflib"] = xsflib::psf::WritePsf(kPsfVersionWsf, d.Serialize(), driver_block(3), {});
 
-    WSF_CHECK(!LoadSet("dir/driver1.wsflib", reader, set));
-    WSF_CHECK(LoadSet("dir/driver2.wsflib", reader, set).has_value());
-    WSF_CHECK(LoadSet("dir/patched.miniwsf", reader, set).has_value());
+    const std::optional<std::string> driver1_error = LoadSet("dir/driver1.wsflib", reader, set);
+    const std::optional<std::string> driver2_error = LoadSet("dir/driver2.wsflib", reader, set);
+    const std::optional<std::string> refused = LoadSet("dir/driver3.wsflib", reader, set);
 
-    // A _lib cycle ends with an error instead of recursing forever.
-    fs["dir/c1.miniwsf"] = WritePsf(kPsfVersionWsf, {}, {}, {{"_lib", "c2.miniwsf"}});
-    fs["dir/c2.miniwsf"] = WritePsf(kPsfVersionWsf, {}, {}, {{"_lib", "c1.miniwsf"}});
-
-    WSF_CHECK(LoadError("dir/c1.miniwsf", reader) == "_lib nesting too deep");
-
-    // So does a set that names more files than a set can have. Each of these names the next one ten times. Loading them
-    // all would take 10^10 loads.
-    for (int level = 0; level < 10; level++)
-    {
-        Tags tags;
-        for (int n = 2; n <= 11; n++)
-        {
-            tags["_lib" + std::to_string(n)] = "f" + std::to_string(level + 1) + ".miniwsf";
-        }
-
-        fs["dir/f" + std::to_string(level) + ".miniwsf"] = WritePsf(kPsfVersionWsf, {}, {}, tags);
-    }
-
-    fs["dir/f10.miniwsf"] = WritePsf(kPsfVersionWsf, {}, {}, {});
-
-    WSF_CHECK(LoadError("dir/f0.miniwsf", reader) == "more than 64 files in the set");
-}
-
-static void TestLoadSetInArchive()
-{
-    // foobar2000's path for a file in an archive: unpack://zip|<length>|<the archive's path>|<its path in the archive>.
-    const std::string archive = "unpack://zip|23|file://C:\\music\\set.zip|";
-    std::map<std::string, std::vector<uint8_t>> fs;
-    fs[archive + "set.wsflib"] = WritePsf(kPsfVersionWsf, ProcessDescriptor{}.Serialize(), {}, {});
-    fs[archive + "x.miniwsf"] = WritePsf(kPsfVersionWsf, {}, {}, {{"_lib", "set.wsflib"}});
-
-    const FileReader reader = [&](const std::string& path, std::vector<uint8_t>& out)
-    {
-        auto it = fs.find(path);
-        if (it == fs.end())
-        {
-            return false;
-        }
-
-        out = it->second;
-
-        return true;
-    };
-
-    LoadedSet set;
-    const auto err = LoadSet(archive + "x.miniwsf", reader, set, "/\\|");
-    const std::string without = LoadError(archive + "x.miniwsf", reader);
-
-    // With | as a separator, the library is found in the archive. Without it, the library is found beside the archive.
-    WSF_CHECK(!err && set.sources.size() == 2 && set.sources[0] == archive + "set.wsflib");
-    WSF_CHECK(without == "can't read unpack://zip|23|file://C:\\music\\set.wsflib");
+    XSFLIB_CHECK(!driver1_error);
+    XSFLIB_CHECK(!driver2_error);
+    XSFLIB_CHECK(refused &&
+                 refused->find("driver block version 3; this player supports versions 1 to 2") != std::string::npos);
 }
 
 static void TestArchiveMode()
@@ -444,42 +134,43 @@ static void TestArchiveMode()
     const auto raw = d.Serialize();
     const auto back = ArchiveDescriptor::Parse(raw);
 
-    WSF_CHECK(raw.size() % 4 == 0);
-    WSF_CHECK(back && back->version == d.version && back->flags == d.flags && back->output_mode == d.output_mode &&
-              back->microcode_address == d.microcode_address && back->archive_path == d.archive_path &&
-              back->microcode_path == d.microcode_path && back->snd_build == d.snd_build);
-    WSF_CHECK(!ArchiveDescriptor::Parse(std::vector<uint8_t>(raw.begin(), raw.begin() + 22)).has_value());
+    XSFLIB_CHECK(raw.size() % 4 == 0);
+    XSFLIB_CHECK(back && back->version == d.version && back->flags == d.flags && back->output_mode == d.output_mode &&
+                 back->microcode_address == d.microcode_address && back->archive_path == d.archive_path &&
+                 back->microcode_path == d.microcode_path && back->snd_build == d.snd_build);
+    XSFLIB_CHECK(!ArchiveDescriptor::Parse(std::vector<uint8_t>(raw.begin(), raw.begin() + 22)).has_value());
+    XSFLIB_CHECK(!ProcessDescriptor::Parse(raw).has_value());
 
     // A descriptor that ends after its paths names no build.
     const auto without_build = ArchiveDescriptor::Parse(std::vector<uint8_t>(raw.begin(), raw.end() - 4));
-    WSF_CHECK(without_build && without_build->microcode_path == d.microcode_path && without_build->snd_build == 0);
-    WSF_CHECK(!ProcessDescriptor::Parse(raw).has_value());
+
+    XSFLIB_CHECK(without_build && without_build->microcode_path == d.microcode_path && without_build->snd_build == 0);
 
     // A player only accepts version 1, with bit 0 of the flags set and no other, in stereo.
-    WSF_CHECK(d.Check().has_value());
+    XSFLIB_CHECK(d.Check().has_value());
 
     ArchiveDescriptor v1 = d;
     v1.version = 1;
     v1.flags = kFlagDspRequired;
     v1.output_mode = kOutputStereo;
 
-    WSF_CHECK(!v1.Check());
+    XSFLIB_CHECK(!v1.Check());
 
     for (const uint32_t flags : {0u, 3u, 0x80000001u})
     {
         ArchiveDescriptor odd = v1;
         odd.flags = flags;
-        WSF_CHECK(odd.Check().has_value());
+
+        XSFLIB_CHECK(odd.Check().has_value());
     }
 
     for (const uint32_t mode : {0u, 2u, 3u})
     {
         ArchiveDescriptor odd = v1;
         odd.output_mode = mode;
-        WSF_CHECK(odd.Check().has_value());
-    }
 
-    const auto raw1 = v1.Serialize();
+        XSFLIB_CHECK(odd.Check().has_value());
+    }
 
     // A later descriptor of the other kind sets the mode. The last SND chunk selects the sound.
     ProgramBuilder lib;
@@ -489,59 +180,34 @@ static void TestArchiveMode()
     mini.AddSound(7);
     ProcessDescriptor game;
 
+    const auto raw1 = v1.Serialize();
     std::map<std::string, std::vector<uint8_t>> fs;
-    fs["a/lib.wsflib"] = WritePsf(kPsfVersionWsf, raw1, lib.Data(), {});
-    fs["a/x.miniwsf"] = WritePsf(kPsfVersionWsf, {}, mini.Data(), {{"_lib", "lib.wsflib"}});
-    fs["a/y.miniwsf"] = WritePsf(kPsfVersionWsf, game.Serialize(), {}, {{"_lib", "lib.wsflib"}});
-    fs["a/nosound.wsflib"] = WritePsf(kPsfVersionWsf, raw1, {}, {});
-    fs["a/z.miniwsf"] = WritePsf(kPsfVersionWsf, {}, {}, {{"_lib", "nosound.wsflib"}});
+    fs["a/lib.wsflib"] = xsflib::psf::WritePsf(kPsfVersionWsf, raw1, lib.Data(), {});
+    fs["a/x.miniwsf"] = xsflib::psf::WritePsf(kPsfVersionWsf, {}, mini.Data(), {{"_lib", "lib.wsflib"}});
+    fs["a/y.miniwsf"] = xsflib::psf::WritePsf(kPsfVersionWsf, game.Serialize(), {}, {{"_lib", "lib.wsflib"}});
+    fs["a/nosound.wsflib"] = xsflib::psf::WritePsf(kPsfVersionWsf, raw1, {}, {});
+    fs["a/z.miniwsf"] = xsflib::psf::WritePsf(kPsfVersionWsf, {}, {}, {{"_lib", "nosound.wsflib"}});
 
-    const FileReader reader = [&](const std::string& path, std::vector<uint8_t>& out)
-    {
-        auto it = fs.find(path);
-        if (it == fs.end())
-        {
-            return false;
-        }
-
-        out = it->second;
-
-        return true;
-    };
-
+    const FileReader reader = xsflib::testing::MapReader(fs);
     LoadedSet set;
 
-    WSF_CHECK(!LoadSet("a/x.miniwsf", reader, set));
-    WSF_CHECK(set.archive.has_value() && !set.descriptor.has_value());
-    WSF_CHECK(set.sound == 7u);
-    WSF_CHECK(set.files.size() == 1 && set.files[0].path == "Sound/b.brsar");
+    XSFLIB_CHECK(!LoadSet("a/x.miniwsf", reader, set));
+    XSFLIB_CHECK(set.archive.has_value() && !set.descriptor.has_value());
+    XSFLIB_CHECK(set.sound == 7u);
+    XSFLIB_CHECK(set.files.size() == 1 && set.files[0].path == "Sound/b.brsar");
 
-    WSF_CHECK(!LoadSet("a/y.miniwsf", reader, set));
-    WSF_CHECK(set.descriptor.has_value() && !set.archive.has_value());
+    XSFLIB_CHECK(!LoadSet("a/y.miniwsf", reader, set));
+    XSFLIB_CHECK(set.descriptor.has_value() && !set.archive.has_value());
 
-    WSF_CHECK(LoadSet("a/z.miniwsf", reader, set).has_value()); // archive mode without a sound
+    XSFLIB_CHECK(LoadSet("a/z.miniwsf", reader, set).has_value()); // archive mode without a sound
 }
 
 int main()
 {
-    TestTimes();
-    TestDecimals();
-    TestDecimalsUnderCommaLocale();
     TestArchiveMode();
-    TestPsfRoundTrip();
-    TestTagParsing();
     TestDescriptor();
-    TestChunks();
     TestLoadSet();
-    TestLoadSetInArchive();
+    TestVersionByte();
 
-    if (failures)
-    {
-        std::fprintf(stderr, "%d check(s) failed\n", failures);
-        return 1;
-    }
-
-    std::printf("format tests passed\n");
-
-    return 0;
+    return xsflib::testing::Summary("format");
 }

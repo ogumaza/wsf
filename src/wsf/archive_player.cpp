@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-// Archive mode (see archive_player.h).
+// Archive mode (see archive_player.h), on xsflib's ArchiveSource.
 
 #include "wsf/archive_player.h"
 
@@ -11,116 +11,172 @@
 #include <string>
 #include <vector>
 
-#include "ax/microcode.h"
-#include "common/bytes.h"
+#include "ntdlib/rsar/formats.h"
+#include "ntdlib/sound_build.h"
+#include "xsflib/bytes.h"
+#include "xsflib/player/archive_source.h"
+
 #include "nw4r/engine.h"
-#include "rsar/formats.h"
+#include "nw4r/rsar_options.h"
 
 namespace wsf
 {
+namespace
+{
+
+// WSF's steps of archive mode: the set's archive and AX's microcode, the model of NW4R SND and AX, and the sequence.
+struct ArchiveTraits
+{
+    using Set = const LoadedSet;
+    using Archive = ntdlib::rsar::SoundArchive;
+    using Model = nw4r::ArchiveModel;
+    using Snapshot = nw4r::ArchiveModel::Snapshot;
+
+    struct Prepared
+    {
+        const ArchiveDescriptor* descriptor = nullptr;
+        const std::vector<uint8_t>* archive = nullptr;
+        ntdlib::Microcode microcode;
+        uint32_t sound = 0;
+    };
+
+    static constexpr bool kKeepArchive = false;
+
+    static std::optional<std::string> Prepare(Set& set, Prepared& prepared)
+    {
+        if (!set.archive)
+        {
+            return "not an archive-mode set";
+        }
+
+        const ArchiveDescriptor& d = *set.archive;
+        prepared.descriptor = &d;
+        prepared.archive = set.File(d.archive_path);
+        if (!prepared.archive)
+        {
+            return "the sound archive (" + d.archive_path + ") is missing";
+        }
+
+        const std::vector<uint8_t>* microcode_bytes = set.File(d.microcode_path);
+        if (!microcode_bytes || microcode_bytes->size() != ntdlib::kMicrocodeWords * 2)
+        {
+            return "AX's microcode (" + d.microcode_path + ") is missing";
+        }
+
+        if (!set.sound)
+        {
+            return "no sequence selected";
+        }
+
+        prepared.sound = *set.sound;
+        prepared.microcode.address = d.microcode_address;
+        for (std::size_t i = 0; i < ntdlib::kMicrocodeWords; i++)
+        {
+            prepared.microcode.words.push_back(xsflib::LoadBe16(&(*microcode_bytes)[i * 2]));
+        }
+
+        return std::nullopt;
+    }
+
+    static std::optional<std::string> LoadArchive(Set&, const Prepared& prepared, std::optional<Archive>& archive)
+    {
+        archive = ntdlib::rsar::SoundArchive::Load(*prepared.archive, wsf::nw4r::kRsarOptions);
+
+        return std::nullopt;
+    }
+
+    static std::unique_ptr<Model> MakeModel(const Prepared& prepared, const Archive&)
+    {
+        auto model = std::make_unique<Model>();
+        model->build = nw4r::SndBuild{prepared.descriptor->snd_build};
+
+        return model;
+    }
+
+    static std::optional<std::string> StartModel(Model& model, Archive& archive, const Prepared& prepared)
+    {
+        if (!model.Start(prepared.microcode, archive))
+        {
+            return "AX's microcode didn't start";
+        }
+
+        return std::nullopt;
+    }
+
+    static std::optional<std::string> StartSequence(Model& model, Set&, const Prepared& prepared)
+    {
+        if (!model.engine->StartSequence(prepared.sound))
+        {
+            return "sound " + std::to_string(prepared.sound) + " isn't a sequence, or its data isn't in the archive";
+        }
+
+        return std::nullopt;
+    }
+
+    static bool RunFrame(Model& model, std::vector<int16_t>& out)
+    {
+        return model.engine && model.RunFrame(out);
+    }
+
+    static bool Busy(const Model& model)
+    {
+        return model.engine && model.engine->IsBusy();
+    }
+
+    static Snapshot Save(Model& model, const Snapshot* previous)
+    {
+        return model.Save(previous);
+    }
+
+    static void Restore(Model& model, const Snapshot& snapshot)
+    {
+        model.Restore(snapshot);
+    }
+};
+
+} // namespace
 
 struct ArchivePlayer::State
 {
-    std::optional<rsar::SoundArchive> archive; // declared first so that it outlives the model's engine
-    nw4r::ArchiveModel model;
+    xsflib::player::ArchiveSource<ArchiveTraits> source;
 };
 
 struct ArchivePlayer::Snapshot
 {
-    nw4r::ArchiveModel::Snapshot model;
+    std::shared_ptr<ArchiveTraits::Snapshot> model;
 };
 
-ArchivePlayer::ArchivePlayer() = default;
+ArchivePlayer::ArchivePlayer() : state_(std::make_unique<State>())
+{
+}
 
 ArchivePlayer::~ArchivePlayer() = default;
 
-namespace
-{
-
-const std::vector<uint8_t>* FindFile(const LoadedSet& set, const std::string& path)
-{
-    const std::vector<uint8_t>* found = nullptr;
-    for (const auto& f : set.files)
-    {
-        if (f.path == path)
-        {
-            found = &f.data; // later chunks replace earlier ones
-        }
-    }
-
-    return found;
-}
-
-} // namespace
-
 std::optional<std::string> ArchivePlayer::Start(const LoadedSet& set)
 {
-    if (!set.archive)
-    {
-        return "not an archive-mode set";
-    }
-
-    const ArchiveDescriptor& d = *set.archive;
-    const std::vector<uint8_t>* archive_bytes = FindFile(set, d.archive_path);
-    if (!archive_bytes)
-    {
-        return "the sound archive (" + d.archive_path + ") is missing";
-    }
-
-    const std::vector<uint8_t>* microcode_bytes = FindFile(set, d.microcode_path);
-    if (!microcode_bytes || microcode_bytes->size() != ax::kMicrocodeWords * 2)
-    {
-        return "AX's microcode (" + d.microcode_path + ") is missing";
-    }
-
-    if (!set.sound)
-    {
-        return "no sequence selected";
-    }
-
-    ax::Microcode microcode;
-    microcode.address = d.microcode_address;
-    for (std::size_t i = 0; i < ax::kMicrocodeWords; i++)
-    {
-        microcode.words.push_back(LoadBe16(&(*microcode_bytes)[i * 2]));
-    }
-
     output_.clear();
-    state_ = std::make_unique<State>();
-    State& s = *state_;
-    s.archive = rsar::SoundArchive::Load(*archive_bytes);
-    s.model.build = nw4r::SndBuild{d.snd_build};
-    if (!s.model.Start(microcode, *s.archive))
-    {
-        return "AX's microcode didn't start";
-    }
 
-    if (!s.model.engine->StartSequence(*set.sound))
-    {
-        return "sound " + std::to_string(*set.sound) + " isn't a sequence, or its data isn't in the archive";
-    }
-
-    return std::nullopt;
+    return state_->source.Start(set, output_);
 }
 
 bool ArchivePlayer::RunFrame()
 {
-    return state_ && state_->model.engine && state_->model.RunFrame(output_);
+    return state_->source.RunFrame(output_);
 }
 
 bool ArchivePlayer::Busy() const
 {
-    return state_ && state_->model.engine && state_->model.engine->IsBusy();
+    return state_->source.Busy();
 }
 
 std::shared_ptr<ArchivePlayer::Snapshot> ArchivePlayer::Save(const Snapshot* previous) const
 {
-    return std::make_shared<Snapshot>(Snapshot{state_->model.Save(previous ? &previous->model : nullptr)});
+    return std::make_shared<Snapshot>(Snapshot{state_->source.Save(previous ? previous->model.get() : nullptr)});
 }
 
 void ArchivePlayer::Restore(const Snapshot& snapshot)
 {
-    state_->model.Restore(snapshot.model);
+    state_->source.Restore(*snapshot.model);
 }
 
 } // namespace wsf

@@ -8,29 +8,36 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <exception>
+#include <filesystem>
+#include <fstream>
 #include <memory>
-#include <new>
 #include <optional>
 #include <span>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
-#include "ax/microcode.h"
+#include "ntdlib/disc/containers.h"
+#include "ntdlib/dol.h"
+#include "ntdlib/jaudio/rarc.h"
+#include "ntdlib/rsar/formats.h"
+#include "ntdlib/sound_build.h"
+#include "xsflib/ascii.h"
+#include "xsflib/bytes.h"
+#include "xsflib/files.h"
+#include "xsflib/rip/length.h"
+#include "xsflib/sha1.h"
+
 #include "ax/pb.h"
 #include "ax/system.h"
-#include "common/ascii.h"
-#include "common/bytes.h"
-#include "common/dol.h"
-#include "common/sha1.h"
 #include "nw4r/engine.h"
+#include "nw4r/rsar_options.h"
 #include "nw4r/sequence.h"
 #include "rip/driver_blob.h"
-#include "rsar/formats.h"
+#include "rip/jaudio_driver_blob.h"
 #include "wsf/format.h"
 
 namespace wsf::rip
@@ -50,7 +57,8 @@ constexpr uint32_t kParamsBankGroupOffset = 0xb4; // the group with the sound's 
 constexpr uint32_t kParamsInitFlagOffset = 0xb8;  // the sound system's flag, for a 2008 build's Setup
 
 // The driver's settings: SoundArchivePlayer::Update 60 times a second, nw4r::snd's default thread priorities, and room
-// for each object that the driver creates. The time base runs at a quarter of the 243 MHz bus clock.
+// for each object that the driver creates. The time base runs at a quarter of the 243 MHz bus clock. The JAudio2 driver
+// takes the same frame time for a video frame.
 constexpr uint32_t kFrameTicks = 243'000'000 / 4 / 60;
 constexpr uint32_t kSoundThreadPriority = 4;
 constexpr uint32_t kDvdThreadPriority = 3;
@@ -58,21 +66,6 @@ constexpr uint32_t kObjectSize = 0x2000;
 
 // Room in the sound heap beyond a group's data: the heap's block headers and alignment.
 constexpr uint32_t kHeapSlack = 0x10000;
-
-// The length analysis counts in 3 ms AX frames. It gives two loops and a 10 s fade, or the end, for at most 600 s. A
-// sequence that stays busy without a sound for 180 s has ended. No music rests that long. Some sound effects come
-// close.
-constexpr int kLoops = 2;
-constexpr int kFadeSeconds = 10;
-constexpr int kMaxSeconds = 600;
-constexpr int kSilentSeconds = 180;
-constexpr double kFrameMs = 3.0;
-constexpr uint64_t kMaxFrames = kMaxSeconds * 1000 / 3;
-constexpr uint64_t kSilentFrames = kSilentSeconds * 1000 / 3;
-
-// The loudest sample that still counts as silence: 8 of 32,767, or -72 dB. That's far below anything audible. A note
-// can hold at such a level forever after it has died away.
-constexpr int kSilenceLevel = 8;
 
 // The profile's functions, in the order of their signatures.
 constexpr std::array<uint32_t GameProfile::*, kProfileFunctions> kProfileFields = {
@@ -113,7 +106,7 @@ uint64_t MaskedHash(std::span<const uint8_t> code)
     uint64_t hash = 0xcbf29ce484222325;
     for (std::size_t i = 0; i + 4 <= code.size(); i += 4)
     {
-        const uint32_t word = MaskedWord(LoadBe32(&code[i]));
+        const uint32_t word = MaskedWord(xsflib::LoadBe32(&code[i]));
         for (int shift = 24; shift >= 0; shift -= 8)
         {
             hash ^= word >> shift & 0xff;
@@ -411,13 +404,21 @@ const std::vector<GameProfile>& KnownProfiles()
             }},
         },
     };
-
     return kProfiles;
 }
 
-std::optional<GameProfile> FindProfile(const disc::GameFiles& game)
+ntdlib::disc::GameOptions DiscOptions()
 {
-    const std::string sha1 = Sha1::Hex(Sha1::Of(game.dol));
+    ntdlib::disc::GameOptions options{ntdlib::disc::Console::kWii, "WSF"};
+    options.image.open_container = ntdlib::disc::OpenContainer;
+    options.titles = true;
+
+    return options;
+}
+
+std::optional<GameProfile> FindProfile(const ntdlib::disc::GameFiles& game)
+{
+    const std::string sha1 = xsflib::Sha1::Hex(xsflib::Sha1::Of(game.dol));
     for (const GameProfile& profile : KnownProfiles())
     {
         if (game.GameId() == profile.game_id && sha1 == profile.dol_sha1)
@@ -452,7 +453,7 @@ std::optional<GameProfile> FindProfile(const disc::GameFiles& game)
 
 std::optional<GameProfile> DeriveProfile(const GameProfile& source, std::span<const uint8_t> dol_bytes)
 {
-    const std::optional<Dol> dol = Dol::Parse(dol_bytes);
+    const std::optional<ntdlib::Dol> dol = ntdlib::Dol::Parse(dol_bytes);
     if (!dol)
     {
         return std::nullopt;
@@ -460,11 +461,11 @@ std::optional<GameProfile> DeriveProfile(const GameProfile& source, std::span<co
 
     // The places whose code matches each function's signature.
     std::array<std::vector<uint32_t>, kProfileFunctions> places;
-    for (const Dol::Section& section : dol->Sections())
+    for (const ntdlib::Dol::Section& section : dol->Sections())
     {
         for (std::size_t at = 0; at + 4 <= section.data.size(); at += 4)
         {
-            const uint32_t first = MaskedWord(LoadBe32(&section.data[at]));
+            const uint32_t first = MaskedWord(xsflib::LoadBe32(&section.data[at]));
             for (std::size_t i = 0; i < kProfileFunctions; i++)
             {
                 const FunctionSignature& signature = source.signatures[i];
@@ -485,6 +486,7 @@ std::optional<GameProfile> DeriveProfile(const GameProfile& source, std::span<co
         {
             return std::nullopt;
         }
+
         if (places[i].size() == 1)
         {
             moved[i] = int64_t{places[i][0]} - source.*kProfileFields[i];
@@ -509,7 +511,6 @@ std::optional<GameProfile> DeriveProfile(const GameProfile& source, std::span<co
                 nearest = j;
             }
         }
-
         if (!nearest)
         {
             return std::nullopt;
@@ -528,15 +529,15 @@ std::optional<GameProfile> DeriveProfile(const GameProfile& source, std::span<co
     return derived;
 }
 
-std::optional<SoundData> FindSoundData(const rsar::SoundArchive& archive, uint32_t index)
+std::optional<SoundData> FindSoundData(const ntdlib::rsar::SoundArchive& archive, uint32_t index)
 {
     if (index >= archive.Sounds().size())
     {
         return std::nullopt;
     }
 
-    const rsar::SoundInfo& sound = archive.Sounds()[index];
-    if (sound.bank_id >= archive.Banks().size())
+    const ntdlib::rsar::SoundInfo& sound = archive.Sounds()[index];
+    if (sound.bank >= archive.Banks().size())
     {
         return std::nullopt;
     }
@@ -552,7 +553,7 @@ std::optional<SoundData> FindSoundData(const rsar::SoundArchive& archive, uint32
         std::size_t g = first;
         for (; g < count; g++)
         {
-            const rsar::SoundArchive::Group& group = archive.Groups()[g];
+            const ntdlib::rsar::SoundArchive::Group& group = archive.Groups()[g];
             const auto holds = [file_id](const auto& item)
             {
                 return item.file_id == file_id;
@@ -572,7 +573,7 @@ std::optional<SoundData> FindSoundData(const rsar::SoundArchive& archive, uint32
     };
 
     // A group with both the sequence and its bank, or else the first group with each.
-    const uint32_t bank_file = archive.Banks()[sound.bank_id].file_id;
+    const uint32_t bank_file = archive.Banks()[sound.bank].file_id;
     for (std::size_t g = group_with(sound.file_id, 0); g < count; g = group_with(sound.file_id, g + 1))
     {
         if (group_with(bank_file, g) == g)
@@ -592,9 +593,10 @@ std::optional<SoundData> FindSoundData(const rsar::SoundArchive& archive, uint32
                      data_size(sequence_group) + data_size(bank_group) + kHeapSlack};
 }
 
-std::optional<std::vector<uint8_t>> BuildLibrary(const disc::GameFiles& game, const GameProfile& profile,
-                                                 const std::string& archive_path, const rsar::SoundArchive& archive,
-                                                 const Tags& tags, std::string* error)
+std::optional<std::vector<uint8_t>> BuildLibrary(const ntdlib::disc::GameFiles& game, const GameProfile& profile,
+                                                 const std::string& archive_path,
+                                                 const ntdlib::rsar::SoundArchive& archive, const Tags& tags,
+                                                 std::string* error)
 {
     const auto fail = [error](const std::string& message) -> std::optional<std::vector<uint8_t>>
     {
@@ -606,7 +608,7 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const disc::GameFiles& game, co
         return std::nullopt;
     };
 
-    const std::optional<Dol> dol = Dol::Parse(game.dol);
+    const std::optional<ntdlib::Dol> dol = ntdlib::Dol::Parse(game.dol);
     if (!dol)
     {
         return fail("main.dol isn't a DOL");
@@ -618,25 +620,27 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const disc::GameFiles& game, co
 
     // The game's code and data, section by section.
     ProgramBuilder program;
-    for (const Dol::Section& section : dol->Sections())
+    for (const ntdlib::Dol::Section& section : dol->Sections())
     {
         program.AddMemory(section.address, section.data.data(), section.data.size());
     }
 
-    // The driver, with its parameters: the archive and the game's profile. A .miniwsf fills in the sound.
+    // The driver, with its parameters: the settings, the archive and the game's profile. A .miniwsf fills in the sound.
     std::vector<uint8_t> driver(std::begin(kDriverBlob), std::end(kDriverBlob));
     uint8_t* params = driver.data() + (kDriverParams - kDriverBase);
     const auto put = [params](uint32_t offset, uint32_t value)
     {
-        StoreBe32(params + offset, value);
+        xsflib::StoreBe32(params + offset, value);
     };
 
     put(kParamsFrameTicksOffset, kFrameTicks);
     put(kParamsInfoSizeOffset, archive.InfoSize());
     put(kParamsPrioritiesOffset, kSoundThreadPriority);
     put(kParamsPrioritiesOffset + 4, kDvdThreadPriority);
+
     const std::string dvd_path = "/" + archive_path;
     std::memcpy(params + kParamsPathOffset, dvd_path.c_str(), dvd_path.size() + 1);
+
     const uint32_t functions[] = {
         profile.ai_init,
         profile.ax_init,
@@ -664,11 +668,12 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const disc::GameFiles& game, co
     }
     static_assert(kParamsProfileOffset + std::size(functions) * 4 == kParamsBankGroupOffset);
     put(kParamsInitFlagOffset, profile.init_flag);
+
     program.AddMemory(kDriverBase, driver);
 
     // main branches to the driver.
     uint8_t branch[4];
-    StoreBe32(branch, 0x48000000 | ((kDriverEntry - profile.main) & 0x03fffffc));
+    xsflib::StoreBe32(branch, 0x48000000 | ((kDriverEntry - profile.main) & 0x03fffffc));
     program.AddMemory(profile.main, branch, sizeof(branch));
 
     // The disc: the partition's header, and the archive.
@@ -684,33 +689,341 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const disc::GameFiles& game, co
     ProcessDescriptor d;
     d.entry = dol->Entry();
     d.status_address = DriverBlock::kAddress + DriverBlock::kStatusOffset;
-    d.ios_version = game.tmd.size() >= 0x18c ? LoadBe32(&game.tmd[0x188]) : profile.ios_version;
+    d.ios_version = game.tmd.size() >= 0x18c ? xsflib::LoadBe32(&game.tmd[0x188]) : profile.ios_version;
 
-    return WritePsf(kPsfVersionWsf, d.Serialize(), program.Data(), tags);
+    return xsflib::psf::WritePsf(kPsfVersionWsf, d.Serialize(), program.Data(), tags);
 }
 
 std::vector<uint8_t> BuildMini(uint32_t index, const SoundData& data, const std::string& lib_name, Tags tags)
 {
     uint8_t patch[12];
-    StoreBe32(&patch[0], index);
-    StoreBe32(&patch[4], data.group);
-    StoreBe32(&patch[8], data.heap_size);
+    xsflib::StoreBe32(&patch[0], index);
+    xsflib::StoreBe32(&patch[4], data.group);
+    xsflib::StoreBe32(&patch[8], data.heap_size);
     ProgramBuilder program;
     program.AddMemory(DriverBlock::kAddress + kParamsSoundOffset, patch, sizeof(patch));
+
     if (data.bank_group)
     {
         uint8_t bank_group[4];
-        StoreBe32(bank_group, *data.bank_group);
+        xsflib::StoreBe32(bank_group, *data.bank_group);
         program.AddMemory(DriverBlock::kAddress + kParamsBankGroupOffset, bank_group, sizeof(bank_group));
     }
 
     tags["_lib"] = lib_name;
 
-    return WritePsf(kPsfVersionWsf, {}, program.Data(), tags);
+    return xsflib::psf::WritePsf(kPsfVersionWsf, {}, program.Data(), tags);
+}
+
+namespace
+{
+
+// The JAudio2 driver's parameter block (driver/jaudio.c), from its address: the header, ntdlib's Z2Params, then the
+// Wii's fields.
+constexpr uint32_t kJAudioZ2Offset = kJAudioZ2Address - DriverBlock::kAddress;
+constexpr uint32_t kJAudioWiiOffset =
+    kJAudioZ2Offset + ntdlib::flipper::z2::kProfileOffset + sizeof(ntdlib::flipper::z2::Profile);
+constexpr uint32_t kJAudioSleepOffset = kJAudioWiiOffset;
+constexpr uint32_t kJAudioRetraceTicksOffset = kJAudioWiiOffset + 4;
+constexpr uint32_t kJAudioResetDataOffset = kJAudioWiiOffset + 8;
+constexpr uint32_t kJAudioResetFlagOffset = kJAudioWiiOffset + 12;
+static_assert(jaudio::kDriverParams == DriverBlock::kAddress && jaudio::kDriverBase == kDriverBase);
+
+// Whether `data` starts with the four bytes of `magic`.
+bool StartsWith(std::span<const uint8_t> data, const char* magic)
+{
+    return data.size() >= 4 && std::memcmp(data.data(), magic, 4) == 0;
+}
+
+// The folder of a path on the disc, with its '/' at the end, or "" for a file at the root.
+std::string FolderOf(const std::string& path)
+{
+    const std::size_t slash = path.rfind('/');
+    return slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
+}
+
+} // namespace
+
+const std::vector<JAudioProfile>& KnownJAudioProfiles()
+{
+    // Addresses in the game's main.dol. Every function's address was checked against its code. The sizes and offsets
+    // are the game's: its machine start-up gives the heaps and the ARAM manager, its audio set-up the audio heap, and
+    // its sound objects the analysis's offsets. The game keeps its archive heap in MEM2's root heap. The audio set-up
+    // loads four wave groups itself.
+    static const std::vector<JAudioProfile> kProfiles = {
+        {
+            .name = "The Legend of Zelda: Twilight Princess (USA, Rev 2)",
+            .game_id = "RZDE01",
+            .dol_sha1 = "5a99acb37b98e19682924502ee14a6d03d536c69",
+            .main = 0x80008d04,
+            .z2 =
+                {
+                    .frame_retraces = 2,
+                    .max_heaps = 1,
+                    .system_heap_size = 0x800000,
+                    .aram_audio_size = 0xb00000,
+                    .aram_graph_size = 0xffffffff,
+                    .aram_priorities = 8 << 16 | 7 << 8 | 6,
+                    .aram_buffer_size = 0x2000,
+                    .command_heap_size = 0x1000,
+                    .archive_heap_size = 0xf20c00,
+                    .zelda_heap_margin = 0x10000,
+                    .audio_heap_size = 0x169000,
+                    .vi_init = 0,
+                    .vi_wait_for_retrace = 0,
+                    .get_current_thread = 0x803384c0,
+                    .get_thread_priority = 0x80339754,
+                    .create_root_heap = 0x802cd5bc,
+                    .create_exp_heap = 0x802cd688,
+                    .create_solid_heap = 0x802cf184,
+                    .create_aram = 0x802d096c,
+                    .set_aram_buffer = 0x802d296c,
+                    .create_thread_switch = 0x802d00b8,
+                    .create_command_heap = 0x800149f8,
+                    .create_archive_heap = 0x80014a28,
+                    .archive_heap_parent = 0x8052112c, // JKRHeap::sRootHeap2
+                    .create_assert_heap = 0x80014930,
+                    .create_zelda_heap = 0x800149c8,
+                    .get_free_size = 0x802cd050,
+                    .become_current_heap = 0x802cce18,
+                    .system_heap = 0x80521120,
+                    .alloc = 0x802cd4fc,
+                    .thread_ctor = 0x802cfd98,
+                    .create_disc_thread = 0x8001ad3c,
+                    .audio_heap = 0x80520784,
+                    .audio_setup = 0x8000973c,
+                    .init_flag = 0x80520780,
+                    .audio_frame = 0x802af680,
+                    .load_se_wave = 0x8029cb7c,
+                    .load_bgm_wave = 0x8029cbe8,
+                    .wave_status = 0x8029caa8,
+                    .audio_manager = 0x80431cac,
+                    .start_sound = 0x802af854,
+                    .erase_bgm_wave = 0x8029ca40,
+                    .erase_se_wave = 0x8029c9d8,
+                    .first_scene_wave_count = 2,
+                    .first_scene_waves = {(1u << 16) | 0, (0u << 16) | 88},
+                    .room_wave_count = 1,
+                    .room_waves = {(0u << 16) | 0},
+                },
+            .sleep = 0x8025b100,      // JFWDisplay::threadSleep
+            .reset_data = 0x805208d0, // mDoRst::mResetData
+            .reset_flag = 0x12,
+            .ios_version = 9,
+            .watch =
+                {
+                    .parse_command = 0x8027b080,
+                    .jump_handler = 0x80279bf4,
+                    // JASSeqParser's handler for 0xC8 (0x80279c0c) takes the jump here, with the track in r30 and the
+                    // arguments in r31.
+                    .conditional_jump = 0x80279c38,
+                    .sequence_vtable = 0x8040d934,
+                    .sequence_track_offset = 0xa8,
+                    .effect_vtable = 0x8040d888, // the JAISound (JAISe's) that the handle holds
+                    .effect_track_offset = 0xb8,
+                    .wait_offset = 0x40,
+                    .note_wait_offset = 0x51,
+                    .wave_handle_functions = {0x8027d94c, 0x8027ddf4},
+                    .wave_bank_table = 0x80521038,
+                    .wave_bank_table_offset = 0xfc,
+                    .wave_bank_count_offset = 0xf8,
+                },
+            .static_waves = {2 << 16 | 0, 0 << 16 | 0, 1 << 16 | 0, 0 << 16 | 88},
+        },
+    };
+    return kProfiles;
+}
+
+std::optional<JAudioProfile> FindJAudioProfile(const ntdlib::disc::GameFiles& game)
+{
+    const std::string sha1 = xsflib::Sha1::Hex(xsflib::Sha1::Of(game.dol));
+    for (const JAudioProfile& profile : KnownJAudioProfiles())
+    {
+        if (game.GameId() == profile.game_id && sha1 == profile.dol_sha1)
+        {
+            return profile;
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::optional<JAudioFiles> FindJAudioFiles(const ntdlib::disc::GameFiles& game)
+{
+    if (!game.read_file)
+    {
+        return std::nullopt;
+    }
+
+    std::optional<JAudioFiles> found;
+    std::vector<uint8_t> data;
+    for (const ntdlib::disc::GameFile& file : game.files)
+    {
+        if (xsflib::AsciiLower(file.path).ends_with(".baa") && game.read_file(file.path, data) &&
+            StartsWith(data, "AA_<"))
+        {
+            found = JAudioFiles{file.path, {}};
+            break;
+        }
+    }
+    if (!found)
+    {
+        return std::nullopt;
+    }
+
+    // The RARC archives in the start-up archive's folder and below it, compressed with Yaz0 or not.
+    const std::string folder = FolderOf(found->baa);
+    for (const ntdlib::disc::GameFile& file : game.files)
+    {
+        if (!file.path.starts_with(folder) || !xsflib::AsciiLower(file.path).ends_with(".arc") ||
+            !game.read_file(file.path, data))
+        {
+            continue;
+        }
+
+        bool archive = StartsWith(data, "RARC");
+        if (!archive && ntdlib::jaudio::IsYaz0(data))
+        {
+            try
+            {
+                archive = StartsWith(ntdlib::jaudio::DecodeYaz0(data), "RARC");
+            }
+            catch (const xsflib::FormatError&)
+            {
+            }
+        }
+        if (archive)
+        {
+            found->archives.push_back(file.path);
+        }
+    }
+
+    return found;
+}
+
+std::optional<std::vector<std::string>> FindAwFiles(const ntdlib::disc::GameFiles& game, const JAudioFiles& files,
+                                                    const std::vector<ntdlib::jaudio::WaveSystem>& systems,
+                                                    std::span<const uint32_t> groups, std::string* missing)
+{
+    const std::string folder = FolderOf(files.baa);
+    std::vector<std::string> paths;
+    for (const std::string& name : ntdlib::jaudio::GroupArchives(systems, groups))
+    {
+        const auto matches = [&folder, &name](const ntdlib::disc::GameFile& file)
+        {
+            return file.path.starts_with(folder) && file.path.ends_with("/" + name);
+        };
+        const auto file = std::find_if(game.files.begin(), game.files.end(), matches);
+        if (file == game.files.end())
+        {
+            if (missing)
+            {
+                *missing = name;
+            }
+
+            return std::nullopt;
+        }
+
+        paths.push_back(file->path);
+    }
+
+    return paths;
+}
+
+std::optional<std::vector<uint8_t>> BuildJAudioLibrary(const ntdlib::disc::GameFiles& game,
+                                                       const JAudioProfile& profile,
+                                                       const std::vector<std::string>& paths, const Tags& tags,
+                                                       std::string* error)
+{
+    const auto fail = [error](const std::string& message) -> std::optional<std::vector<uint8_t>>
+    {
+        if (error)
+        {
+            *error = message;
+        }
+
+        return std::nullopt;
+    };
+
+    const std::optional<ntdlib::Dol> dol = ntdlib::Dol::Parse(game.dol);
+    if (!dol)
+    {
+        return fail("main.dol isn't a DOL");
+    }
+
+    // The game's code and data, section by section.
+    ProgramBuilder program;
+    for (const ntdlib::Dol::Section& section : dol->Sections())
+    {
+        program.AddMemory(section.address, section.data.data(), section.data.size());
+    }
+
+    // The driver, with the profile and the Wii's fields. A .miniwsf fills in the sound and its wave groups.
+    std::vector<uint8_t> driver(std::begin(jaudio::kDriverBlob), std::end(jaudio::kDriverBlob));
+    uint8_t* params = driver.data() + (jaudio::kDriverParams - jaudio::kDriverBase);
+    const auto put = [params](uint32_t offset, uint32_t value)
+    {
+        xsflib::StoreBe32(params + offset, value);
+    };
+
+    const std::vector<uint32_t> words = profile.z2.Words();
+    for (std::size_t i = 0; i < words.size(); i++)
+    {
+        put(kJAudioZ2Offset + ntdlib::flipper::z2::kProfileOffset + static_cast<uint32_t>(i * 4), words[i]);
+    }
+
+    put(kJAudioSleepOffset, profile.sleep);
+    put(kJAudioRetraceTicksOffset, kFrameTicks);
+    put(kJAudioResetDataOffset, profile.reset_data);
+    put(kJAudioResetFlagOffset, profile.reset_flag);
+
+    program.AddMemory(jaudio::kDriverBase, driver);
+
+    // main branches to the driver.
+    uint8_t branch[4];
+    xsflib::StoreBe32(branch, 0x48000000 | ((jaudio::kDriverEntry - profile.main) & 0x03fffffc));
+    program.AddMemory(profile.main, branch, sizeof(branch));
+
+    // The disc: the partition's header, and the sound files.
+    program.AddFile("sys/boot.bin", game.boot);
+    std::vector<uint8_t> bytes;
+    for (const std::string& path : paths)
+    {
+        if (!game.read_file || !game.read_file(path, bytes))
+        {
+            return fail("can't read " + path + " from the disc");
+        }
+
+        program.AddFile(path, bytes);
+    }
+
+    ProcessDescriptor d;
+    d.entry = dol->Entry();
+    d.status_address = DriverBlock::kAddress + DriverBlock::kStatusOffset;
+    d.ios_version = game.tmd.size() >= 0x18c ? xsflib::LoadBe32(&game.tmd[0x188]) : profile.ios_version;
+
+    return xsflib::psf::WritePsf(kPsfVersionWsf, d.Serialize(), program.Data(), tags);
+}
+
+std::vector<uint8_t> BuildJAudioMini(uint32_t sound_id, std::span<const uint32_t> waves, const std::string& lib_name,
+                                     Tags tags)
+{
+    uint8_t sound[4];
+    xsflib::StoreBe32(sound, sound_id);
+    ProgramBuilder program;
+    program.AddMemory(DriverBlock::kAddress + kJAudioZ2Offset + ntdlib::flipper::z2::kSoundOffset, sound,
+                      sizeof(sound));
+    const std::vector<uint8_t> list = ntdlib::flipper::z2::WaveList(waves);
+    program.AddMemory(DriverBlock::kAddress + kJAudioZ2Offset + ntdlib::flipper::z2::kWaveCountOffset, list.data(),
+                      list.size());
+
+    tags["_lib"] = lib_name;
+
+    return xsflib::psf::WritePsf(kPsfVersionWsf, {}, program.Data(), tags);
 }
 
 std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const std::vector<uint8_t>& archive,
-                                         const std::string& microcode_path, const ax::Microcode& microcode,
+                                         const std::string& microcode_path, const ntdlib::Microcode& microcode,
                                          nw4r::SndBuild build, const Tags& tags)
 {
     ArchiveDescriptor descriptor;
@@ -722,14 +1035,14 @@ std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const 
     std::vector<uint8_t> words(microcode.words.size() * 2);
     for (std::size_t i = 0; i < microcode.words.size(); i++)
     {
-        StoreBe16(&words[i * 2], microcode.words[i]);
+        xsflib::StoreBe16(&words[i * 2], microcode.words[i]);
     }
 
     ProgramBuilder program;
     program.AddFile(archive_path, archive);
     program.AddFile(microcode_path, words);
 
-    return WritePsf(kPsfVersionWsf, descriptor.Serialize(), program.Data(), tags);
+    return xsflib::psf::WritePsf(kPsfVersionWsf, descriptor.Serialize(), program.Data(), tags);
 }
 
 std::vector<uint8_t> BuildArchiveMini(uint32_t index, const std::string& lib_name, Tags tags)
@@ -739,45 +1052,151 @@ std::vector<uint8_t> BuildArchiveMini(uint32_t index, const std::string& lib_nam
 
     tags["_lib"] = lib_name;
 
-    return WritePsf(kPsfVersionWsf, {}, program.Data(), tags);
+    return xsflib::psf::WritePsf(kPsfVersionWsf, {}, program.Data(), tags);
 }
 
-std::vector<std::string> MissingData(const rsar::SoundArchive& archive, uint32_t index)
+std::vector<uint8_t> KeepSequenceData(const ntdlib::rsar::SoundArchive& archive, const std::vector<uint32_t>& indices)
+{
+    const std::span<const uint8_t> all = archive.Bytes();
+    std::vector<uint8_t> kept(all.begin(), all.end());
+
+    // Clears `size` bytes from `offset`, up to the copy's end at most.
+    const auto clear = [&kept](uint64_t offset, uint64_t size)
+    {
+        if (offset < kept.size())
+        {
+            const uint64_t end = std::min<uint64_t>(offset + size, kept.size());
+            std::fill(kept.begin() + static_cast<std::ptrdiff_t>(offset),
+                      kept.begin() + static_cast<std::ptrdiff_t>(end), uint8_t{0});
+        }
+    };
+
+    // The groups that the archive holds: their files, then their wave data.
+    for (const ntdlib::rsar::SoundArchive::Group& group : archive.Groups())
+    {
+        if (group.internal)
+        {
+            clear(group.offset, group.size);
+            clear(group.wave_data_offset, group.wave_data_size);
+        }
+    }
+
+    // Copies a file and its wave data back from the spans that File returns.
+    const auto keep = [&](std::span<const uint8_t> data)
+    {
+        if (!data.empty())
+        {
+            std::copy(data.begin(), data.end(), kept.begin() + (data.data() - all.data()));
+        }
+    };
+    const auto keep_file = [&](uint32_t file_id)
+    {
+        if (const std::optional<ntdlib::rsar::FileData> file = archive.File(file_id))
+        {
+            keep(file->file);
+            keep(file->wave_data);
+        }
+    };
+
+    // The data that the model reads for each sequence: its file, and its bank's file and wave data.
+    for (const uint32_t index : indices)
+    {
+        if (index >= archive.Sounds().size())
+        {
+            continue;
+        }
+
+        const ntdlib::rsar::SoundInfo& sound = archive.Sounds()[index];
+        keep_file(sound.file_id);
+        if (sound.bank < archive.Banks().size())
+        {
+            keep_file(archive.Banks()[sound.bank].file_id);
+        }
+    }
+
+    return kept;
+}
+
+namespace
+{
+
+// True if the file at `path` holds exactly `data`. The file is compared in blocks of 1 MiB. A library can be hundreds
+// of megabytes.
+bool FileHolds(const std::filesystem::path& path, std::span<const uint8_t> data)
+{
+    std::error_code ec;
+    if (std::filesystem::file_size(path, ec) != data.size() || ec)
+    {
+        return false;
+    }
+
+    std::ifstream file(path, std::ios::binary);
+    std::vector<char> block(std::size_t{1} << 20);
+    for (std::size_t at = 0; at < data.size(); at += block.size())
+    {
+        const std::size_t size = std::min(block.size(), data.size() - at);
+        if (!file.read(block.data(), static_cast<std::streamsize>(size)) ||
+            std::memcmp(block.data(), data.data() + at, size) != 0)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+} // namespace
+
+std::string LibraryName(const std::filesystem::path& folder, xsflib::rip::FileNames& names, const std::string& base,
+                        std::span<const uint8_t> library)
+{
+    std::string name = names.Library(base);
+    std::error_code ec;
+    while (std::filesystem::exists(folder / xsflib::PathFromUtf8(name), ec) &&
+           !FileHolds(folder / xsflib::PathFromUtf8(name), library))
+    {
+        name = names.Library(base);
+    }
+
+    return name;
+}
+
+std::vector<std::string> MissingData(const ntdlib::rsar::SoundArchive& archive, uint32_t index)
 {
     if (index >= archive.Sounds().size())
     {
         return {"the sound itself"};
     }
 
-    const rsar::SoundInfo& sound = archive.Sounds()[index];
+    const ntdlib::rsar::SoundInfo& sound = archive.Sounds()[index];
     std::vector<std::string> missing;
     if (!archive.File(sound.file_id))
     {
         missing.push_back("its sequence data");
     }
 
-    if (sound.bank_id >= archive.Banks().size())
+    if (sound.bank >= archive.Banks().size())
     {
         missing.push_back("its bank");
     }
-    else if (!archive.File(archive.Banks()[sound.bank_id].file_id))
+    else if (!archive.File(archive.Banks()[sound.bank].file_id))
     {
-        const std::string& name = archive.Banks()[sound.bank_id].name;
-        missing.push_back("bank " + (name.empty() ? "#" + std::to_string(sound.bank_id) : name));
+        const std::string& name = archive.Banks()[sound.bank].name;
+        missing.push_back("bank " + (name.empty() ? "#" + std::to_string(sound.bank) : name));
     }
 
     return missing;
 }
 
-bool IsMusic(const rsar::SoundArchive& archive, uint32_t index)
+bool IsMusic(const ntdlib::rsar::SoundArchive& archive, uint32_t index)
 {
-    if (index >= archive.Sounds().size() || archive.Sounds()[index].type != rsar::SoundType::kSequence)
+    if (index >= archive.Sounds().size() || archive.Sounds()[index].type != ntdlib::rsar::SoundType::kSequence)
     {
         return false;
     }
 
-    const rsar::SoundInfo& sound = archive.Sounds()[index];
-    if (AsciiLower(sound.name).find("bgm") != std::string::npos)
+    const ntdlib::rsar::SoundInfo& sound = archive.Sounds()[index];
+    if (xsflib::AsciiLower(sound.name).find("bgm") != std::string::npos)
     {
         return true;
     }
@@ -790,7 +1209,7 @@ bool IsMusic(const rsar::SoundArchive& archive, uint32_t index)
     // The player's name, word by word, each word without its trailing digits (PLAYER_BGM1).
     bool music = false;
     bool effects = false;
-    const std::string player = AsciiLower(archive.Players()[sound.player_id].name);
+    const std::string player = xsflib::AsciiLower(archive.Players()[sound.player_id].name);
     for (std::size_t start = 0; start <= player.size();)
     {
         const std::size_t end = std::min(player.find('_', start), player.size());
@@ -807,9 +1226,123 @@ bool IsMusic(const rsar::SoundArchive& archive, uint32_t index)
 namespace
 {
 
-// Measures a sequence on the model. With `dsp` set, the microcode runs on the DSP. Otherwise the model runs without the
-// DSP. The sequence plays until it loops kLoops times, ends or falls silent for good, or for kMaxSeconds.
-std::optional<Timing> MeasureSequence(const rsar::SoundArchive& archive, const ax::Microcode& microcode,
+// The length analysis's rules. The model runs in 3 ms AX frames. xsflib's defaults count in frames of that length. They
+// give two loops and a 10 s fade, or the end, for at most 600 s. A sequence that stays busy without a sound for 180 s
+// has ended. No music rests that long. Some sound effects come close. WSF counts a loop's point, a loop's sound and a
+// steady sequence's loop from the frame that runs them. A sequence that ends does so at its last sound.
+xsflib::rip::LengthRules LengthRules()
+{
+    xsflib::rip::LengthRules rules;
+    rules.loop_offset = 0;
+    rules.sound_offset = 0;
+    rules.steady_offset = 0;
+    rules.end_at_idle_start = false;
+
+    return rules;
+}
+
+// The model of NW4R SND and AX for the length analysis. With the DSP, a frame has sound if it mixed anything louder
+// than silence. Without the DSP, a frame has sound if any note plays.
+class LengthModel
+{
+public:
+    LengthModel(nw4r::ArchiveModel& model, nw4r::SeqPlayer& player, bool dsp)
+        : model_(model), player_(player), dsp_(dsp)
+    {
+    }
+
+    bool RunFrame()
+    {
+        samples_.clear();
+        if (!dsp_)
+        {
+            model_.RunFrameWithoutDsp();
+
+            return true;
+        }
+
+        return model_.RunFrame(samples_);
+    }
+
+    bool Sounded() const
+    {
+        return dsp_ ? xsflib::rip::Audible(samples_) : model_.engine->Channels().ActiveCount() > 0;
+    }
+
+    // The model has no effects.
+    bool Ringing() const
+    {
+        return false;
+    }
+
+    std::size_t VoiceCount() const
+    {
+        return model_.ax.VoiceCount();
+    }
+
+    xsflib::rip::VoicePlace Voice(std::size_t index) const
+    {
+        const ax::Pb pb = model_.ax.ReadPb(static_cast<uint32_t>(index));
+        return {pb.state == static_cast<uint16_t>(ax::VoiceState::kRun), pb.addr.loop_flag != 0,
+                ax::Join(pb.addr.current_address_hi, pb.addr.current_address_lo)};
+    }
+
+    bool Active() const
+    {
+        return player_.IsActive();
+    }
+
+    bool Settled() const
+    {
+        return player_.IsSettled(*model_.engine);
+    }
+
+    bool Stuck() const
+    {
+        return player_.IsStuck(*model_.engine);
+    }
+
+    bool Moving() const
+    {
+        return player_.IsMoving();
+    }
+
+    uint64_t ChangedAt() const
+    {
+        return player_.ChangedAt();
+    }
+
+    bool Busy() const
+    {
+        return model_.engine->IsBusy();
+    }
+
+    bool ChannelsChanging() const
+    {
+        return model_.engine->Channels().AnyChanging();
+    }
+
+    int ActiveChannels() const
+    {
+        return model_.engine->Channels().ActiveCount();
+    }
+
+    template <typename Function>
+    void OnLoop(Function function)
+    {
+        model_.engine->SetLoopHook(std::move(function));
+    }
+
+private:
+    nw4r::ArchiveModel& model_;
+    nw4r::SeqPlayer& player_;
+    bool dsp_;
+    std::vector<int16_t> samples_;
+};
+
+// Measures a sequence on the model (xsflib::rip::MeasureLength). With `dsp` set, the microcode runs on the DSP.
+// Otherwise the model runs without the DSP.
+std::optional<Timing> MeasureSequence(const ntdlib::rsar::SoundArchive& archive, const ntdlib::Microcode& microcode,
                                       nw4r::SndBuild build, uint32_t sound_index, bool dsp)
 {
     auto model = std::make_unique<nw4r::ArchiveModel>();
@@ -823,234 +1356,36 @@ std::optional<Timing> MeasureSequence(const rsar::SoundArchive& archive, const a
         return std::nullopt;
     }
 
-    nw4r::Engine& engine = *model->engine;
-    nw4r::SeqPlayer* player = engine.StartSequence(sound_index);
+    nw4r::SeqPlayer* player = model->engine->StartSequence(sound_index);
     if (!player)
     {
         return std::nullopt;
     }
 
-    // A sequence that never makes a sound is silent and gets only the tail, however it ends or loops. It may still play
-    // notes that make no sound.
-    bool sounded = false;
-    const auto heard = [&sounded](Timing timing)
-    {
-        return sounded ? timing : Timing{500, 0, true};
-    };
-
-    // Loops that go round before the first sound don't count. An example is a track that changes a value over and over
-    // while a note fades in or before another track starts. A loop of another track, or one that starts elsewhere,
-    // starts the count again. The loops counted so far don't repeat what plays now. That happens when track 0 makes a
-    // pass that changes the sound before a later track plays the music, or when a track moves on to the loop that it
-    // plays for good.
-    int loops_seen = 0;
-    std::pair<int, uint32_t> loop{-1, 0};
-    uint64_t frame = 0;
-    uint64_t first_loop_frame = 0;
-    uint64_t loop_frame = 0;
-    player->on_loop = [&](int track, uint32_t target)
-    {
-        if (!sounded)
-        {
-            return;
-        }
-
-        if (std::pair{track, target} != loop)
-        {
-            loops_seen = 0;
-            loop = {track, target};
-        }
-
-        loops_seen++;
-        if (loops_seen == 1)
-        {
-            first_loop_frame = frame;
-        }
-
-        if (loops_seen == kLoops)
-        {
-            loop_frame = frame;
-        }
-    };
-
-    // A sequence is steady when each open track waits for notes that never end (held notes on looping waves), will
-    // never continue, or won't continue before the game stops the sound. A track may also poll a variable once a tick
-    // and change nothing (SeqTrack::IsStill). Nothing else may change either. No note's envelope may be in its attack,
-    // hold, decay or release. A released note ends by itself. Its track can then continue. No track's volume or pan may
-    // be moving. A steady sequence plays on unchanged apart from the positions of the waves. It loops when the waves
-    // do. The code follows each running voice's passes back to its wave's loop start in every frame. A steady sequence
-    // has looped when every voice has passed kLoops times since the sound last changed. A track's change, a moving
-    // envelope or value, and a voice that starts or stops all change the sound. A track that polls may only show that
-    // it's still after a long pass. The waves' passes during that pass count.
-    std::array<uint32_t, ax::kVoiceCount> positions{};
-    std::array<bool, ax::kVoiceCount> running{};
-    std::array<bool, ax::kVoiceCount> looping{};
-    std::array<std::array<uint64_t, kLoops>, ax::kVoiceCount> passes{}; // each voice's latest passes, the newest first
-    uint64_t changed = 0;                                               // the frame of the sound's last change
-    uint64_t change_order = 0;                                          // the player's ChangedAt in that frame
-    const auto follow_sound = [&]
-    {
-        for (uint32_t v = 0; v < model->ax.VoiceCount(); v++)
-        {
-            const ax::Pb pb = model->ax.ReadPb(v);
-            const bool runs = pb.state == static_cast<uint16_t>(ax::VoiceState::kRun);
-            const uint32_t position = ax::Join(pb.addr.current_address_hi, pb.addr.current_address_lo);
-            if (runs != running[v])
-            {
-                changed = frame;
-            }
-            else if (runs && position < positions[v])
-            {
-                std::copy_backward(passes[v].begin(), passes[v].end() - 1, passes[v].end());
-                passes[v][0] = frame;
-            }
-
-            running[v] = runs;
-            looping[v] = pb.addr.loop_flag != 0;
-            positions[v] = position;
-        }
-
-        if (engine.Channels().AnyChanging() || player->IsMoving() || player->ChangedAt() != change_order)
-        {
-            changed = frame;
-        }
-
-        change_order = player->ChangedAt();
-    };
-
-    const auto waves_looped = [&]
-    {
-        bool any = false;
-        for (uint32_t v = 0; v < model->ax.VoiceCount(); v++)
-        {
-            if (!running[v])
-            {
-                continue;
-            }
-
-            if (!looping[v] || passes[v].back() <= changed)
-            {
-                return false;
-            }
-
-            any = true;
-        }
-
-        return any;
-    };
-
-    std::vector<int16_t> samples;
-    uint64_t idle = 0;
-    uint64_t last_sound = 0;
-    for (; frame < kMaxFrames; frame++)
-    {
-        samples.clear();
-        if (!dsp)
-        {
-            model->RunFrameWithoutDsp();
-        }
-        else if (!model->RunFrame(samples))
-        {
-            return std::nullopt;
-        }
-
-        // The frame has sound if it mixed anything louder than silence. Without the DSP, it has sound if any note
-        // plays.
-        const auto audible = [](int16_t sample)
-        {
-            return sample > kSilenceLevel || sample < -kSilenceLevel;
-        };
-
-        const bool sound =
-            dsp ? std::any_of(samples.begin(), samples.end(), audible) : engine.Channels().ActiveCount() > 0;
-        if (sound)
-        {
-            sounded = true;
-            last_sound = frame;
-        }
-
-        // A loop that completed without a sound isn't music. An example is a wait that a track repeats once its notes
-        // have ended. The sequence ended at its last sound.
-        if (loops_seen >= kLoops && last_sound < first_loop_frame)
-        {
-            return heard(Timing{static_cast<long long>(static_cast<double>(last_sound + 1) * kFrameMs + 500.5), 0});
-        }
-
-        if (loops_seen >= kLoops)
-        {
-            return heard(Timing{static_cast<long long>(static_cast<double>(loop_frame) * kFrameMs + 0.5),
-                                static_cast<long long>(kFadeSeconds * 1000)});
-        }
-
-        follow_sound();
-        const bool steady = player->IsActive() && player->IsSettled() && changed < frame;
-        if (steady && waves_looped())
-        {
-            // A sequence that has made no sound since its sound last changed ended at its last sound. A held note at a
-            // volume of 0 is an example.
-            if (last_sound < changed)
-            {
-                return heard(Timing{static_cast<long long>(static_cast<double>(last_sound + 1) * kFrameMs + 500.5), 0});
-            }
-
-            return heard(Timing{static_cast<long long>(static_cast<double>(frame) * kFrameMs + 0.5),
-                                static_cast<long long>(kFadeSeconds * 1000)});
-        }
-
-        // A sequence that stays busy without a sound for kSilentSeconds ended where it fell silent. An example is music
-        // that has ended while a track without notes runs on.
-        if (!sound && engine.IsBusy() && frame - last_sound >= kSilentFrames)
-        {
-            break;
-        }
-
-        // A sequence that will never change again, or won't before the game stops it, has ended when its last note has.
-        // Its tracks may wait forever or poll a variable that only the game sets.
-        const bool stuck = player->IsActive() && player->IsStuck() && engine.Channels().ActiveCount() == 0;
-        if (!engine.IsBusy() || stuck)
-        {
-            if (++idle > 10)
-            {
-                break;
-            }
-        }
-        else
-        {
-            idle = 0;
-        }
-    }
-    if (frame >= kMaxFrames)
-    {
-        return heard(Timing{static_cast<long long>(kMaxSeconds * 1000), static_cast<long long>(kFadeSeconds * 1000)});
-    }
-
-    // The sequence ended on its own. Its length runs to the end of its last sound's frame plus a short tail, with no
-    // fade. Every path that ends a sequence counts from the end of that frame. Only silence follows the last sound. The
-    // sequence may take a long time to end: a track may hold a note at a volume of 0 for minutes.
-    return heard(Timing{static_cast<long long>(static_cast<double>(last_sound + 1) * kFrameMs + 500.5), 0});
+    LengthModel length_model(*model, *player, dsp);
+    return xsflib::rip::MeasureLength(length_model, LengthRules());
 }
 
 } // namespace
 
-bool MicrocodeWorks(const ax::Microcode& microcode, const rsar::SoundArchive& archive)
+bool MicrocodeWorks(const ntdlib::Microcode& microcode, const ntdlib::rsar::SoundArchive& archive)
 {
     auto model = std::make_unique<nw4r::ArchiveModel>();
     std::vector<int16_t> samples;
-
     return model->Start(microcode, archive) && model->RunFrame(samples);
 }
 
 struct LengthAnalyzer::Impl
 {
-    rsar::SoundArchive archive;
-    ax::Microcode microcode;
+    ntdlib::rsar::SoundArchive archive;
+    ntdlib::Microcode microcode;
     nw4r::SndBuild build;
     bool dsp = true;
 };
 
-LengthAnalyzer::LengthAnalyzer(const std::vector<uint8_t>& archive_bytes, const ax::Microcode& microcode,
+LengthAnalyzer::LengthAnalyzer(const std::vector<uint8_t>& archive_bytes, const ntdlib::Microcode& microcode,
                                nw4r::SndBuild build)
-    : impl_(new Impl{rsar::SoundArchive::Load(archive_bytes), microcode, build})
+    : impl_(new Impl{ntdlib::rsar::SoundArchive::Load(archive_bytes, wsf::nw4r::kRsarOptions), microcode, build})
 {
     impl_->dsp = MicrocodeWorks(microcode, impl_->archive);
 }
@@ -1059,80 +1394,12 @@ LengthAnalyzer::~LengthAnalyzer() = default;
 
 std::optional<Timing> LengthAnalyzer::Analyze(uint32_t sound_index) const
 {
-    // A sequence that the model can't play, such as one with a damaged bank, gets no length. Running out of memory
-    // isn't caused by the sequence. std::bad_alloc goes to the caller.
-    try
+    // A sequence that the model can't play, such as one with a damaged bank, gets no length (xsflib::rip::TryMeasure).
+    const auto measure = [this, sound_index]
     {
         return MeasureSequence(impl_->archive, impl_->microcode, impl_->build, sound_index, impl_->dsp);
-    }
-    catch (const std::bad_alloc&)
-    {
-        throw;
-    }
-    catch (const std::exception&)
-    {
-        return std::nullopt;
-    }
-}
-
-namespace
-{
-
-// ASCII letters, digits, '_', '-' and '.' are kept. Everything else, including spaces, becomes '_'. Unlike
-// std::isalnum, this doesn't depend on the C locale.
-std::string SafeName(const std::string& s)
-{
-    std::string out;
-    for (char c : s)
-    {
-        const bool keep = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' ||
-                          c == '-' || c == '.';
-        out += keep ? c : '_';
-    }
-
-    return out;
-}
-
-// Windows reserves these device names, whatever follows the first dot of a file name.
-bool ReservedOnWindows(const std::string& stem)
-{
-    const std::string name = AsciiLower(stem);
-    const bool numbered =
-        name.size() == 4 && (name.starts_with("com") || name.starts_with("lpt")) && name[3] >= '0' && name[3] <= '9';
-    return name == "con" || name == "prn" || name == "aux" || name == "nul" || numbered;
-}
-
-} // namespace
-
-std::string FileNames::Library(const std::string& base)
-{
-    std::string name = SafeName(base);
-    const std::size_t stem_length = std::min(name.find('.'), name.size());
-    if (ReservedOnWindows(name.substr(0, stem_length)))
-    {
-        name.insert(stem_length, "_");
-    }
-
-    return Unique(name, ".wsflib");
-}
-
-std::string FileNames::Mini(uint32_t index, const std::string& label)
-{
-    char prefix[16];
-    std::snprintf(prefix, sizeof(prefix), "%04u ", static_cast<unsigned>(index));
-
-    return Unique(prefix + SafeName(label), ".miniwsf");
-}
-
-std::string FileNames::Unique(const std::string& stem, const std::string& extension)
-{
-    std::string name = stem + extension;
-    for (int n = 2; !taken_.insert(AsciiLower(name)).second; n++)
-    {
-        name = stem + "_" + std::to_string(n) + extension;
-    }
-
-    return name;
+    };
+    return xsflib::rip::TryMeasure(measure);
 }
 
 } // namespace wsf::rip

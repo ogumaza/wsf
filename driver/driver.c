@@ -2,8 +2,9 @@
 
 /*
  * WSF guest driver for games whose sound code is NintendoWare for Revolution's nw4r::snd. It's compiled for Broadway
- * and stored in every game-mode .wsflib. The player boots the game's startup code: the OS initialisation and the
- * static constructors. The rip patches the game's main to branch here.
+ * and stored in every game-mode .wsflib of such a game. A JAudio2 game's .wsflib contains the driver in jaudio.c
+ * instead. The player boots the game's startup code: the OS initialisation and the static constructors. The rip patches
+ * the game's main to branch here.
  *
  * The driver then does what the game's boot would do for sound, using the game's functions. The profile in
  * `driver_params` gives their addresses. The ripper fills in the profile. The steps:
@@ -23,13 +24,11 @@
  */
 
 typedef unsigned int u32;
-typedef int s32;
 
 #define PARAMS_MAGIC 0x57534644u /* 'WSFD' */
 #define PARAMS_VERSION 1u
 
 /* Values of Params.status. They're macros because an enumerator can't hold 0x80000000 before C23. */
-#define STATUS_BOOTING 0u
 #define STATUS_PLAYING 1u
 #define STATUS_FINISHED 2u
 #define STATUS_ERROR 0x80000000u /* | step number */

@@ -8,8 +8,10 @@
 #include <cstdint>
 #include <functional>
 
+#include "ntdlib/ax/lpf.h"
+#include "ntdlib/types.h"
+
 #include "ax/pb.h"
-#include "common/common_types.h"
 
 namespace wsf::ax
 {
@@ -33,28 +35,25 @@ struct Voice
         return pb.state == static_cast<uint16_t>(VoiceState::kRun);
     }
 
-    // The priority stacks link voices through these fields (AXVPB + 0x0, + 0x4). The stack of voices with callbacks due
-    // uses `next1` (+ 0x8).
-    Voice* next = nullptr;
-    Voice* prev = nullptr;
+    // The priority stacks' links (AXVPB + 0x0, + 0x4) and the voice's priority (+ 0xc) are in System's
+    // ntdlib::ax::Voices. The stack of voices with callbacks due uses `next1` (+ 0x8).
     Voice* next1 = nullptr;
 
-    uint32_t priority = 0; // + 0xc
-    Callback callback;     // + 0x10
-    uint32_t index = 0;    // + 0x18
-    uint32_t sync = 0;     // + 0x1c
-    bool depop = false;    // + 0x20
-    PAddr itd_buffer = 0;  // + 0x24
-    Pb pb;                 // + 0x28
+    Callback callback;            // + 0x10
+    uint32_t index = 0;           // + 0x18
+    uint32_t sync = 0;            // + 0x1c
+    bool depop = false;           // + 0x20
+    ntdlib::PAddr itd_buffer = 0; // + 0x24
+    Pb pb;                        // + 0x28
 };
 
-// The coefficients a0 and b0 of PbLpf for a cutoff of `freq` Hz (AXGetLpfCoefs, 0x801074dc).
-struct LpfCoefs
+using ntdlib::ax::LpfCoefs;
+
+// The coefficients a0 and b0 of PbLpf for a cutoff of `freq` Hz (AXGetLpfCoefs, 0x801074dc). The game computes cos and
+// sqrt in double precision (MSL's cos and sqrt) and rounds each result to single precision.
+inline LpfCoefs CalcLpfCoefs(uint16_t freq)
 {
-    uint16_t a0 = 0;
-    uint16_t b0 = 0;
-};
-
-LpfCoefs CalcLpfCoefs(uint16_t freq);
+    return ntdlib::ax::ComputeLpfCoefs(freq, {.rate = static_cast<float>(kSampleRate), .double_precision = true});
+}
 
 } // namespace wsf::ax

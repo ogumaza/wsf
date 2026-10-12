@@ -9,53 +9,47 @@
 #include <exception>
 #include <vector>
 
+#include "ntdlib/dsp/memory.h"
+#include "ntdlib/types.h"
+#include "xsflib/bytes.h"
+#include "xsflib/testing/check.h"
+
 #include "ax/pb.h"
 #include "ax/system.h"
 #include "ax/voice.h"
-#include "check.h"
-#include "common/bytes.h"
-#include "common/common_types.h"
-#include "dsp/main_memory.h"
+
+using xsflib::testing::Check;
 
 namespace
 {
 
 using namespace wsf;
 
-uint32_t Cached(PAddr address)
+uint32_t Cached(ntdlib::PAddr address)
 {
-    return ToCached(address);
+    return ntdlib::dsp::ToCached(address);
 }
 
-// The words of a command list, up to its END.
-std::vector<uint16_t> ReadCommandList(const MainMemory& memory, uint32_t address)
+// The words of the command list buffer at `address`: the list, and whatever follows its END in the buffer.
+std::vector<uint16_t> ReadCommandList(const ntdlib::dsp::WiiMemory& memory, uint32_t address)
 {
     std::vector<uint16_t> words;
-    for (PAddr at = ToPhysical(address); words.size() < ax::layout::kCommandListSize / 2; at += 2)
+    for (ntdlib::PAddr at = ntdlib::dsp::ToPhysical(address); words.size() < ax::layout::kCommandListSize / 2; at += 2)
     {
-        words.push_back(LoadBe16(memory.At(at, 2)));
-        if (words.size() == 1 && words[0] == 14)
-        {
-            break;
-        }
+        words.push_back(xsflib::LoadBe16(memory.At(at, 2)));
     }
 
     return words;
 }
 
-void CheckCommandList(const MainMemory& memory, uint32_t list, PAddr output, PAddr remote_offset)
+void CheckCommandList(const ntdlib::dsp::WiiMemory& memory, uint32_t list, ntdlib::PAddr output,
+                      ntdlib::PAddr remote_offset)
 {
     const std::vector<uint16_t> words = ReadCommandList(memory, list);
     const auto word32 = [&words](std::size_t i)
     {
         return uint32_t{words[i]} << 16 | words[i + 1];
     };
-
-    Check(words.size() >= 32, "the command list's length");
-    if (words.size() < 32)
-    {
-        return;
-    }
 
     Check(words[0] == 0 && word32(1) == Cached(ax::layout::kStudio), "SETUP and the depop block");
     Check(words[3] == 1 && word32(4) == Cached(ax::layout::kSurroundBuffer), "ADD_TO_LR and the surround buffer");
@@ -76,8 +70,9 @@ void CheckCommandList(const MainMemory& memory, uint32_t list, PAddr output, PAd
 
 void TestInit()
 {
-    MainMemory memory;
+    ntdlib::dsp::WiiMemory memory;
     ax::System ax(memory);
+
     ax.Init();
 
     // The first command list fills the second output buffer. The microcode receives it with the first frame.
@@ -92,10 +87,11 @@ void TestInit()
     }
 
     const ax::Frame first = ax.StartFrame();
-    Check(first.command_list == Cached(ax::layout::kCommandLists) && first.output == ax::layout::kOutputBuffers + 384,
-          "the first frame's command list");
     ax.FinishFrame();
     const ax::Frame second = ax.StartFrame();
+
+    Check(first.command_list == Cached(ax::layout::kCommandLists) && first.output == ax::layout::kOutputBuffers + 384,
+          "the first frame's command list");
     Check(
         second.command_list == Cached(ax::layout::kCommandLists + 0x80) && second.output == ax::layout::kOutputBuffers,
         "the second frame's command list");
@@ -104,7 +100,7 @@ void TestInit()
 
 void TestAllocation()
 {
-    MainMemory memory;
+    ntdlib::dsp::WiiMemory memory;
     ax::System ax(memory);
     ax.Init();
 
@@ -126,11 +122,15 @@ void TestAllocation()
 
     // A higher priority steals the oldest voice of the lowest priority below it. The voice's owner is notified first.
     ax.SetVoicePriority(voices[5], 15);
-    ax::Voice* taken = ax.AcquireVoice(17, on_drop);
-    Check(taken == voices[5] && dropped.size() == 1 && dropped[0] == voices[5]->index && taken->priority == 17,
-          "a voice taken from a lower priority");
-    taken = ax.AcquireVoice(17, on_drop);
-    Check(taken == voices[0] && dropped.size() == 2, "the oldest voice taken first");
+
+    ax::Voice* first = ax.AcquireVoice(17, on_drop);
+    const std::size_t drops_after_first = dropped.size();
+    ax::Voice* second = ax.AcquireVoice(17, on_drop);
+
+    Check(
+        first == voices[5] && drops_after_first == 1 && dropped[0] == voices[5]->index && ax.VoicePriority(first) == 17,
+        "a voice taken from a lower priority");
+    Check(second == voices[0] && dropped.size() == 2, "the oldest voice taken first");
 
     // A freed voice is the next one handed out.
     ax.FreeVoice(voices[40]);
@@ -139,7 +139,7 @@ void TestAllocation()
 
 void TestSync()
 {
-    MainMemory memory;
+    ntdlib::dsp::WiiMemory memory;
     ax::System ax(memory);
     ax.Init();
 
@@ -153,6 +153,7 @@ void TestSync()
     voice->pb.SetMixerCtrl(ax::mixer::kL);
     voice->sync |= ax::sync::kMix | ax::sync::kMixerCtrl;
     voice->SetState(ax::VoiceState::kRun);
+
     ax.StartFrame();
 
     const ax::Pb pb = ax::LoadPb(memory.At(ax::layout::kPbs + voice->index * 0x140, ax::kPbSize));
@@ -163,16 +164,18 @@ void TestSync()
 
     // Fields that the CPU hasn't changed get the microcode's values back in the CPU's copy.
     uint8_t* bytes = memory.At(ax::layout::kPbs + voice->index * 0x140, ax::kPbSize);
-    StoreBe16(bytes + 0x6e + 0xc, 0x0801);
-    StoreBe16(bytes + 0x10, 0);
+    xsflib::StoreBe16(bytes + 0x6e + 0xc, 0x0801);
+    xsflib::StoreBe16(bytes + 0x10, 0);
+
     ax.FinishFrame();
     ax.StartFrame();
+
     Check(voice->pb.addr.current_address_hi == 0x0801 && !voice->IsRunning(), "the microcode's changes read back");
 }
 
 void TestCycleBudget()
 {
-    MainMemory memory;
+    ntdlib::dsp::WiiMemory memory;
     ax::System ax(memory);
     ax.Init();
 
@@ -182,7 +185,6 @@ void TestCycleBudget()
     {
         dropped.push_back(voice->index);
     };
-
     for (int i = 0; i < ax::kVoiceCount; i++)
     {
         ax::Voice* voice = ax.AcquireVoice(16, on_drop);
@@ -192,26 +194,23 @@ void TestCycleBudget()
     }
 
     ax.StartFrame();
-    Check(dropped.empty(), "drop callbacks wait for the end of the frame");
+    const bool dropped_in_frame = !dropped.empty();
     ax.FinishFrame();
+
+    Check(!dropped_in_frame, "drop callbacks wait for the end of the frame");
     Check(!dropped.empty() && dropped.size() < ax::kVoiceCount, "voices dropped for want of cycles");
     Check(ax.DspCycles() > 364317, "the frame's cycles counted past the limit");
 }
 
-void TestOctober2006()
+void TestOctober2006Layout()
 {
-    MainMemory memory;
+    ntdlib::dsp::WiiMemory memory;
     ax::System ax(memory);
+
     ax.Init(ax::Build::kOctober2006);
-    Check(ax.VoiceCount() == 64, "64 voices in the build of October 2006");
 
     // Command 5 follows PROCESS. The commands after it are numbered one higher, and OUTPUT takes no master volume.
-    std::vector<uint16_t> words;
-    for (PAddr at = ax::layout::kCommandLists; words.size() < 30; at += 2)
-    {
-        words.push_back(LoadBe16(memory.At(at, 2)));
-    }
-
+    const std::vector<uint16_t> words = ReadCommandList(memory, Cached(ax::layout::kCommandLists));
     const auto word32 = [&words](std::size_t i)
     {
         return uint32_t{words[i]} << 16 | words[i + 1];
@@ -228,26 +227,37 @@ void TestOctober2006()
           "the October 2006 OUTPUT, without a volume, and END");
 
     // 0x120-byte PBs, each with the address of its update buffer.
-    for (uint32_t i = 0; i < 64; i++)
+    for (uint32_t i = 0; i < ax::kVoiceCountOctober2006; i++)
     {
         const uint8_t* bytes = memory.At(ax::layout::kPbs + i * 0x120, ax::kPbSizeOctober2006);
         const ax::Pb pb = ax::LoadPbOctober2006(bytes);
-        const uint32_t next = i == 63 ? 0 : Cached(ax::layout::kPbs + (i + 1) * 0x120);
+        const uint32_t next = i == ax::kVoiceCountOctober2006 - 1 ? 0 : Cached(ax::layout::kPbs + (i + 1) * 0x120);
         Check(ax::Join(pb.next_hi, pb.next_lo) == next &&
                   ax::Join(pb.curr_hi, pb.curr_lo) == Cached(ax::layout::kPbs + i * 0x120),
               "an October 2006 PB's links");
-        Check(LoadBe32(bytes + 0x58) == Cached(ax::layout::kUpdateBuffers + i * 0x100) && LoadBe16(bytes + 0x52) == 0,
+        Check(xsflib::LoadBe32(bytes + 0x58) == Cached(ax::layout::kUpdateBuffers + i * 0x100) &&
+                  xsflib::LoadBe16(bytes + 0x52) == 0,
               "an October 2006 PB's update block");
     }
+}
 
-    // A voice's changes land at that layout's offsets. The update block stays.
+void TestOctober2006Voices()
+{
+    ntdlib::dsp::WiiMemory memory;
+    ax::System ax(memory);
+    ax.Init(ax::Build::kOctober2006);
+
+    // The build of October 2006 has 64 voices.
     std::vector<ax::Voice*> voices;
-    for (int i = 0; i < 64; i++)
+    for (int i = 0; i < ax::kVoiceCountOctober2006; i++)
     {
         voices.push_back(ax.AcquireVoice(16, nullptr));
     }
 
+    Check(ax.VoiceCount() == 64, "64 voices in the build of October 2006");
     Check(ax.AcquireVoice(16, nullptr) == nullptr, "no 65th voice");
+
+    // A voice's changes land at that layout's offsets. The update block stays.
     ax::Voice* voice = voices[0];
     ax::PbAddr address;
     address.format = static_cast<uint16_t>(ax::SampleFormat::kPcm16);
@@ -257,18 +267,21 @@ void TestOctober2006()
     voice->pb.remote = 1;
     voice->sync |= ax::sync::kMix | ax::sync::kRemote;
     voice->SetState(ax::VoiceState::kRun);
+
     ax.StartFrame();
+
     const uint8_t* bytes = memory.At(ax::layout::kPbs + voice->index * 0x120, ax::kPbSizeOctober2006);
-    Check(LoadBe16(bytes + 0x10) == 1 && LoadBe16(bytes + 0x14) == 0x4000 && LoadBe16(bytes + 0x84) == 0x0800 &&
-              LoadBe16(bytes + 0xa8) == 0x800 && LoadBe16(bytes + 0xd4) == 1,
+    Check(xsflib::LoadBe16(bytes + 0x10) == 1 && xsflib::LoadBe16(bytes + 0x14) == 0x4000 &&
+              xsflib::LoadBe16(bytes + 0x84) == 0x0800 && xsflib::LoadBe16(bytes + 0xa8) == 0x800 &&
+              xsflib::LoadBe16(bytes + 0xd4) == 1,
           "a voice's changes in its October 2006 PB");
-    Check(LoadBe32(bytes + 0x58) == Cached(ax::layout::kUpdateBuffers + voice->index * 0x100),
+    Check(xsflib::LoadBe32(bytes + 0x58) == Cached(ax::layout::kUpdateBuffers + voice->index * 0x100),
           "the update block left as it was");
 }
 
 void TestOctober2006Cycles()
 {
-    MainMemory memory;
+    ntdlib::dsp::WiiMemory memory;
     ax::System ax(memory);
     ax.Init(ax::Build::kOctober2006);
 
@@ -278,8 +291,7 @@ void TestOctober2006Cycles()
     {
         dropped.push_back(voice->index);
     };
-
-    for (int i = 0; i < 64; i++)
+    for (int i = 0; i < ax::kVoiceCountOctober2006; i++)
     {
         ax::Voice* voice = ax.AcquireVoice(16, on_drop);
         voice->pb.src.ratio_hi = 2;
@@ -304,7 +316,8 @@ int main()
         TestAllocation();
         TestSync();
         TestCycleBudget();
-        TestOctober2006();
+        TestOctober2006Layout();
+        TestOctober2006Voices();
         TestOctober2006Cycles();
     }
     catch (const std::exception& e)
@@ -314,5 +327,5 @@ int main()
         return 1;
     }
 
-    return failures == 0 ? 0 : 1;
+    return xsflib::testing::Summary("ax");
 }

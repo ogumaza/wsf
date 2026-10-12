@@ -205,6 +205,20 @@ Builds from June 2008 (Wii Music's build) on also differ in these ways:
   the library's presets: a low-pass, a high-pass and three band-passes. The model applies them. Any other type takes its
   coefficients from a function that the game registers. Archive mode plays such a type unfiltered.
 
+Later builds differ again. The earliest builds seen with these changes are of November 20 2008 and September 24 2009.
+The latest build seen without the first change is of September 19 2008. The builds between those dates haven't been
+checked. The model takes them as the older kind.
+
+- Builds from November 2008 on take the low-pass filter's cutoff from a table. The Wii U's library does the same. A
+  value below 0.169 gives 80 Hz. Above that, each thirtieth of the value raises the cutoff by about a third of an
+  octave. The highest step is 12800 Hz, from 0.869. A value of 0.9 or more gives 16000 Hz. That turns the filter off.
+  Older builds compute the cutoff as 32000 × 2^(10 (v − 1)) Hz for a value v from 0 to 1.
+- Builds from September 2009 on let a note's volume and its envelope go above full level. A volume LFO on a note at full
+  level then swings above full level as well as below. AX's envelope stops at twice full level. Older builds hold the
+  volume and the envelope to full level.
+- Builds from September 2009 on also move a track's pitch bend (command 0xc4) over the time that the commands 0xa3,
+  0xa4 and 0xa5 give. The model doesn't yet. It sets the bend at once.
+
 The model also follows an older pair of builds: AX of October 2006 and the build of `nw4r::snd` that comes with it.
 WarioWare: Smooth Moves links them. That build of `nw4r::snd` has no version banner. The archive descriptor gives a
 build of 0 for it. The model recognises the pair by the AX microcode in the set instead. That microcode reads parameter
@@ -255,7 +269,8 @@ the same address. The driver's parameter block is at **0x81700010**. The block's
 
 A `.miniwsf` patches only the sound, the group and the heap size (a 12-byte `MEM` chunk at 0x8170001C). It also patches
 the bank's group when the sound requires one (a 4-byte `MEM` chunk at 0x817000C4). After applying all `MEM` chunks, a
-version 1 player checks the driver block. If the block has the expected magic, the player rejects versions other than 1.
+player checks the driver block. If the block has the expected magic, the player rejects a version that it doesn't
+support. WSF 1.1.0's players support version 1. Later players support versions 1 and 2.
 
 The driver starts the audio interface and AX, opens the archive on the disc and sets up the sound archive player. It
 loads the group (and the bank's group, if there is one) into a sound heap. Then it starts `nw4r::snd`'s sound system and
@@ -275,6 +290,50 @@ The descriptor's status address points at the status word (0x81700018). A player
   half a second after the driver reports that the sound has finished (status 2). It stops sooner if a default length and
   fade end first. The player checks the status after every millisecond of emulated time.
 
+### JAudio2's driver (version 2)
+
+Game-mode rips of games whose sound library is JAudio2 contain WSF's other driver, `driver/jaudio.c`. It loads at the
+same address, and its parameter block has the same place and magic. Its version is 2, and the format's other rules stay
+at version 1. WSF 1.1.0's players refuse it with "driver block version 2; this player supports version 1". The block:
+
+```
+0x00   u32  magic "WSFD"
+0x04   u32  version (2)
+0x08   u32  status: the same as version 1's
+0x0C   u32  sound ID: the ID that the game passes to its sound library for the sound to play
+0x10   u32  the sound's handle (written by the game): its sound while it plays, then 0
+0x14   u32  the number of wave groups to load, at most 64
+0x18   256  the wave groups: each the wave system in the high half and the group in the low half
+0x118  u32  video frames between the calls to the game's audio frame process (2)
+0x11C  ...  the sizes that the game's start-up gives, and the addresses of the game's functions and variables (40 words,
+            in the order of ntdlib's drivers/jaudio/z2.h)
+0x1BC  u32  the address of the game's function that erases a wave group of the music's wave system (1), or 0
+0x1C0  u32  the address of the game's function that erases a wave group of the sound effects' wave system (0), or 0
+0x1C4  u32  the number of the first scene's wave groups that follow, at most 4
+0x1C8  16   the first scene's wave groups, each as at 0x18
+0x1D8  u32  the number of the start-up's other wave groups that follow, at most 4
+0x1DC  16   the start-up's other wave groups, each as at 0x18, erased only to make room
+0x1EC  u32  the address of the game's sleep of the calling thread
+0x1F0  u32  time-base ticks in one video frame (1,012,500: 60 Hz)
+0x1F4  u32  the address of the game's variable that holds the reset data's address
+0x1F8  u32  the reset data's byte that lets the audio set-up read the disc
+```
+
+A `.miniwsf` patches the sound ID (a 4-byte `MEM` chunk at 0x8170001C) and the wave groups (a `MEM` chunk at 0x81700024
+with the count and the groups).
+
+The driver repeats the game's start-up for sound with the game's functions: the heaps, the ARAM manager (the Wii keeps
+it in MEM2), the thread switch manager, the disc thread, and the audio set-up. Before that, it sets up the reset data
+that the game's main would allocate. The audio set-up loads the first scene's wave groups among others. The game's first
+change of scene erases them. Before it loads the sound's wave groups, the driver erases those of the first scene's
+groups that the list at 0x18 doesn't hold. It then loads the wave groups. The game's wave heap puts each group below the
+lowest group in it. Space that an erased group leaves above that group stays unused. If a group doesn't fit, the driver
+waits until none of the sound's groups is loading. It erases the sound's groups that loaded and the groups at 0x1DC.
+Then it loads the sound's groups again. Once they're loaded, the driver starts the sound and calls the audio frame
+process. It sleeps between calls for the video frames at 0x118. The status rules are version 1's. On an error, the low
+byte gives the step: 1 the block's header, 2 the root and system heaps, 3 the game's heaps, 4 the audio heap, 5 the
+audio set-up, 6 the wave groups, 7 the start of the sound. Steps 5 and 6 give up after 600 frames.
+
 ## Tags
 
 The standard PSF tags apply: `title`, `artist`, `game`, `year`, `genre`, `comment`, `copyright`, `length`, `fade`,
@@ -286,14 +345,22 @@ the fade.
 
 ## Ripping
 
-`wsfrip` builds sets from a Wii disc image, an extracted disc or a sound archive (`.brsar`). The image's game partition
-must be stored decrypted. NKit, RVZ and WIA images store it that way. An encrypted partition is rejected. `wsfrip
---list` shows a game's sound archives. A game with a driver profile is ripped in game mode. Anything else is ripped in
-archive mode. `--mode` overrides the choice. The rips go in a folder next to the input. The folder has the input's name
-with `_wsf` added. `-o` names another folder instead. Each of a game's sound archives gets a separate folder there. The
-folder has the archive's name. Where two of a game's archives have the same name, their folder names start with the
-names of their parent folders on the disc. As many parent folders are added as it takes to tell the archives apart:
-`Sound/BGM/sound.brsar` and `Sound/SE/sound.brsar` go in `BGM_sound` and `SE_sound`.
+`wsfrip` builds sets from a Wii disc image, an extracted disc, an unpacked WiiWare title (see "WiiWare titles") or a
+sound archive (`.brsar`). The image's game partition must be stored decrypted. NKit, RVZ and WIA images store it that
+way. An encrypted partition is rejected. `wsfrip --list` shows a game's sound archives. A game with a driver profile is
+ripped in game mode. Anything else is ripped in archive mode. `--mode` overrides the choice. A game with neither a sound
+archive of NW4R SND nor JAudio2's start-up archive holds nothing that WSF rips. `wsfrip` stops with an error for it. The
+rips go in a folder next to the input. The folder has the input's name with `_wsf` added. `-o` names another folder
+instead. Each of a game's sound archives gets a separate folder there. The folder has the archive's name. Where two of a
+game's archives have the same name, their folder names start with the names of their parent folders on the disc. As many
+parent folders are added as it takes to tell the archives apart: `Sound/BGM/sound.brsar` and `Sound/SE/sound.brsar` go
+in `BGM_sound` and `SE_sound`.
+
+An earlier rip may have left a `.wsflib` of the same name with other contents. That rip may have taken other sounds or
+used the other mode. The new `.wsflib` then gets the next free name, such as `<name>_2.wsflib`. The earlier `.wsflib`
+stays as it was. A new `.miniwsf` replaces an earlier one of the same name. The other earlier `.miniwsf` files still
+play. A `.wsflib` that no `.miniwsf` names any more stays in the folder too. To replace earlier rips, rip into an empty
+folder or delete the earlier rips first.
 
 `--only` selects the sequences whose labels match a regular expression. `--bgm` selects the music. The music is the
 sequences whose labels contain BGM, in any case, and those that play on a music player. A music player has BGM, MUSIC,
@@ -329,19 +396,20 @@ A sequence loops when its main track jumps back to a command it has already play
 repeats forever. A jump back inside a subroutine doesn't count. The exception is a subroutine that the track can't leave
 while it holds a held note or a note of length 0 on a looping wave at its sustain level. A track's pass is what the
 track plays from the command it jumps back to until the jump. A pass of an outer loop includes the passes of the loops
-inside it. A pass changes the sound when the track plays a note, changes a setting of the track or the player, or opens a
-track. A tie that continues a note at the same key and velocity changes nothing. A pass that changes nothing is idle. A track that only polls or counts a variable makes idle passes. An
-idle pass is never a loop. Any other pass of the first track is a loop. A pass of a later track is a loop if the track
-played a note during it and is the main track. A pass that played no note is a loop too while the track holds a held
-note or a note of length 0 on a looping wave at its sustain level and every other track still playing rests. A track
-rests when it will never continue, or when its last pass was idle and it has changed nothing since. A track is the main
-track when no earlier track still playing has loops that would count. The first track's loops count unless its last pass
-was idle. A later track's loops count only if its last pass played a note and wasn't idle. A track that will never
-continue has no more loops. It waits forever, waits out a held note, or waits for its notes to end while one of them
-never will: a note of length 0 on a looping wave. Two loops count together only if they come from the same track and go
-back to the same command. A loop of another track, or one that goes back elsewhere, starts the count again. Loops that
-go round before the first sound don't count. A track may change a value over and over while a note fades in, or before
-another track starts. A loop that completed without a sound ends the sequence at its last sound instead.
+inside it. A pass changes the sound when the track plays a note, changes a setting of the track or the player, or opens
+a track. A tie that continues a note at the same key and velocity changes nothing. A pass that changes nothing is idle.
+A track that only polls or counts a variable makes idle passes. An idle pass is never a loop. Any other pass of the
+first track is a loop. A pass of a later track is a loop if the track played a note during it and is the main track. A
+pass that played no note is a loop too while the track holds a held note or a note of length 0 on a looping wave at its
+sustain level and every other track still playing rests. A track rests when it will never continue, or when its last
+pass was idle and it has changed nothing since. A track is the main track when no earlier track still playing has loops
+that would count. The first track's loops count unless its last pass was idle. A later track's loops count only if its
+last pass played a note and wasn't idle. A track that will never continue has no more loops. It waits forever, waits out
+a held note, or waits for its notes to end while one of them never will: a note of length 0 on a looping wave. Two loops
+count together only if they come from the same track and go back to the same command. A loop of another track, or one
+that goes back elsewhere, starts the count again. Loops that go round before the first sound don't count. A track may
+change a value over and over while a note fades in, or before another track starts. A loop that completed without a
+sound ends the sequence at its last sound instead.
 
 A track can't change the sound while its notes sound in four cases: when it waits for its notes of length 0 to end (on
 looping waves, they never do), when it waits out a held note, when it waits forever, and when it makes still passes
@@ -376,19 +444,78 @@ then derives a profile from the addresses it finds. A function that matches in s
 nearest function that matched in one. A profile whose library build checks the sound system's flag (the builds from
 2008) can't be derived this way.
 
+### Game mode for JAudio2 games
+
+Only game mode plays JAudio2. wsfrip refuses a JAudio2 game that has no driver profile, and it refuses `--mode archive`
+and `--archive` for every JAudio2 game. wsfrip takes a disc as a JAudio2 game when the disc has a JAudio2 profile. A
+disc that holds a start-up archive and has no profile for NW4R SND counts as a JAudio2 game too. The disc's sound
+archives of NW4R SND, such as the Home Button menu's archive, aren't ripped then.
+
+wsfrip finds a JAudio2 game's start-up archive (`.baa`) and the RARC archives beside it by their headers. The `.wsflib`
+holds them as `FILE` chunks. It also holds the AW files of the wave groups that the game's audio set-up loads, and those
+of every group that a ripped sound plays. The archive's wave systems name the AW files. Each sound first plays with only
+the set-up's groups loaded. The waves that its notes look up give its groups. A `.miniwsf` loads at most 64 groups. If
+a sound can't start with its groups loaded, the ripper lists it and skips it. The groups may not fit in the game's wave
+memory beside the set-up's groups. The length analysis finds such a sound. `--no-length` leaves out that check too.
+The ripper then keeps every sound.
+
+The length comes from playing the sound with its groups while the game's sequence parser is watched. A track that jumps
+back to a command it has played, twice to the same command, makes the sound loop. A looping sound gets two loops plus a
+10-second fade. A sound that ends plays until half a second after its last sound. One that stays busy without a sound
+for 180 seconds ended at its last sound. The limit is 600 seconds. `--bgm` picks the sounds whose labels contain BGM,
+or those of a section that the archive's name table calls BGM.
+
 ### Archive mode
 
 The `.wsflib` holds the sound archive and AX's microcode as `FILE` chunks. It also holds an archive descriptor. Each
 `.miniwsf` selects one sequence with a `SND ` chunk. Lengths come from the same analysis as in game mode.
 
+The archive in the `.wsflib` keeps only the data that the ripped sequences play: each sequence's file, and its bank's
+file and wave data. The rest of the data in the archive's groups is zeros. The archive keeps its size and its layout. A
+game's archive can hold hundreds of megabytes of sound effects and voices that a rip of its music doesn't play.
+Zeros compress to almost nothing.
+
 A sound archive doesn't contain AX's microcode. For a game, the ripper takes the microcode from the game's `main.dol`.
 For a loose `.brsar`, it takes the microcode from the `main.dol` that `--microcode` names or that's given with the
-archive. Otherwise it uses a `main.dol` in the archive's folder. The ripper prints a notice that archive mode uses WSF's
-model of the SDK's sound player. The notice also says that ripping the game gives exact rips. Sequences whose data isn't
-all in the archive are listed and skipped. Wave sounds aren't ripped.
+archive. Otherwise it uses a `main.dol` in the archive's folder. The ripper takes the build of NW4R SND from the same
+`main.dol`. The model plays the archive as that build would. A loose `.brsar` therefore requires the `main.dol` of the
+game it comes from. With another game's `main.dol`, a rip can sound different. The ripper prints a notice that archive
+mode uses WSF's model of the SDK's sound player. On a loose `.brsar`, the notice also says that a game with a driver
+profile gives exact rips when the game itself is ripped. On a game with a profile, it says to leave out
+`--mode archive`. Sequences whose data isn't all in the archive are listed and skipped. Wave sounds aren't ripped.
 
 Tags written by `wsfrip`: `title` and `wsf_sound` (the sound's label), `game`, `length` and `fade`, `wsf_mode`, `wsfby`,
 `utf8=1`, and optionally `artist`, `year` and `copyright`.
+
+### WiiWare titles
+
+`wsfrip` rips a WiiWare game, or another title for the Wii's NAND, from a folder with the title's TMD and its decrypted
+contents. The TMD is the folder's file whose name ends in `.tmd`. A WAD unpacker that decrypts the contents writes such
+a folder. A Wii's NAND keeps each installed title's TMD (`title.tmd`) and contents in one:
+`title/<the title ID's first 8 hex digits>/<its last 8>/content`. WiiWare games are under `title/00010001`. A WAD holds
+the contents encrypted. `wsfrip` rejects it.
+
+Each content's file is named after 8 hex digits, with the extension `.app`. A WAD unpacker names a content after its
+index in the TMD. The NAND names it after its content ID. The ripper uses the naming under which more files hold their
+contents. A file holds its content when it has the size and the SHA-1 that the TMD gives. Up to 63 bytes of padding may
+follow. A file that doesn't hold its content is rejected as encrypted or damaged. The folder may leave out contents. The
+NAND keeps a title's shared contents, such as the Home Button menu's files, in another folder.
+
+A title may compress a content with the SDK's CX library: LZ77 (type 0x10) or LZ77 with longer copies (type 0x11). The
+ripper decompresses such contents. Every title but the System Menu boots the SDK's NAND Boot Program. That program loads
+the title's main program from content 1. A compressed main program is decompressed first. The ripper does the same. AX's
+microcode and the build of NW4R SND come from the main program. For a disc, they come from its `main.dol`. A title
+whose content 1 isn't a DOL boots its main program itself. The boot content is then the main program.
+
+The ripper reads the title's U8 archives: the contents that are U8 archives, compressed or not. Their files make one
+tree, like a disc's files. When two archives hold a file at the same path, each archive's files go in a folder named
+after its content instead, such as `content5` for content 5. A sound archive that the title stores compressed is
+decompressed: with LZ77, or with Huffman coding of bytes (type 0x28). The Home Button menu's sound archives are
+compressed with Huffman coding. Archives inside the archives aren't read.
+
+The game ID is the title ID's last 4 bytes, read as characters. The title is the English name in the banner, content 0.
+Without an English name in a banner, the title is the game ID. A title rips in archive mode only. Game mode emulates a
+disc. A title's game reads its contents from the NAND instead.
 
 ## Copyright
 

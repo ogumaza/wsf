@@ -6,14 +6,16 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <utility>
+
+#include "ntdlib/dsp/memory.h"
+#include "ntdlib/types.h"
+#include "xsflib/bytes.h"
 
 #include "ax/pb.h"
 #include "ax/tables.h"
 #include "ax/voice.h"
-#include "common/bytes.h"
-#include "common/common_types.h"
-#include "dsp/main_memory.h"
 
 namespace wsf::ax
 {
@@ -28,8 +30,8 @@ constexpr uint32_t kDefaultSync =
     sync::kState | sync::kItd | sync::kLpf | sync::kBiquad | sync::kRemote | sync::kRmtSrc | sync::kRmtIir;
 
 // The DSP cycles that the microcode spends on a voice's mixes (__AXMixCycles, __AXRmtMixCycles). kMixCycles is indexed
-// by 5 bits of Pb::mixer_ctrl: left, right, delta, surround and surround delta for one bus. kRemoteMixCycles is indexed
-// by 2 bits of Pb::rmt_mixer_ctrl.
+// by 5 bits of Pb::MixerCtrl(): left, right, delta, surround and surround delta for one bus. kRemoteMixCycles is
+// indexed by 2 bits of Pb::rmt_mixer_ctrl.
 constexpr std::array<uint32_t, 32> kMixCycles = {2,    408,  408,  810,  1404, 1404, 1404, 1404, 408,  816,  816,
                                                  1218, 1812, 1812, 1812, 1812, 707,  1115, 1115, 1517, 2111, 2111,
                                                  2111, 2111, 707,  1115, 1115, 1517, 2111, 2111, 2111, 2111};
@@ -146,7 +148,7 @@ void DepopFade(int32_t& sum, int32_t& value, int16_t& delta, int32_t samples)
 
 } // namespace
 
-System::System(MainMemory& memory) : memory_(&memory)
+System::System(ntdlib::dsp::WiiMemory& memory) : memory_(&memory)
 {
 }
 
@@ -154,15 +156,15 @@ void System::Init(Build build)
 {
     build_ = build;
     voice_count_ = build == Build::kOctober2006 ? kVoiceCountOctober2006 : kVoiceCount;
+
     uint8_t* table = memory_->At(layout::kCompressorTable, layout::kCompressorTableSize);
     for (std::size_t i = 0; i < tables::kCompressor.size(); i++)
     {
-        StoreBe16(table + i * 2, tables::kCompressor[i]);
+        xsflib::StoreBe16(table + i * 2, tables::kCompressor[i]);
     }
 
-    // __AXAllocInit (0x80104564).
-    stack_head_.fill(nullptr);
-    stack_tail_.fill(nullptr);
+    // __AXAllocInit (0x80104564), and __AXVPBInitCommon's frees: every voice goes onto the free stack, in index order.
+    allocation_ = ntdlib::ax::Voices(static_cast<int>(voice_count_));
     callback_stack_ = nullptr;
 
     // __AXVPBInitCommon (0x801070ec): frees every voice and links every PB to the next one in the microcode's list. The
@@ -188,25 +190,24 @@ void System::Init(Build build)
         voice.itd_buffer = layout::kItdBuffers + i * layout::kItdBufferSize;
         SetPbDefault(&voice);
 
-        const uint32_t next = i == voice_count_ - 1 ? 0 : ToCached(PbAddress(i + 1));
-        const uint32_t curr = ToCached(PbAddress(i));
-        const uint32_t itd = ToCached(voice.itd_buffer);
+        const uint32_t next = i == voice_count_ - 1 ? 0 : ntdlib::dsp::ToCached(PbAddress(i + 1));
+        const uint32_t curr = ntdlib::dsp::ToCached(PbAddress(i));
+        const uint32_t itd = ntdlib::dsp::ToCached(voice.itd_buffer);
         voice.pb.next_hi = dsp.next_hi = Hi(next);
         voice.pb.next_lo = dsp.next_lo = Lo(next);
         voice.pb.curr_hi = dsp.curr_hi = Hi(curr);
         voice.pb.curr_lo = dsp.curr_lo = Lo(curr);
         voice.pb.itd.buffer_hi = dsp.itd.buffer_hi = Hi(itd);
         voice.pb.itd.buffer_lo = dsp.itd.buffer_lo = Lo(itd);
-        voice.priority = kPriorityMin;
-        PushFreeStack(&voice);
         WritePb(i, dsp);
+
         if (build_ == Build::kOctober2006)
         {
             // The update block's three counters stay 0. Its last two words give the buffer's address.
-            const uint32_t updates = ToCached(layout::kUpdateBuffers + i * layout::kUpdateBufferSize);
+            const uint32_t updates = ntdlib::dsp::ToCached(layout::kUpdateBuffers + i * layout::kUpdateBufferSize);
             uint8_t* block = memory_->At(PbAddress(i) + kUpdateBlockOctober2006, 10);
-            StoreBe16(block + 6, Hi(updates));
-            StoreBe16(block + 8, Lo(updates));
+            xsflib::StoreBe16(block + 6, Hi(updates));
+            xsflib::StoreBe16(block + 8, Lo(updates));
         }
     }
 
@@ -224,10 +225,10 @@ void System::Init(Build build)
     std::memset(memory_->At(layout::kRemoteBuffers, kRemoteCount * kRemoteBufferLength * 2), 0,
                 kRemoteCount * kRemoteBufferLength * 2);
 
-    std::array<PAddr, kRemoteCount> remote;
+    std::array<ntdlib::PAddr, kRemoteCount> remote;
     for (int i = 0; i < kRemoteCount; i++)
     {
-        remote[i] = layout::kRemoteBuffers + static_cast<PAddr>(i * kRemoteBufferLength * 2);
+        remote[i] = layout::kRemoteBuffers + static_cast<ntdlib::PAddr>(i * kRemoteBufferLength * 2);
     }
 
     remote_position_ = kRemoteSamplesPerFrame;
@@ -260,56 +261,50 @@ Voice* System::AcquireVoice(uint32_t priority, Voice::Callback callback)
 {
     // With no free voice, steal the oldest voice of the lowest priority below this one. Call its owner's callback
     // first.
-    Voice* voice = PopFreeStack();
-    if (voice == nullptr)
+    const std::optional<ntdlib::ax::Voices::Taken> taken = allocation_.Take(priority);
+    if (!taken)
     {
-        for (uint32_t i = kPriorityMin; i < priority; i++)
+        return nullptr;
+    }
+
+    Voice* voice = &voices_[taken->voice];
+    if (taken->stolen)
+    {
+        if (voice->IsRunning())
         {
-            voice = PopStackFromBottom(i);
-            if (voice != nullptr)
-            {
-                if (voice->IsRunning())
-                {
-                    voice->depop = true;
-                }
+            voice->depop = true;
+        }
 
-                if (voice->callback)
-                {
-                    const Voice::Callback owner = voice->callback;
-                    owner(voice);
-                }
-
-                break;
-            }
+        if (voice->callback)
+        {
+            const Voice::Callback owner = voice->callback;
+            owner(voice);
         }
     }
 
-    if (voice != nullptr)
-    {
-        PushStackHead(voice, priority);
-        voice->callback = std::move(callback);
-        SetPbDefault(voice);
-    }
+    allocation_.Push(voice->index, priority);
+    voice->callback = std::move(callback);
+    SetPbDefault(voice);
 
     return voice;
 }
 
 void System::FreeVoice(Voice* voice)
 {
-    RemoveFromStack(voice);
+    allocation_.Remove(voice->index);
     if (voice->IsRunning())
     {
         voice->depop = true;
     }
 
     SetPbDefault(voice);
-    PushFreeStack(voice);
+    allocation_.Push(voice->index, kPriorityFree);
 }
 
 void System::SetVoicePriority(Voice* voice, uint32_t priority)
 {
-    RemoveFromStack(voice);
-    PushStackHead(voice, priority);
+    allocation_.Remove(voice->index);
+    allocation_.Push(voice->index, priority);
 }
 
 void System::SetMasterVolume(uint16_t volume)
@@ -326,8 +321,7 @@ Frame System::StartFrame()
     PrintStudio();
 
     const uint32_t list = CommandListAddress();
-
-    return {list, list_output_[(ToPhysical(list) - layout::kCommandLists) / layout::kCommandListSize]};
+    return {list, list_output_[(ntdlib::dsp::ToPhysical(list) - layout::kCommandLists) / layout::kCommandListSize]};
 }
 
 void System::FinishFrame()
@@ -340,10 +334,11 @@ void System::FinishFrame()
     }
 
     // Advance the Wii Remote rings by one frame. Then build the next command list.
-    std::array<PAddr, kRemoteCount> remote;
+    std::array<ntdlib::PAddr, kRemoteCount> remote;
     for (int i = 0; i < kRemoteCount; i++)
     {
-        remote[i] = layout::kRemoteBuffers + static_cast<PAddr>((i * kRemoteBufferLength + remote_position_) * 2);
+        remote[i] =
+            layout::kRemoteBuffers + static_cast<ntdlib::PAddr>((i * kRemoteBufferLength + remote_position_) * 2);
     }
 
     remote_position_ += kRemoteSamplesPerFrame;
@@ -354,25 +349,6 @@ void System::FinishFrame()
 
     NextFrame(layout::kSurroundBuffer, layout::kOutputBuffers + output_frame_ * layout::kOutputBufferSize, remote);
     output_frame_ = (output_frame_ + 1) & 1;
-}
-
-void System::PushFreeStack(Voice* voice)
-{
-    // __AXPushFreeStack (0x80104580).
-    voice->next = stack_head_[kPriorityFree];
-    stack_head_[kPriorityFree] = voice;
-    voice->priority = kPriorityFree;
-}
-
-Voice* System::PopFreeStack()
-{
-    Voice* head = stack_head_[kPriorityFree];
-    if (head != nullptr)
-    {
-        stack_head_[kPriorityFree] = head->next;
-    }
-
-    return head;
 }
 
 void System::PushCallbackStack(Voice* voice)
@@ -392,78 +368,10 @@ Voice* System::PopCallbackStack()
     return head;
 }
 
-void System::RemoveFromStack(Voice* voice)
-{
-    // __AXRemoveFromStack (0x80104640). A stack whose head is its tail holds only this voice.
-    const uint32_t priority = voice->priority;
-    Voice* head = stack_head_[priority];
-    Voice* tail = stack_tail_[priority];
-    if (head == tail)
-    {
-        stack_head_[priority] = nullptr;
-        stack_tail_[priority] = nullptr;
-    }
-    else if (voice == head)
-    {
-        stack_head_[priority] = voice->next;
-        stack_head_[priority]->prev = nullptr;
-    }
-    else if (voice == tail)
-    {
-        stack_tail_[priority] = voice->prev;
-        stack_tail_[priority]->next = nullptr;
-    }
-    else
-    {
-        voice->prev->next = voice->next;
-        voice->next->prev = voice->prev;
-    }
-}
-
-void System::PushStackHead(Voice* voice, uint32_t priority)
-{
-    voice->next = stack_head_[priority];
-    voice->prev = nullptr;
-    if (voice->next != nullptr)
-    {
-        stack_head_[priority]->prev = voice;
-    }
-    else
-    {
-        stack_tail_[priority] = voice;
-    }
-
-    stack_head_[priority] = voice;
-    voice->priority = priority;
-}
-
-Voice* System::PopStackFromBottom(uint32_t priority)
-{
-    Voice* voice = nullptr;
-    if (stack_head_[priority] != nullptr)
-    {
-        if (stack_head_[priority] == stack_tail_[priority])
-        {
-            voice = stack_head_[priority];
-            stack_head_[priority] = nullptr;
-            stack_tail_[priority] = nullptr;
-        }
-        else if (stack_tail_[priority] != nullptr)
-        {
-            voice = stack_tail_[priority];
-            stack_tail_[priority] = voice->prev;
-            stack_tail_[priority]->next = nullptr;
-        }
-    }
-
-    return voice;
-}
-
-PAddr System::PbAddress(uint32_t index) const
+ntdlib::PAddr System::PbAddress(uint32_t index) const
 {
     const std::size_t size = build_ == Build::kOctober2006 ? kPbSizeOctober2006 : kPbSize;
-
-    return layout::kPbs + index * static_cast<PAddr>(size);
+    return layout::kPbs + index * static_cast<ntdlib::PAddr>(size);
 }
 
 void System::SetPbDefault(Voice* voice)
@@ -492,48 +400,52 @@ void System::SyncPbs(uint32_t base_cycles)
     const bool october = build_ == Build::kOctober2006;
     uint32_t cycles = october ? command_list_cycles_ + base_cycles + 43536
                               : 32 + command_list_cycles_ + kVoiceCount * 600 + base_cycles;
-    for (uint32_t priority = kPriorityMax; priority > kPriorityFree; priority--)
+    const auto sync_voice = [&](uint32_t index)
     {
-        for (Voice* voice = stack_head_[priority]; voice != nullptr; voice = voice->next)
+        Voice* voice = &voices_[index];
+
+        // The build of October 2006 counts no cycles for the ITD.
+        if (!october && voice->pb.itd.flag == 1)
         {
-            // The build of October 2006 counts no cycles for the ITD.
-            if (!october && voice->pb.itd.flag == 1)
-            {
-                cycles += 129;
-            }
+            cycles += 129;
+        }
 
-            if (voice->depop)
-            {
-                DepopVoice(dsp_pbs_[voice->index]);
-            }
+        if (voice->depop)
+        {
+            DepopVoice(dsp_pbs_[voice->index]);
+        }
 
-            if (voice->IsRunning())
-            {
-                cycles += RunningCycles(voice->pb);
-                if (max_dsp_cycles_ > cycles)
-                {
-                    ServiceVpb(voice);
-                }
-                else
-                {
-                    DumpVpb(voice);
-                }
-            }
-            else
+        if (voice->IsRunning())
+        {
+            cycles += RunningCycles(voice->pb);
+            if (max_dsp_cycles_ > cycles)
             {
                 ServiceVpb(voice);
             }
-
-            voice->sync = 0;
-            voice->depop = false;
+            else
+            {
+                DumpVpb(voice);
+            }
         }
+        else
+        {
+            ServiceVpb(voice);
+        }
+
+        voice->sync = 0;
+        voice->depop = false;
+    };
+    for (uint32_t priority = kPriorityMax; priority > kPriorityFree; priority--)
+    {
+        allocation_.ForEachNewestFirst(priority, sync_voice);
     }
 
     recorded_dsp_cycles_ = cycles;
 
     // A free voice only stops. A voice that was running when it was freed also fades out.
-    for (Voice* voice = stack_head_[kPriorityFree]; voice != nullptr; voice = voice->next)
+    const auto stop_free_voice = [&](uint32_t index)
     {
+        Voice* voice = &voices_[index];
         if (voice->depop)
         {
             DepopVoice(dsp_pbs_[voice->index]);
@@ -541,7 +453,8 @@ void System::SyncPbs(uint32_t base_cycles)
 
         voice->depop = false;
         dsp_pbs_[voice->index].state = static_cast<uint16_t>(VoiceState::kStop);
-    }
+    };
+    allocation_.ForEachNewestFirst(kPriorityFree, stop_free_voice);
 
     for (uint32_t i = 0; i < voice_count_; i++)
     {
@@ -591,6 +504,7 @@ uint32_t System::RunningCycles(const Pb& pb) const
     cycles += SrcCycles(pb);
     cycles +=
         kMixCycles[ctrl & 31] + kMixCycles[ctrl >> 16 & 31] + kMixCycles[ctrl >> 21 & 31] + kMixCycles[ctrl >> 26 & 31];
+
     if (pb.remote == 1)
     {
         cycles += 613;
@@ -874,8 +788,8 @@ void System::PrintStudio()
         Depop& entry = depop_[i];
         const int32_t samples = i < kDepopMain0 ? kSamplesPerFrame : kRemoteSamplesPerFrame;
         DepopFade(entry.sum, entry.value, entry.delta, samples);
-        StoreBe32(studio + i * kStudioEntrySize, static_cast<uint32_t>(entry.value));
-        StoreBe16(studio + i * kStudioEntrySize + 4, static_cast<uint16_t>(entry.delta));
+        xsflib::StoreBe32(studio + i * kStudioEntrySize, static_cast<uint32_t>(entry.value));
+        xsflib::StoreBe16(studio + i * kStudioEntrySize + 4, static_cast<uint16_t>(entry.delta));
     }
 }
 
@@ -885,7 +799,7 @@ void System::ServiceCallbackStack()
     // voices.
     for (Voice* voice = PopCallbackStack(); voice != nullptr; voice = PopCallbackStack())
     {
-        if (voice->priority > kPriorityFree)
+        if (allocation_.Priority(voice->index) > kPriorityFree)
         {
             if (voice->callback)
             {
@@ -893,8 +807,8 @@ void System::ServiceCallbackStack()
                 callback(voice);
             }
 
-            RemoveFromStack(voice);
-            PushFreeStack(voice);
+            allocation_.Remove(voice->index);
+            allocation_.Push(voice->index, kPriorityFree);
         }
     }
 }
@@ -902,16 +816,16 @@ void System::ServiceCallbackStack()
 uint32_t System::CommandListAddress()
 {
     // __AXGetCommandListAddress (0x8010517c). Returns the list built last and switches to the other list for writing.
-    const PAddr list = layout::kCommandLists + command_list_position_ * layout::kCommandListSize;
+    const ntdlib::PAddr list = layout::kCommandLists + command_list_position_ * layout::kCommandListSize;
     command_list_position_ = (command_list_position_ + 1) % 2;
     command_list_write_ = layout::kCommandLists + command_list_position_ * layout::kCommandListSize;
 
-    return ToCached(list);
+    return ntdlib::dsp::ToCached(list);
 }
 
 void System::WriteCommand(uint16_t word)
 {
-    StoreBe16(memory_->At(command_list_write_, 2), word);
+    xsflib::StoreBe16(memory_->At(command_list_write_, 2), word);
     command_list_write_ += 2;
 }
 
@@ -921,11 +835,13 @@ void System::WriteCommand32(uint32_t value)
     WriteCommand(Lo(value));
 }
 
-void System::NextFrame(PAddr surround, PAddr output, const std::array<PAddr, kRemoteCount>& remote)
+void System::NextFrame(ntdlib::PAddr surround, ntdlib::PAddr output,
+                       const std::array<ntdlib::PAddr, kRemoteCount>& remote)
 {
     // __AXNextFrame (0x801051ac) in stereo, with the compressor on and no aux callbacks. The cycle counts are AX's
     // estimates. SyncPbs uses them.
     list_output_[(command_list_write_ - layout::kCommandLists) / layout::kCommandListSize] = output;
+
     if (build_ == Build::kOctober2006)
     {
         NextFrameOctober2006(surround, output, remote);
@@ -936,72 +852,73 @@ void System::NextFrame(PAddr surround, PAddr output, const std::array<PAddr, kRe
     command_list_cycles_ = 7811;
 
     WriteCommand(kCommandSetup);
-    WriteCommand32(ToCached(layout::kStudio));
+    WriteCommand32(ntdlib::dsp::ToCached(layout::kStudio));
     command_list_cycles_ += 4126;
 
     WriteCommand(kCommandAddToLr);
-    WriteCommand32(ToCached(surround));
+    WriteCommand32(ntdlib::dsp::ToCached(surround));
     command_list_cycles_ += 733;
 
     WriteCommand(kCommandProcess);
-    WriteCommand32(ToCached(layout::kPbs));
+    WriteCommand32(ntdlib::dsp::ToCached(layout::kPbs));
 
     WriteCommand(kCommandCompressor);
     WriteCommand(kCompressorThreshold);
     WriteCommand(kCompressorRelease);
-    WriteCommand32(ToCached(layout::kCompressorTable));
+    WriteCommand32(ntdlib::dsp::ToCached(layout::kCompressorTable));
     command_list_cycles_ += 1850;
 
     WriteCommand(kCommandWmOutput);
-    for (const PAddr buffer : remote)
+    for (const ntdlib::PAddr buffer : remote)
     {
-        WriteCommand32(ToCached(buffer));
+        WriteCommand32(ntdlib::dsp::ToCached(buffer));
     }
     command_list_cycles_ += 409;
 
     WriteCommand(kCommandOutput);
     WriteCommand(master_volume_);
-    WriteCommand32(ToCached(surround));
-    WriteCommand32(ToCached(output));
+    WriteCommand32(ntdlib::dsp::ToCached(surround));
+    WriteCommand32(ntdlib::dsp::ToCached(output));
     command_list_cycles_ += 1172;
 
     WriteCommand(kCommandEnd);
     command_list_cycles_ += 30;
 }
 
-void System::NextFrameOctober2006(PAddr surround, PAddr output, const std::array<PAddr, kRemoteCount>& remote)
+void System::NextFrameOctober2006(ntdlib::PAddr surround, ntdlib::PAddr output,
+                                  const std::array<ntdlib::PAddr, kRemoteCount>& remote)
 {
     // __AXNextFrame of October 2006 (0x8002ef20). It writes the commands in the same order as the later builds.
     command_list_cycles_ = 7811;
 
     WriteCommand(kCommandSetup);
-    WriteCommand32(ToCached(layout::kStudio));
+    WriteCommand32(ntdlib::dsp::ToCached(layout::kStudio));
     command_list_cycles_ += 4246;
 
     WriteCommand(kCommandAddToLr);
-    WriteCommand32(ToCached(surround));
+    WriteCommand32(ntdlib::dsp::ToCached(surround));
     command_list_cycles_ += 733;
 
     WriteCommand(kCommandProcess);
-    WriteCommand32(ToCached(layout::kPbs));
+    WriteCommand32(ntdlib::dsp::ToCached(layout::kPbs));
     WriteCommand(kCommandAfterProcessOctober2006);
 
     WriteCommand(kCommandCompressorOctober2006);
     WriteCommand(kCompressorThreshold);
     WriteCommand(kCompressorRelease);
-    WriteCommand32(ToCached(layout::kCompressorTable));
+    WriteCommand32(ntdlib::dsp::ToCached(layout::kCompressorTable));
     command_list_cycles_ += 1850;
 
     WriteCommand(kCommandWmOutputOctober2006);
-    for (const PAddr buffer : remote)
+    for (const ntdlib::PAddr buffer : remote)
     {
-        WriteCommand32(ToCached(buffer));
+        WriteCommand32(ntdlib::dsp::ToCached(buffer));
     }
     command_list_cycles_ += 409;
 
     WriteCommand(kCommandOutputOctober2006);
-    WriteCommand32(ToCached(surround));
-    WriteCommand32(ToCached(output));
+    WriteCommand32(ntdlib::dsp::ToCached(surround));
+    WriteCommand32(ntdlib::dsp::ToCached(output));
     command_list_cycles_ += 665;
 
     WriteCommand(kCommandEndOctober2006);
