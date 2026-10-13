@@ -32,6 +32,7 @@ says so.
 | `wsfrip [options] <input>...` | Rips each input into a `.wsflib` and a `.miniwsf` per sequence. The output goes in a folder next to the input. The folder has the input's name with `_wsf` added. Each of a game's sound archives gets a separate folder with the archive's name. Where two of the game's archives have the same name, the names of the folders above them are added. A `.wsflib` that differs from one of the same name in the folder gets the next free name, such as `<name>_2.wsflib`. The rips already in the folder then still play. To replace earlier rips, rip into an empty folder. An input is a Wii disc image, an extracted disc, an unpacked WiiWare title or a sound archive (`.brsar`). An extracted disc is a folder with `sys/main.dol` and `files/`, either directly or in a `DATA` folder. Dolphin and Wiimm's tools extract discs in these layouts. An unpacked title is a folder with the title's TMD (`.tmd`) and its decrypted contents (`.app`). A sound archive requires the `main.dol` of its game. `wsfrip` takes AX's microcode and the build of the sound library from it. Give the `main.dol` with the archive or with `--microcode`, or put it in the archive's folder. `--list` lists a game's sound archives, or a JAudio2 game's sounds and sections. `--mode game\|archive` chooses the mode. `--archive`, `--only` and `--bgm` choose what to rip. Sequences that make no sound, such as placeholders and those that only set values for the game, are listed and skipped. `--help` shows the rest. |
 | `wsfplay [options] <file>...` | Renders each `.miniwsf` to a WAV file next to it at 32,000 Hz. The length and fade come from the file's tags. `-o FILE` writes FILE instead. Its extension selects WAV or FLAC. `--length` and `--fade` override the tags. `--info` shows a file's tags and libraries. `--help` shows the rest. |
 | `plugins/foobar2000` | foobar2000 input component: `foo_input_wsf.component` for macOS and `foo_input_wsf.dll` for Windows. Both are built with the foobar2000 SDK (see its [README](plugins/foobar2000/README.md)). |
+| `plugins/xmplay` | XMPlay input plugin: `xmp-wsf.dll`, a 32-bit DLL for XMPlay on Windows, built with clang-cl and the XMPlay plugin SDK. See its [README](plugins/xmplay/README.md). |
 
 `wsfrip` reads disc images in every common format: ISO, NKit (`.nkit.iso`, `.nkit.gcz`), RVZ, WIA, GCZ, WBFS, CISO and
 WDF, whole or split into pieces. The game partition must be stored decrypted. NKit, RVZ and WIA images store it that
@@ -51,8 +52,11 @@ in it. The rips of a JAudio2 game go in `game_wsf/` itself. `--version` shows a 
 
 ### Downloads
 
-The Releases page has `wsfrip` and `wsfplay` for 64-bit Windows, and the foobar2000 component for 64-bit and 32-bit
-foobar2000 on Windows. On macOS, build WSF from source (see "Building").
+The Releases page has `wsfrip` and `wsfplay` for 64-bit Windows, the foobar2000 component for 64-bit and 32-bit
+foobar2000 on Windows, and the XMPlay plugin. On macOS, build WSF from source (see "Building").
+
+To install the XMPlay plugin, unzip `xmp-wsf-X.Y.Z.zip` and put `xmp-wsf.dll` in XMPlay's folder, or in a folder inside
+it. Then restart XMPlay.
 
 ### Drag and drop
 
@@ -81,8 +85,8 @@ aren't installed.
 - **macOS on Apple Silicon:** the Xcode command line tools (`xcode-select --install`) and CMake (`brew install cmake`).
   `brew install zstd xz flac` saves building those three.
 
-Linux, Intel Macs, MSVC and 32-bit Windows aren't supported. The one exception is the 32-bit foobar2000 component. Build
-it with clang-cl, configured with `-A Win32 -T ClangCL`.
+Linux, Intel Macs, MSVC and 32-bit Windows aren't supported. The exceptions are the 32-bit foobar2000 component and the
+XMPlay plugin. Build them with clang-cl, configured with `-A Win32 -T ClangCL`.
 
 ```sh
 cmake -S . -B build
@@ -106,15 +110,16 @@ src/cli/      wsfrip and wsfplay
 externals/xsflib/    a library for players and rippers of the PSF family
 externals/ntdlib/    a library for the hardware and formats of Nintendo's consoles
 plugins/foobar2000/  the foobar2000 component
+plugins/xmplay/      the XMPlay plugin
 driver/       the game-mode drivers' sources (NW4R SND's and JAudio2's), and the script that builds them
 docs/         the format's specification
 tests/        ctest suites
 ```
 
 xsflib holds the PSF container, playback and the tools' frames. xsflib's CMake helpers make the Windows programs'
-version resources and manifests, the macOS droplet apps and the foobar2000 component. ntdlib holds the disc reader,
-the Broadway CPU, the hardware that the GameCube and the Wii share (the DSP that runs AX's microcode, its interface,
-EXI, and the processor and audio interfaces) and the sound archive readers.
+version resources and manifests, the macOS droplet apps, the foobar2000 component and the XMPlay plugin. ntdlib holds
+the disc reader, the Broadway CPU, the hardware that the GameCube and the Wii share (the DSP that runs AX's microcode,
+its interface, EXI, and the processor and audio interfaces) and the sound archive readers.
 
 The driver runs on the emulated Wii. `driver/build.py` builds it for PowerPC and requires a clang with the PowerPC
 target. The driver's image is committed as `src/rip/driver_blob.h`. Building WSF itself requires no PowerPC toolchain.

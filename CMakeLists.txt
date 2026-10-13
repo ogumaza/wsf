@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for wsfrip, wsfplay, the foobar2000 component, Windows file properties and macOS bundles
 # (xsflib_add_version below). For a release, update it here and add notes in docs/release-notes/.
-project(wsf VERSION 1.2.0 LANGUAGES C CXX)
+project(wsf VERSION 1.3.0 LANGUAGES C CXX)
 
 # xsflib: the code that WSF shares with the other PSF players and with the converters, as a submodule. Its
 # XsflibProject.cmake sets what the projects built on it start with: C++20, a release build by default, the static C
@@ -133,6 +133,12 @@ if (FOOBAR2000_SDK_DIR)
         message(FATAL_ERROR "the foobar2000 component requires clang-cl or MSVC on Windows, or macOS")
     endif()
     add_subdirectory(plugins/foobar2000)
+endif()
+
+# XMPlay plugin (32-bit Windows with clang-cl): cmake -A Win32 -T ClangCL -DXMPLAY_SDK_DIR=<unpacked SDK> ...
+set(XMPLAY_SDK_DIR "" CACHE PATH "XMPlay plugin SDK (builds the xmp-wsf plugin when set)")
+if (XMPLAY_SDK_DIR)
+    add_subdirectory(plugins/xmplay)
 endif()
 
 enable_testing()

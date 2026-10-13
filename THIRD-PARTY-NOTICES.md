@@ -14,12 +14,13 @@ WSF is under the MIT licence (`LICENSE`). Its dependencies have the following li
 | [bzip2](https://sourceware.org/bzip2/), Copyright (C) 1996-2019 Julian R Seward | bzip2 (BSD-style) | bzip2 in WIA and RVZ disc images. The installed copy is used if there is one. Otherwise 1.0.8 is downloaded when configuring. |
 | [libFLAC](https://xiph.org/flac/), Copyright the Xiph.Org Foundation | BSD-3-Clause | FLAC output in `wsfplay`. The installed copy is used if there is one. Otherwise 1.5.0 is downloaded when configuring. |
 | [foobar2000 SDK](https://www.foobar2000.org/SDK), Copyright Peter Pawlowski | BSD-style (the SDK's `sdk-license.txt`, and `pfc-license.txt` for its pfc library) | Only for `plugins/foobar2000`. Not included here. The SDK is supplied when building the component. |
+| [XMPlay plugin SDK](https://www.un4seen.com/xmplay.html), from Un4seen Developments | None stated | Only for `plugins/xmplay`. Not included here. The SDK is supplied when building the plugin. CI downloads it from un4seen.com. The plugin uses only the SDK's declarations of XMPlay's interface. |
 
 Binary distributions must include the MIT notices of WSF, xsflib and ntdlib, the Unicode License v3's notice when
 ntdlib's disc reader is linked in (as in `wsfrip`), the Zstandard notice when Zstandard is linked in, and the libFLAC
 notice when libFLAC is linked in. Shipping `LICENSE` and this file does that. The licence texts are at the end of this
 file. The licences of zlib, liblzma and bzip2, and those of the foobar2000 SDK and its pfc library, require no notice
-in binaries. seqlib's checks go only into tests.
+in binaries. seqlib's checks go only into tests. No code from the XMPlay plugin SDK goes into the XMPlay plugin.
 
 ## Reference material (no code taken)
 

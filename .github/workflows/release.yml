@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: MIT
 
 # A vX.Y.Z tag publishes a release. X.Y.Z must match CMakeLists.txt. The notes must be in docs/release-notes/X.Y.Z.md.
-# Builds the Windows programs and foobar2000 component with clang-cl and attaches two downloads:
+# Builds the Windows programs, the foobar2000 component and the XMPlay plugin with clang-cl. Attaches three downloads:
 #   wsf-X.Y.Z-win-x64.zip               wsfrip and wsfplay for 64-bit Windows, with README.md and the licences
 #   foo_input_wsf-X.Y.Z.fb2k-component  the component for 64-bit and 32-bit foobar2000: the 32-bit DLL at the top
 #                                       level and the 64-bit one in x64/, with the licences
+#   xmp-wsf-X.Y.Z.zip                   the XMPlay plugin, a 32-bit DLL, with the licences
 # Manual runs (Actions > Release > Run workflow) build the same files as an artifact without publishing a release.
-# The build downloads the foobar2000 SDK from foobar2000.org (externals/xsflib/ci/foobar2000-sdk).
+# The build downloads the foobar2000 SDK from foobar2000.org (externals/xsflib/ci/foobar2000-sdk) and the XMPlay plugin
+# SDK from un4seen.com (externals/xsflib/ci/xmplay-sdk).
 name: Release
 
 on:
@@ -27,7 +29,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-          token: ${{ secrets.SUBMODULES_TOKEN || github.token }}
 
       - id: version
         uses: ./externals/xsflib/ci/release-version
@@ -43,24 +44,32 @@ jobs:
         include:
           - arch: x64
             package: win-x64
+          # XMPlay is a 32-bit program. Its plugin builds in the 32-bit job only.
           - arch: Win32
             package: win32
+            xmplay: true
+            xmplay-cmake: -DXMPLAY_SDK_DIR=xmp-sdk
+            xmplay-target: xmp-wsf
+            xmplay-file: build/plugins/xmplay/Release/xmp-wsf.dll
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-          token: ${{ secrets.SUBMODULES_TOKEN || github.token }}
 
       - uses: ./externals/xsflib/ci/release-windows
         with:
           version: ${{ needs.version.outputs.version }}
-          cmake: -A ${{ matrix.arch }} -T ClangCL -DFOOBAR2000_SDK_DIR="${{ github.workspace }}/sdk"
-          targets: wsfrip wsfplay foo_input_wsf
+          cmake: >-
+            -A ${{ matrix.arch }} -T ClangCL -DFOOBAR2000_SDK_DIR="${{ github.workspace }}/sdk"
+            ${{ matrix.xmplay-cmake }}
+          targets: wsfrip wsfplay foo_input_wsf ${{ matrix.xmplay-target }}
           programs: wsfrip wsfplay
           files: >-
             build/Release/wsfrip.exe build/Release/wsfplay.exe build/plugins/foobar2000/Release/foo_input_wsf.dll
+            ${{ matrix.xmplay-file }}
           artifact: ${{ matrix.package }}
           foobar2000: true
+          xmplay: ${{ matrix.xmplay || false }}
 
   # zip, run on Linux, writes the names in the packages with forward slashes. foobar2000 requires those in a component.
   package:
@@ -72,7 +81,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-          token: ${{ secrets.SUBMODULES_TOKEN || github.token }}
 
       - uses: ./externals/xsflib/ci/package-player
         with:
@@ -80,8 +88,10 @@ jobs:
           version: ${{ needs.version.outputs.version }}
           programs: wsfrip wsfplay
           component: foo_input_wsf
+          xmplay-plugin: xmp-wsf
 
-      # The 32-bit build is for the component alone. 32-bit Windows is unsupported for the programs.
+      # The 32-bit build is for the foobar2000 component and the XMPlay plugin. 32-bit Windows is unsupported for the
+      # programs.
       - name: Leave out the 32-bit programs
         shell: bash
         run: rm dist/*-win32.zip
