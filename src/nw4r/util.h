@@ -17,6 +17,8 @@
 #include "ntdlib/nwsnd/util.h"
 #include "ntdlib/sound_build.h"
 
+#include "axfx/util.h"
+
 namespace wsf::nw4r
 {
 
@@ -38,6 +40,10 @@ inline bool SinceSeptember2009(const SndBuild& build)
 {
     return build.date >= 20090924;
 }
+
+// Converts a float to an unsigned integer like the game's runtime (__cvt_fp2unsigned, 0x800b1c1c): 0 below 0, all ones
+// from 2^32 (and for NaN), and truncated between.
+using axfx::ToUnsigned;
 
 // The random numbers (Util::CalcRandom, 0x8004ec58): x = x * 0x19660D + 0x3C6EF35F from 0x12345678. A draw gives x's
 // top 16 bits. The game has one generator for the whole sound system.

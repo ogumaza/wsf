@@ -29,6 +29,7 @@ class System;
 } // namespace wii
 
 class ArchivePlayer;
+class NativeEffects;
 
 class Player : public xsflib::player::PlayerBase<Player, LoadedSet>
 {
@@ -51,6 +52,16 @@ public:
     {
         return system_.get();
     }
+
+    // Game mode runs a game's effects on WSF's models (see native_effects.h). With `interpret` set before a start, it
+    // runs the game's effect code on the emulated CPU instead, for a comparison of the two.
+    void InterpretEffects(bool interpret)
+    {
+        interpret_effects_ = interpret;
+    }
+
+    // The frames in which WSF's models ran the effects in game mode, since the start.
+    uint64_t NativeEffectFrames() const;
 
 private:
     friend class xsflib::player::PlayerBase<Player, LoadedSet>;
@@ -86,6 +97,8 @@ private:
 
     std::unique_ptr<ntdlib::flipper::FileDisc> disc_; // declared before the system that reads it
     std::unique_ptr<wii::System> system_;
+    std::unique_ptr<NativeEffects> native_effects_; // declared after the system that it watches
+    bool interpret_effects_ = false;
     std::vector<int16_t> system_output_;
     std::unique_ptr<ArchivePlayer> archive_;
 };

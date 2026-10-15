@@ -7,8 +7,7 @@
 // The player core (src/wsf) does the emulation. Game mode runs the game's sound code on an emulated Wii. Archive mode
 // runs WSF's model of the SDK's sound player. Both modes run the game's AX microcode on the emulated DSP.
 //
-// Build: see plugins/foobar2000/README.md (clang-cl or MSVC on Windows, or Apple Clang on macOS, with the foobar2000
-// SDK).
+// Build: see plugins/foobar2000/README.md (clang-cl on Windows, or Apple Clang on macOS, with the foobar2000 SDK).
 
 #include <array>
 #include <cstdint>
@@ -35,7 +34,9 @@ struct Traits
     static constexpr const char* kDecoderName = "WSF decoder";
     static constexpr std::array<const char*, 1> kExtensions = {"miniwsf"};
     static constexpr uint8_t kPsfVersion = wsf::kPsfVersionWsf;
-    static constexpr const char* kVariablesTag = nullptr;
+
+    // The tags that arrange a sequence in archive mode. Editing or removing the tags keeps them as they are.
+    static constexpr std::array<const char*, 3> kKeptTags = {wsf::kTempoTag, wsf::kTracksTag, wsf::kVariablesTag};
 
     // The largest file read into memory: as large as a program may be. A .wsflib holds a game's sound archive. The
     // largest archives are hundreds of megabytes.

@@ -1,11 +1,11 @@
 # wsf
 
 WSF is a PSF-family music rip format for Nintendo Wii sequenced audio. It covers the music that Wii games play through
-the console's DSP: from NintendoWare sound archives (`.brsar`), or with JAudio2, the sound library of Nintendo's
+the console's DSP: from NintendoWare sound archives (`.brsar`), or with JAudio, the sound library of Nintendo's
 JSystem. WSF is the Wii counterpart of the DS formats 2SF and NCSF.
 
-Each WSF rip contains the game's DSP program: AX's microcode, or JAudio2's. The player runs it on an emulated DSP. The
-mixing, filtering and resampling therefore match the game. A rip uses one of two modes:
+Each WSF rip contains the game's DSP program: AX's microcode, or the DSP program of JAudio. The player runs it on an
+emulated DSP. The mixing, filtering and resampling therefore match the game. A rip uses one of two modes:
 
 - **Game mode** requires a driver profile for the game. The rip contains the game's code. The player runs that code,
   including the game's OS and sound library, on an emulated Wii. The game plays the sound itself. The rip is therefore
@@ -19,17 +19,34 @@ when its code matches. The European and Japanese releases of WarioWare: Smooth M
 follows the versions of the sound library from 2006 (WarioWare: Smooth Moves) to 2008 (Wii Music). Archive mode also
 follows two changes in later versions. `docs/wsf.md` lists them.
 
-Game mode also plays The Legend of Zelda: Twilight Princess (USA, revision 2). The game's sound library is JAudio2.
-Rips of Twilight Princess require a player newer than WSF 1.1.0. WSF 1.1.0 refuses them. They take more processing to
-play than other games' rips. A slow computer may not play them in real time. Archive mode doesn't play JAudio2.
-`wsfrip` therefore can't rip another JAudio2 game or another release of Twilight Princess. It stops with an error that
-says so.
+WSF plays the reverb and other effects that Wii Sports, Wii Play, WarioWare: Smooth Moves, Animal Crossing: City Folk,
+Mario Kart Wii and Wii Music (all USA) put on the Wii's auxiliary buses, in both modes. Both modes play WSF's models of
+the effects. Game mode sets them up with the game's code. The models give the same samples as the game's code. Rips of
+other NintendoWare games play without effects. `docs/wsf.md` describes the effects under "Effects".
+
+Game mode also plays four games whose sound library is JAudio2: The Legend of Zelda: Twilight Princess (USA,
+revision 2), Link's Crossbow Training (USA, revision 1), Super Mario Galaxy and Super Mario Galaxy 2 (both USA). The
+rips of Twilight Princess and Link's Crossbow Training have the games' echo. The rips of these games require a player
+newer than WSF 1.1.0. WSF 1.1.0 refuses them. They take more processing to play than other games' rips. A slow computer
+may not play them in real time. The two Galaxy games stream most of their music. `wsfrip` rips the pieces that the games
+play from sequences, such as the jingles and the music of the power-ups. Game mode also plays New Play Control! Donkey
+Kong Jungle Beat (USA), another JAudio2 game. Its rips require WSF 1.4.0 or later. Archive mode doesn't play JAudio2.
+`wsfrip` therefore can't rip another JAudio2 game or another release of these games. It stops with an error that says
+so.
+
+Game mode also plays New Play Control! Pikmin (USA). The game's sound library is the early JAudio1 of the GameCube
+release. `wsfrip` rips the game's sequenced music: its pieces, and each part of the piece that the cutscenes play. The
+game's streamed music (`.stx`) isn't ripped. Like Twilight Princess's rips, these require a player newer than WSF 1.1.0.
+
+Game mode also plays New Play Control! Pikmin 2 (USA). The game's sound library is the later JAudio1 of the GameCube
+release. `wsfrip` rips the game's 48 pieces of music and its sound effects. The game's streamed music (`.ast`) isn't
+ripped. Like Twilight Princess's rips, these require a player newer than WSF 1.1.0.
 
 ## Tools
 
 | Tool | Description |
 |---|---|
-| `wsfrip [options] <input>...` | Rips each input into a `.wsflib` and a `.miniwsf` per sequence. The output goes in a folder next to the input. The folder has the input's name with `_wsf` added. Each of a game's sound archives gets a separate folder with the archive's name. Where two of the game's archives have the same name, the names of the folders above them are added. A `.wsflib` that differs from one of the same name in the folder gets the next free name, such as `<name>_2.wsflib`. The rips already in the folder then still play. To replace earlier rips, rip into an empty folder. An input is a Wii disc image, an extracted disc, an unpacked WiiWare title or a sound archive (`.brsar`). An extracted disc is a folder with `sys/main.dol` and `files/`, either directly or in a `DATA` folder. Dolphin and Wiimm's tools extract discs in these layouts. An unpacked title is a folder with the title's TMD (`.tmd`) and its decrypted contents (`.app`). A sound archive requires the `main.dol` of its game. `wsfrip` takes AX's microcode and the build of the sound library from it. Give the `main.dol` with the archive or with `--microcode`, or put it in the archive's folder. `--list` lists a game's sound archives, or a JAudio2 game's sounds and sections. `--mode game\|archive` chooses the mode. `--archive`, `--only` and `--bgm` choose what to rip. Sequences that make no sound, such as placeholders and those that only set values for the game, are listed and skipped. `--help` shows the rest. |
+| `wsfrip [options] <input>...` | Rips each input into a `.wsflib` and a `.miniwsf` per sequence. The output goes in a folder next to the input. The folder has the input's name with `_wsf` added. Each of a game's sound archives gets a separate folder with the archive's name. Where two of the game's archives have the same name, the names of the folders above them are added. A `.wsflib` that differs from one of the same name in the folder gets the next free name, such as `<name>_2.wsflib`. The rips already in the folder then still play. To replace earlier rips, rip into an empty folder. An input is a Wii disc image, an extracted disc, an unpacked WiiWare title or a sound archive (`.brsar`). `wsfrip` also finds the sound archives inside a game's CRI CPK archives (`.cpk`). An extracted disc is a folder with `sys/main.dol` and `files/`, either directly or in a `DATA` folder. Dolphin and Wiimm's tools extract discs in these layouts. An unpacked title is a folder with the title's TMD (`.tmd`) and its decrypted contents (`.app`). A sound archive requires the `main.dol` of its game. `wsfrip` takes AX's microcode and the build of the sound library from it. Give the `main.dol` with the archive or with `--microcode`, or put it in the archive's folder. A WiiWare game has no `main.dol`. Its main program, content 1, takes that role. `--microcode` takes the game's unpacked title or extracted disc, and a main program as the title stores it, compressed or not. `--list` lists a game's sound archives, or a JAudio game's sounds (with a JAudio2 game's sections). `--mode game\|archive` chooses the mode. `--archive`, `--only` and `--bgm` choose what to rip. In archive mode, `--tracks`, `--tempo` and `--var` rip each sequence in an arrangement that a game can play it in: some of its tracks, another tempo, or variables set. `--suffix` adds a text to the rips' titles and file names. Each arrangement of a sound then rips as a separate file. Sequences that make no sound, such as placeholders and those that only set values for the game, are listed and skipped. `--help` shows the rest. |
 | `wsfplay [options] <file>...` | Renders each `.miniwsf` to a WAV file next to it at 32,000 Hz. The length and fade come from the file's tags. `-o FILE` writes FILE instead. Its extension selects WAV or FLAC. `--length` and `--fade` override the tags. `--info` shows a file's tags and libraries. `--help` shows the rest. |
 | `plugins/foobar2000` | foobar2000 input component: `foo_input_wsf.component` for macOS and `foo_input_wsf.dll` for Windows. Both are built with the foobar2000 SDK (see its [README](plugins/foobar2000/README.md)). |
 | `plugins/xmplay` | XMPlay input plugin: `xmp-wsf.dll`, a 32-bit DLL for XMPlay on Windows, built with clang-cl and the XMPlay plugin SDK. See its [README](plugins/xmplay/README.md). |
@@ -48,7 +65,7 @@ content ID. A content that doesn't match the TMD's SHA-1 is rejected as encrypte
 
 Both tools accept multiple inputs and continue if one fails. A nonexistent input path stops the command before it writes
 any files. For example, `wsfrip game.rvz` writes `game_wsf/`. `wsfplay game_wsf/*/*.miniwsf` then renders every sequence
-in it. The rips of a JAudio2 game go in `game_wsf/` itself. `--version` shows a tool's version.
+in it. The rips of a JAudio game go in `game_wsf/` itself. `--version` shows a tool's version.
 
 ### Downloads
 
@@ -105,13 +122,13 @@ src/ax/       AX's CPU side, and the exchange with its microcode
 src/nw4r/     the model of nw4r::snd that plays archive mode
 src/wii/      the Wii for game mode: its hardware, IOS, and a disc made of a rip's files
 src/wsf/      the format and the player
-src/rip/      the ripper, the game profiles and the driver's image
+src/rip/      the ripper, the game profiles and the drivers' images
 src/cli/      wsfrip and wsfplay
 externals/xsflib/    a library for players and rippers of the PSF family
 externals/ntdlib/    a library for the hardware and formats of Nintendo's consoles
 plugins/foobar2000/  the foobar2000 component
 plugins/xmplay/      the XMPlay plugin
-driver/       the game-mode drivers' sources (NW4R SND's and JAudio2's), and the script that builds them
+driver/       the game-mode drivers' sources, for NW4R SND and JAudio, and the script that builds them
 docs/         the format's specification
 tests/        ctest suites
 ```
@@ -121,8 +138,12 @@ version resources and manifests, the macOS droplet apps, the foobar2000 componen
 the disc reader, the Broadway CPU, the hardware that the GameCube and the Wii share (the DSP that runs AX's microcode,
 its interface, EXI, and the processor and audio interfaces) and the sound archive readers.
 
-The driver runs on the emulated Wii. `driver/build.py` builds it for PowerPC and requires a clang with the PowerPC
-target. The driver's image is committed as `src/rip/driver_blob.h`. Building WSF itself requires no PowerPC toolchain.
+The drivers run on the emulated Wii. `driver/build.py` builds them for PowerPC and requires a clang with the PowerPC
+target. The drivers' images are committed in `src/rip/` as `driver_blob.h` (NW4R SND), `jaudio_driver_blob.h` (Twilight
+Princess and Link's Crossbow Training), `jungle_beat_driver_blob.h` (New Play Control! Donkey Kong Jungle Beat),
+`pikmin_driver_blob.h` (New Play Control! Pikmin), `pikmin2_driver_blob.h` (New Play Control! Pikmin 2),
+`galaxy_driver_blob.h` (Super Mario Galaxy) and `galaxy2_driver_blob.h` (Super Mario Galaxy 2). Building WSF itself
+requires no PowerPC toolchain.
 
 ## Licence
 

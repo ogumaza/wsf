@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: MIT
+
+// The RVL SDK's effects for AX's aux buses (AXFX), modelled on the games' code. A game registers an effect's callback
+// for a bus. In each AX frame, the callback takes the bus's samples as 32-bit integers: 96 in each of the three
+// channels of AX's stereo mode (left, right and surround). It replaces them with the effect's output. The DSP mixes the
+// output back into the main mix two frames later (see ax::System).
+//
+// Each model follows the game's functions operation for operation, in single-precision floats. It then gives the same
+// samples as the game's code on Broadway. That requires the compiler to keep each multiply and add apart:
+// xsflib_project turns off their contraction into fused multiply-adds for every target, with clang-cl too.
+
+#pragma once
+
+#include <array>
+#include <cstdint>
+
+namespace wsf::axfx
+{
+
+// The samples in each channel of an AX frame.
+constexpr int kSamplesPerFrame = 96;
+
+// The channels of an aux bus in AX's stereo mode, in the order that the callback gets them.
+enum Channel
+{
+    kLeft,
+    kRight,
+    kSurround,
+    kChannelCount,
+};
+
+// One frame of an aux bus: 96 samples of each channel.
+struct AuxFrame
+{
+    std::array<std::array<int32_t, kSamplesPerFrame>, kChannelCount> channels{};
+};
+
+// The builds of the AXFX library that the models follow, by the games that link them: October 2006 (WarioWare: Smooth
+// Moves), December 2006 (Wii Sports and Wii Play) and September 2008 (Animal Crossing: City Folk).
+enum class Build
+{
+    kOctober2006,
+    kDecember2006,
+    kSeptember2008,
+};
+
+} // namespace wsf::axfx

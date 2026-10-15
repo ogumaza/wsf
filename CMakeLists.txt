@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for wsfrip, wsfplay, the foobar2000 component, Windows file properties and macOS bundles
 # (xsflib_add_version below). For a release, update it here and add notes in docs/release-notes/.
-project(wsf VERSION 1.3.0 LANGUAGES C CXX)
+project(wsf VERSION 1.4.0 LANGUAGES C CXX)
 
 # xsflib: the code that WSF shares with the other PSF players and with the converters, as a submodule. Its
 # XsflibProject.cmake sets what the projects built on it start with: C++20, a release build by default, the static C
@@ -31,6 +31,24 @@ xsflib_add_libraries(xsflib ntdlib)
 add_library(wsf_common INTERFACE)
 target_include_directories(wsf_common INTERFACE src)
 target_link_libraries(wsf_common INTERFACE xsflib::common ntdlib::common)
+
+# AXFX: the RVL SDK's effects for AX's aux buses, modelled on the games' code. They must give the same floats on every
+# platform: xsflib_project turns off the contraction of multiplies and adds into fused multiply-adds for every target,
+# with clang-cl too.
+add_library(wsf_axfx STATIC
+    src/axfx/axfx.h
+    src/axfx/chorus.cpp
+    src/axfx/chorus.h
+    src/axfx/delay.cpp
+    src/axfx/delay.h
+    src/axfx/reverb_hi.cpp
+    src/axfx/reverb_hi.h
+    src/axfx/reverb_std.cpp
+    src/axfx/reverb_std.h
+    src/axfx/util.h
+)
+target_link_libraries(wsf_axfx PUBLIC wsf_common)
+target_compile_options(wsf_axfx PRIVATE ${WSF_WARNINGS})
 
 # AX model: the CPU side of the RVL SDK's audio library.
 add_library(wsf_ax STATIC
@@ -69,6 +87,9 @@ target_compile_options(wsf_format PRIVATE ${WSF_WARNINGS})
 add_library(wsf_nw4r STATIC
     src/nw4r/driver.cpp
     src/nw4r/driver.h
+    src/nw4r/effect_setup.h
+    src/nw4r/effects.cpp
+    src/nw4r/effects.h
     src/nw4r/engine.cpp
     src/nw4r/engine.h
     src/nw4r/sequence.cpp
@@ -76,13 +97,18 @@ add_library(wsf_nw4r STATIC
     src/nw4r/rsar_options.h
     src/nw4r/util.h
 )
-target_link_libraries(wsf_nw4r PUBLIC wsf_ax ntdlib::nwsnd ntdlib::rsar)
+target_link_libraries(wsf_nw4r PUBLIC wsf_ax wsf_axfx ntdlib::nwsnd ntdlib::rsar)
 target_compile_options(wsf_nw4r PRIVATE ${WSF_WARNINGS})
 
 # The ripper: game- and archive-mode sets, the game profiles and the length analysis.
 add_library(wsf_rip STATIC
     src/rip/driver_blob.h
+    src/rip/galaxy_driver_blob.h
+    src/rip/galaxy2_driver_blob.h
     src/rip/jaudio_driver_blob.h
+    src/rip/jungle_beat_driver_blob.h
+    src/rip/pikmin_driver_blob.h
+    src/rip/pikmin2_driver_blob.h
     src/rip/rip.cpp
     src/rip/rip.h
 )
@@ -94,6 +120,8 @@ target_compile_options(wsf_rip PRIVATE ${WSF_WARNINGS})
 add_library(wsf_player STATIC
     src/wsf/archive_player.cpp
     src/wsf/archive_player.h
+    src/wsf/native_effects.cpp
+    src/wsf/native_effects.h
     src/wsf/player.cpp
     src/wsf/player.h
 )
@@ -126,11 +154,11 @@ foreach (tool wsfrip wsfplay)
     xsflib_add_droplet(${tool} VERSION ${wsf_VERSION})
 endforeach()
 
-# foobar2000 component (Windows with clang-cl or MSVC, or macOS): cmake -DFOOBAR2000_SDK_DIR=<unpacked SDK> ...
+# foobar2000 component (Windows with clang-cl, or macOS): cmake -DFOOBAR2000_SDK_DIR=<unpacked SDK> ...
 set(FOOBAR2000_SDK_DIR "" CACHE PATH "foobar2000 SDK (builds the foo_input_wsf component when set)")
 if (FOOBAR2000_SDK_DIR)
     if (NOT MSVC AND NOT APPLE)
-        message(FATAL_ERROR "the foobar2000 component requires clang-cl or MSVC on Windows, or macOS")
+        message(FATAL_ERROR "the foobar2000 component requires clang-cl on Windows, or macOS")
     endif()
     add_subdirectory(plugins/foobar2000)
 endif()

@@ -25,7 +25,10 @@
 
 #include "ax/dsp_link.h"
 #include "ax/system.h"
+#include "nw4r/arrangement.h"
 #include "nw4r/driver.h"
+#include "nw4r/effect_setup.h"
+#include "nw4r/effects.h"
 #include "nw4r/sequence.h"
 #include "nw4r/util.h"
 
@@ -59,6 +62,7 @@ public:
         std::array<int16_t, 16> global_variables{};
         std::vector<SeqPlayer> players;
         std::size_t banks = 0; // the banks loaded by then
+        Effects effects;
     };
 
     // The hooks that the length analysis and the tests set (see SetLoopHook, SetVoiceParamHook and
@@ -69,8 +73,9 @@ public:
     using ChannelEventHook = std::function<void(const Channel& channel, Channel::CallbackStatus status)>;
 
     // Sets up NW4R SND's side of AX (AxManager::Init, 0x800313c4): the zero buffer, and the frame callback through
-    // which AX's interrupt ends the voices' ramps (SoundThread::AxCallbackFunc, 0x80047c44). `ax` must be initialised.
-    // `archive` must outlive the engine. The engine follows `build` of NW4R SND.
+    // which AX's interrupt ends the voices' ramps (SoundThread::AxCallbackFunc, 0x80047c44) and runs the effects' part
+    // (see SetEffects). `ax` must be initialised. `archive` must outlive the engine. The engine follows `build` of NW4R
+    // SND.
     Engine(ntdlib::dsp::WiiMemory& memory, ax::System& ax, const ntdlib::rsar::SoundArchive& archive, SndBuild build);
 
     Engine(const Engine&) = delete;
@@ -123,17 +128,38 @@ public:
         return 1.0f;
     }
 
-    // SeqPlayer's global variables. Every player shares them. They're zero until the game sets one. Archive mode never
-    // sets them.
+    // SeqPlayer's global variables. Every player shares them. They're zero until the game sets one. In archive mode, an
+    // arrangement can set them before its sequence starts (see StartSequence).
     std::array<int16_t, 16>& GlobalVariables()
     {
         return global_variables_;
     }
 
-    // Starts the sequence sound at `index` in the archive's sound table, from the next sound frame. Returns its player,
-    // or nullptr if the sound isn't a sequence or its sequence or bank isn't in the archive. Throws xsflib::FormatError
-    // for a sequence or bank that can't be read.
-    SeqPlayer* StartSequence(uint32_t index);
+    // Sets up the effects that the game puts on the aux buses for the sound (see Effects::Set). With
+    // `follow_variables`, the variables of the sequence that starts first pick the presets. `sends` are the sends that
+    // the game sets on the sound, by bus. Every sequence that the engine plays gets them.
+    void SetEffects(const std::vector<EffectSetup>& setups, bool follow_variables,
+                    const std::array<float, ax::kAuxBusCount>& sends = {})
+    {
+        effects_.Set(setups, AxfxBuild(build_), follow_variables, sends);
+    }
+
+    // Whether any effect is set up.
+    bool HasEffects() const
+    {
+        return effects_.Any();
+    }
+
+    // The sends that the game sets on the sound (see Effects::Sends).
+    const std::array<float, ax::kAuxBusCount>& SoundSends() const
+    {
+        return effects_.Sends();
+    }
+
+    // Starts the sequence sound at `index` in the archive's sound table, from the next sound frame, in `arrangement`.
+    // Returns its player, or nullptr if the sound isn't a sequence or its sequence or bank isn't in the archive. Throws
+    // xsflib::FormatError for a sequence or bank that can't be read.
+    SeqPlayer* StartSequence(uint32_t index, const Arrangement& arrangement = {});
 
     // A note on the bank in a sequence's bank slot `slot` of `banks` (SeqPlayer::NoteOn, 0x8003f3c8, through
     // SoundArchivePlayer's note-on callback, then Bank::NoteOn, 0x80035b68): the region for the note, and a channel
@@ -201,6 +227,9 @@ public:
     void Restore(const Snapshot& snapshot);
 
 private:
+    // AX's frame callback: NotifyVoiceUpdate, then the effects' part.
+    void OnAxFrame();
+
     // Returns the bank with `bank_id`. The first call loads the bank. Returns nullptr if the archive doesn't hold it.
     const LoadedBank* GetBank(uint32_t bank_id);
 
@@ -221,6 +250,8 @@ private:
 
     // The players, in the order they started. A channel's owner gives its player's place here.
     std::vector<std::unique_ptr<SeqPlayer>> players_;
+
+    Effects effects_;
 
     LoopHook on_loop_;
     VoiceParamHook on_voice_param_;

@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: MIT
 
-// Unit tests for the WSF file format code (src/wsf/format.*): the version byte, the process and archive descriptors,
-// and what WSF's format gives xsflib's set loader: its PSF version, its descriptors and its driver block. xsflib's
-// psf_test and psf_set_test cover the PSF container, tags, times, program chunks and the loader.
+// Unit tests for the WSF file format code (src/wsf/format.*): the version byte, the process and archive descriptors
+// with the archive's effects, what WSF's format gives xsflib's set loader (its PSF version, its descriptors and its
+// driver block), and the tags that arrange a sequence in archive mode. xsflib's psf_test and psf_set_test cover the PSF
+// container, tags, times, program chunks, the loader and the variables tag's syntax.
 
 #include "wsf/format.h"
 
+#include <array>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "xsflib/bytes.h"
@@ -202,9 +206,172 @@ static void TestArchiveMode()
     XSFLIB_CHECK(LoadSet("a/z.miniwsf", reader, set).has_value()); // archive mode without a sound
 }
 
+static void TestArrangementTags()
+{
+    // wsf_tracks: track numbers and ranges, separated by commas or white space, in any order.
+    XSFLIB_CHECK(ParseTracks("2, 8-14") == uint16_t{0x7f04});
+    XSFLIB_CHECK(ParseTracks("15 0\n3-3,,") == uint16_t{0x8009});
+    XSFLIB_CHECK(ParseTracks("0-15") == uint16_t{0xffff});
+    for (const char* malformed : {"", " , ", "16", "-1", "3-", "-3", "5-2", "1-2-3", "0x3", "a", "1;2", "+1", "0-16"})
+    {
+        XSFLIB_CHECK(!ParseTracks(malformed));
+    }
+
+    // The tag that wsfrip writes: in increasing order, with runs of three or more as ranges. Every set of tracks reads
+    // back.
+    XSFLIB_CHECK(FormatTracks(0x7f04) == "2, 8-14");
+    XSFLIB_CHECK(FormatTracks(0xe803) == "0, 1, 11, 13-15");
+    XSFLIB_CHECK(FormatTracks(0xffff) == "0-15");
+    bool round_trips = true;
+    for (uint32_t tracks = 1; tracks <= 0xffff; tracks++)
+    {
+        round_trips &= ParseTracks(FormatTracks(static_cast<uint16_t>(tracks))) == tracks;
+    }
+
+    XSFLIB_CHECK(round_trips);
+
+    // wsf_tempo: a decimal number from 0.25 to 4, rounded to single precision.
+    XSFLIB_CHECK(ParseTempo("1.1") == 1.1f);
+    XSFLIB_CHECK(ParseTempo(" 0.9\r\n") == 0.9f);
+    XSFLIB_CHECK(ParseTempo("0.25") == 0.25f && ParseTempo("4") == 4.0f && ParseTempo("2,5") == 2.5f);
+    for (const char* malformed : {"", " ", "0.2", "4.01", "-1", "1.1x", "x", "1 1", "nan", "inf", "0x2"})
+    {
+        XSFLIB_CHECK(!ParseTempo(malformed));
+    }
+
+    // A set's tags give the arrangement.
+    nw4r::Arrangement arrangement =
+        ArrangementFromTags({{"wsf_tracks", "11, 13-15"}, {"wsf_tempo", "1.1"}, {"wsf_var", "0=1, 17=-2"}});
+    const xsflib::psf::Variables kVariables = {{0, 1}, {17, -2}};
+    XSFLIB_CHECK(arrangement.tracks == 0xe800 && arrangement.tempo_ratio == 1.1f &&
+                 arrangement.variables == kVariables);
+
+    // Without the tags, and with malformed ones, nothing changes. Each tag counts on its own.
+    for (const Tags& tags : {Tags{}, Tags{{"wsf_tracks", "16"}, {"wsf_tempo", "5"}, {"wsf_var", "0=1 x"}}})
+    {
+        arrangement = ArrangementFromTags(tags);
+        XSFLIB_CHECK(arrangement.tracks == 0xffff && arrangement.tempo_ratio == 1.0f && arrangement.variables.empty());
+    }
+
+    arrangement = ArrangementFromTags({{"wsf_tracks", "0 1 2 x"}, {"wsf_tempo", "0.5"}});
+    XSFLIB_CHECK(arrangement.tracks == 0xffff && arrangement.tempo_ratio == 0.5f);
+}
+
+static void TestEffects()
+{
+    // The effects block follows the build (docs/wsf.md, "Archive descriptor").
+    ArchiveDescriptor d;
+    d.archive_path = "Sound/b.brsar";
+    d.microcode_path = "ax_microcode.bin";
+    d.snd_build = 20060000;
+
+    nw4r::EffectSetup reverb;
+    reverb.type = nw4r::EffectType::kReverbHi;
+    reverb.params = {std::bit_cast<uint32_t>(0.02f), std::bit_cast<uint32_t>(3.0f)};
+    nw4r::EffectSetup chorus;
+    chorus.bus = 2;
+    chorus.type = nw4r::EffectType::kChorus;
+    chorus.presets = {{1, 2, 3}, {4, 5, 6}};
+    chorus.sounds = {7, 70000};
+    d.effects = {reverb, chorus};
+    d.sends = {{12, 0, 0.25f}, {13, 1, 0.5f}};
+
+    ArchiveDescriptor dry = d;
+    dry.effects.clear();
+    dry.sends.clear();
+    const std::vector<uint8_t> raw = d.Serialize();
+    const auto back = ArchiveDescriptor::Parse(raw);
+
+    // 4 for the count, 12 + 6 * 4 for the reverb, 12 + 2 * 3 * 4 + 2 * 4 for the chorus, and 4 + 2 * 12 for the sends.
+    XSFLIB_CHECK(raw.size() == dry.Serialize().size() + 4 + 36 + 44 + 28);
+    XSFLIB_CHECK(back && back->effects.size() == 2 && back->sends.size() == 2);
+    XSFLIB_CHECK(back && back->effects[0].bus == 0 && back->effects[0].type == nw4r::EffectType::kReverbHi &&
+                 back->effects[0].params == reverb.params && back->effects[0].presets.empty() &&
+                 back->effects[0].sounds.empty());
+    XSFLIB_CHECK(back && back->effects[1].bus == 2 && back->effects[1].type == nw4r::EffectType::kChorus &&
+                 back->effects[1].presets == chorus.presets && back->effects[1].sounds == chorus.sounds);
+    XSFLIB_CHECK(back && back->sends[1].sound == 13 && back->sends[1].bus == 1 && back->sends[1].send == 0.5f);
+
+    // Only the presets' sounds follow the variables. Each sound gets its sends by bus.
+    XSFLIB_CHECK(nw4r::FollowsVariables(d.effects, 70000) && !nw4r::FollowsVariables(d.effects, 12));
+    XSFLIB_CHECK((nw4r::SendsOf(d.sends, 13) == std::array<float, 3>{0.0f, 0.5f, 0.0f}));
+    XSFLIB_CHECK((nw4r::SendsOf(d.sends, 14) == std::array<float, 3>{}));
+
+    // A descriptor without effects has neither block.
+    const auto dry_back = ArchiveDescriptor::Parse(dry.Serialize());
+
+    XSFLIB_CHECK(dry_back && dry_back->effects.empty() && dry_back->sends.empty());
+
+    // An effect of a type that the player doesn't know is skipped. One whose words don't fit its type, or whose bus
+    // isn't A, B or C, is skipped too.
+    std::vector<uint8_t> odd = raw;
+    const std::size_t first_effect = dry.Serialize().size() + 4;
+    odd[first_effect + 1] = 9;
+    const auto skipped = ArchiveDescriptor::Parse(odd);
+
+    XSFLIB_CHECK(skipped && skipped->effects.size() == 1 && skipped->effects[0].type == nw4r::EffectType::kChorus &&
+                 skipped->sends.size() == 2);
+
+    odd = raw;
+    odd[first_effect] = 3;
+
+    XSFLIB_CHECK(ArchiveDescriptor::Parse(odd) && ArchiveDescriptor::Parse(odd)->effects.size() == 1);
+
+    // Effects that run past the end of the descriptor make it unreadable.
+    XSFLIB_CHECK(!ArchiveDescriptor::Parse(std::vector<uint8_t>(raw.begin(), raw.end() - 30)).has_value());
+}
+
+static void TestEffectsBySound()
+{
+    // Bus A: a reverb for the sounds that no other effect on bus A lists, and one for sounds 5 and 6. Bus B: a chorus
+    // for sound 6 alone. Bus C: a delay whose presets sound 7 picks. Each effect shows as its type and first word.
+    using Types = std::vector<std::pair<nw4r::EffectType, uint32_t>>;
+    constexpr auto kReverb = nw4r::EffectType::kReverbHi;
+    constexpr auto kChorus = nw4r::EffectType::kChorus;
+    constexpr auto kDelay = nw4r::EffectType::kDelay;
+    nw4r::EffectSetup reverb;
+    nw4r::EffectSetup other_reverb;
+    other_reverb.params[0] = 1;
+    other_reverb.sounds = {5, 6};
+    nw4r::EffectSetup chorus;
+    chorus.bus = 1;
+    chorus.type = kChorus;
+    chorus.sounds = {6};
+    nw4r::EffectSetup delay;
+    delay.bus = 2;
+    delay.type = kDelay;
+    delay.presets = {{1}, {2}};
+    delay.sounds = {7};
+    const std::vector<nw4r::EffectSetup> setups = {reverb, other_reverb, chorus, delay};
+    const auto types_for = [&setups](uint32_t sound)
+    {
+        Types types;
+        for (const nw4r::EffectSetup& setup : nw4r::EffectsFor(setups, sound))
+        {
+            types.emplace_back(setup.type, setup.params[0]);
+        }
+
+        return types;
+    };
+
+    const Types unlisted = types_for(nw4r::kUnlistedSound);
+    const Types five = types_for(5);
+    const Types six = types_for(6);
+    const Types seven = types_for(7);
+
+    // An effect with presets counts for every sound. Its sounds pick the presets.
+    XSFLIB_CHECK((unlisted == Types{{kReverb, 0}, {kDelay, 0}}));
+    XSFLIB_CHECK((five == Types{{kReverb, 1}, {kDelay, 0}}));
+    XSFLIB_CHECK((six == Types{{kReverb, 1}, {kChorus, 0}, {kDelay, 0}}));
+    XSFLIB_CHECK(seven == unlisted && nw4r::FollowsVariables(setups, 7) && !nw4r::FollowsVariables(setups, 5));
+}
+
 int main()
 {
     TestArchiveMode();
+    TestEffects();
+    TestEffectsBySound();
+    TestArrangementTags();
     TestDescriptor();
     TestLoadSet();
     TestVersionByte();

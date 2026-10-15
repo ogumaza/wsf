@@ -83,12 +83,19 @@ Engine::Engine(ntdlib::dsp::WiiMemory& memory, ax::System& ax, const ntdlib::rsa
 {
     std::memset(memory_.At(kZeroBuffer, kZeroBufferSize), 0, kZeroBufferSize);
 
+    ax_.RegisterCallback([this] { OnAxFrame(); });
+}
+
+void Engine::OnAxFrame()
+{
     // The build of October 2006 ends no ramps after AX's frame. Its envelope ramps land on their targets in the next
     // frame (Voice::CalcAxVe), and its mix doesn't ramp.
     if (!build_.October2006())
     {
-        ax_.RegisterCallback([this] { voices_.NotifyVoiceUpdate(); });
+        voices_.NotifyVoiceUpdate();
     }
+
+    effects_.OnAxFrame(ax_, players_.empty() ? nullptr : &players_.front()->LocalVariables());
 }
 
 Engine::~Engine()
@@ -96,7 +103,7 @@ Engine::~Engine()
     ax_.RegisterCallback(nullptr);
 }
 
-SeqPlayer* Engine::StartSequence(uint32_t index)
+SeqPlayer* Engine::StartSequence(uint32_t index, const Arrangement& arrangement)
 {
     // SoundArchivePlayer's PrepareSeqImpl: the sequence file and its bank must be in the archive.
     if (index >= archive_.Sounds().size())
@@ -124,6 +131,16 @@ SeqPlayer* Engine::StartSequence(uint32_t index)
     SeqPlayer* player = players_.back().get();
     player->SetBuild(build_);
     player->Start();
+
+    // What the game sets through the sound's handle before the first tick. The tracks' volumes require the tracks that
+    // Start allocates.
+    for (const auto& [variable, value] : arrangement.variables)
+    {
+        player->SetVariable(*this, variable, value);
+    }
+
+    player->SetTrackVolume(static_cast<uint16_t>(~arrangement.tracks), 0.0f);
+    player->SetTempoRatio(arrangement.tempo_ratio);
 
     return player;
 }
@@ -240,7 +257,8 @@ bool Engine::IsBusy() const
 
 Engine::Snapshot Engine::Save() const
 {
-    Snapshot snapshot{ax_voices_.Save(), voices_.Save(), channels_, random_, global_variables_, {}, banks_.size()};
+    Snapshot snapshot{ax_voices_.Save(), voices_.Save(), channels_, random_, global_variables_, {},
+                      banks_.size(),     effects_};
     for (const std::unique_ptr<SeqPlayer>& player : players_)
     {
         snapshot.players.push_back(*player);
@@ -261,6 +279,7 @@ void Engine::Restore(const Snapshot& snapshot)
     channels_ = snapshot.channels;
     random_ = snapshot.random;
     global_variables_ = snapshot.global_variables;
+    effects_ = snapshot.effects;
     for (std::size_t i = 0; i < players_.size(); i++)
     {
         *players_[i] = snapshot.players[i];

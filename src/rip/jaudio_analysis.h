@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-// Game mode's length analysis and wave discovery for a JAudio2 game. A set of a rip's library and a mini file plays on
-// WSF's player, and ntdlib's AnalyzeGameSound watches the game's code while the sound plays
+// Game mode's length analysis and wave discovery for a JAudio game (JAudio1 or JAudio2). A set of a rip's library and a
+// mini file plays on WSF's player, and ntdlib's AnalyzeGameSound watches the game's code while the sound plays
 // (ntdlib/jaudio/game_lengths.h).
 
 #pragma once

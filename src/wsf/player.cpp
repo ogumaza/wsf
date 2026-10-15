@@ -4,6 +4,7 @@
 
 #include "wsf/player.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -19,6 +20,7 @@
 
 #include "wii/system.h"
 #include "wsf/archive_player.h"
+#include "wsf/native_effects.h"
 
 namespace wsf
 {
@@ -38,6 +40,8 @@ constexpr char kHeaderPath[] = "sys/boot.bin";
 
 struct Player::SourceSnapshot : xsflib::player::ModeSnapshot<ArchivePlayer::Snapshot, wii::System::Snapshot>
 {
+    // Game mode's models of the effects, if they play.
+    std::shared_ptr<const NativeEffects::Snapshot> native_effects;
 };
 
 Player::Player() = default;
@@ -46,6 +50,7 @@ Player::~Player() = default;
 
 void Player::Unload()
 {
+    native_effects_.reset();
     system_.reset();
     disc_.reset();
     archive_.reset();
@@ -76,6 +81,11 @@ std::vector<int16_t>& Player::Output()
     return archive_ ? archive_->Output() : system_output_;
 }
 
+uint64_t Player::NativeEffectFrames() const
+{
+    return native_effects_ ? native_effects_->Frames() : 0;
+}
+
 uint64_t Player::EmulatedCycles() const
 {
     return system_->Cpu().Cycles();
@@ -85,6 +95,7 @@ bool Player::StartSource()
 {
     if (set_.archive)
     {
+        native_effects_.reset();
         system_.reset();
         disc_.reset();
         archive_ = std::make_unique<ArchivePlayer>();
@@ -99,6 +110,7 @@ bool Player::StartSource()
     archive_.reset();
 
     // The disc: the partition's header and the set's files.
+    native_effects_.reset();
     system_.reset();
     disc_ = ntdlib::flipper::DiscFromFiles(set_.files, kHeaderPath, ntdlib::disc::kWiiMagicOffset,
                                            ntdlib::disc::kWiiMagic, 4);
@@ -112,6 +124,10 @@ bool Player::StartSource()
 
     const ProcessDescriptor& d = *set_.descriptor;
     system_->Start(d.entry, d.ios_version);
+    if (!interpret_effects_)
+    {
+        native_effects_ = NativeEffects::Attach(*system_);
+    }
     system_output_.clear();
     system_->DspRegisters().on_audio = [this](std::span<const uint8_t, 32> block)
     {
@@ -134,7 +150,17 @@ bool Player::RunStep()
         return true;
     }
 
-    if (const auto message = ntdlib::flipper::StopMessage(system_->Run(kStepCycles)))
+    // The CPU stops at each call to an effect's functions that WSF's models replace (see native_effects.h). After the
+    // call, the step goes on.
+    ntdlib::ppc::Cpu& cpu = system_->Cpu();
+    const uint64_t end = cpu.Cycles() + kStepCycles;
+    ntdlib::ppc::StopReason reason = ntdlib::ppc::StopReason::kBudget;
+    do
+    {
+        reason = system_->Run(end - std::min(end, cpu.Cycles()));
+    } while (reason == ntdlib::ppc::StopReason::kIllegal && native_effects_ && native_effects_->OnStop());
+
+    if (const auto message = ntdlib::flipper::StopMessage(reason))
     {
         return Fail(*message);
     }
@@ -149,7 +175,16 @@ bool Player::Finished() const
 
 std::shared_ptr<const Player::SourceSnapshot> Player::SaveSource(const SourceSnapshot* previous)
 {
-    return xsflib::player::SaveModes(archive_.get(), system_.get(), previous);
+    std::shared_ptr<const SourceSnapshot> saved = xsflib::player::SaveModes(archive_.get(), system_.get(), previous);
+    if (saved && native_effects_)
+    {
+        auto with_effects = std::make_shared<SourceSnapshot>(*saved);
+        with_effects->native_effects = native_effects_->Save();
+
+        return with_effects;
+    }
+
+    return saved;
 }
 
 bool Player::CanRestore(const SourceSnapshot* source) const
@@ -160,6 +195,10 @@ bool Player::CanRestore(const SourceSnapshot* source) const
 void Player::RestoreSource(const SourceSnapshot& source)
 {
     xsflib::player::RestoreModes(archive_.get(), system_.get(), source);
+    if (native_effects_ && source.native_effects)
+    {
+        native_effects_->Restore(*source.native_effects);
+    }
 }
 
 } // namespace wsf

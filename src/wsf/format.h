@@ -16,6 +16,9 @@
 #include "xsflib/psf/psf.h"
 #include "xsflib/psf/set.h"
 
+#include "nw4r/arrangement.h"
+#include "nw4r/effect_setup.h"
+
 namespace wsf
 {
 
@@ -35,6 +38,29 @@ constexpr uint32_t kOutputStereo = xsflib::psf::kDescriptorOutputStereo;
 // The PSF container's tags, and the reader that loads a set's files (xsflib::psf).
 using Tags = xsflib::psf::Tags;
 using FileReader = xsflib::psf::FileReader;
+
+// The tags that arrange a sequence in archive mode (docs/wsf.md, "Tags"): the tracks that play, the tempo ratio and the
+// variables that the sequence starts with. Game mode ignores them.
+constexpr char kTracksTag[] = "wsf_tracks";
+constexpr char kTempoTag[] = "wsf_tempo";
+constexpr char kVariablesTag[] = "wsf_var";
+
+// Parses a wsf_tracks tag: one or more track numbers from 0 to 15 and ranges such as 8-14, separated by commas or white
+// space, line breaks included. Each number is decimal. Returns the tracks as bits, bit N for track N. Returns nullopt
+// if any part is malformed or out of range, or if there's no track.
+std::optional<uint16_t> ParseTracks(std::string_view text);
+
+// The wsf_tracks tag for `tracks`: the tracks in increasing order, separated by ", ", with each run of three or more as
+// a range ("0, 1, 8-14").
+std::string FormatTracks(uint16_t tracks);
+
+// Parses a wsf_tempo tag: a decimal number from 0.25 to 4, such as 1.1 or 0.9, with '.' or ',' before its decimals.
+// White space around it is ignored. Returns the ratio rounded to single precision, or nullopt if the text is malformed
+// or out of range.
+std::optional<float> ParseTempo(std::string_view text);
+
+// The arrangement that a set's tags give. A tag that's missing, malformed or out of range changes nothing.
+nw4r::Arrangement ArrangementFromTags(const Tags& tags);
 
 // The process descriptor: the reserved area of a game-mode set (docs/wsf.md, "Process descriptor").
 struct ProcessDescriptor
@@ -77,6 +103,11 @@ struct ArchiveDescriptor
     std::string archive_path;       // FILE chunk holding the sound archive (.brsar)
     std::string microcode_path;     // FILE chunk holding AX's microcode (4,096 big-endian words)
     uint32_t snd_build = 0;         // the game's build of NW4R SND, by its date (YYYYMMDD), or 0 if unknown
+
+    // The effects on the aux buses and the sends that the game sets on sounds (docs/wsf.md, "Effects"), after the
+    // build. A descriptor without them gives none. Parse skips an effect of a type that it doesn't know.
+    std::vector<nw4r::EffectSetup> effects;
+    std::vector<nw4r::SoundSend> sends;
 };
 
 // The builder of a program's MEM, FILE and SND chunks (xsflib::psf).
@@ -97,6 +128,20 @@ struct DriverBlock
     static constexpr uint32_t kVersionOffset = 0x04;
     static constexpr uint32_t kStatusOffset = 0x08;
     static constexpr uint32_t kSoundOffset = 0x0c;
+
+    // The effects in NW4R SND's driver's block: their number, and 4 effects of 8 words each (the class's SetParam is
+    // the fifth word, and the number of words in its parameters the sixth). Then the build of AXFX, and 4 effects of 4
+    // words each: the class (nw4r::EffectType), and its StartUp, Shutdown and UpdateBuffer. The player's models of the
+    // effects read them (see wsf/native_effects.h).
+    static constexpr uint32_t kEffectCountOffset = 0xdc;
+    static constexpr uint32_t kEffectsOffset = 0xec;
+    static constexpr uint32_t kEffectSize = 32;
+    static constexpr uint32_t kEffectSetParamOffset = 0x10;
+    static constexpr uint32_t kEffectWordsOffset = 0x14;
+    static constexpr uint32_t kAxfxBuildOffset = 0x26c;
+    static constexpr uint32_t kNativeOffset = 0x270;
+    static constexpr uint32_t kNativeSize = 16;
+    static constexpr uint32_t kMaxEffects = 4;
 };
 
 // What xsflib::psf's set loader requires of WSF: its descriptors, version byte, name and driver block.

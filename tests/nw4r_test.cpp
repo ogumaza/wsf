@@ -2,8 +2,8 @@
 
 // NW4R SND model tests, on the AX model with no DSP: the parameter blocks a note's channel sets up, the ramps from
 // frame to frame, the release and the end of a channel, the voices NW4R SND drops by priority when all are in use, a
-// short sequence played from an archive, what the builds of 2008 and 2009 do differently, the loops the ripper's length
-// analysis counts, snapshots of the model, and the end of a wave without the DSP.
+// short sequence played from an archive, a sequence in an arrangement, what the builds of 2008 and 2009 do differently,
+// the loops the ripper's length analysis counts, snapshots of the model, and the end of a wave without the DSP.
 
 #include <algorithm>
 #include <array>
@@ -23,11 +23,13 @@
 #include "ntdlib/nwsnd/util.h"
 #include "ntdlib/rsar/formats.h"
 #include "ntdlib/testing/rsar_files.h"
+#include "xsflib/psf/psf.h"
 #include "xsflib/testing/check.h"
 
 #include "ax/pb.h"
 #include "ax/system.h"
 #include "ax/voice.h"
+#include "nw4r/arrangement.h"
 #include "nw4r/driver.h"
 #include "nw4r/engine.h"
 #include "nw4r/rsar_options.h"
@@ -301,6 +303,92 @@ void TestSequence()
 
     Check(!model.engine.IsBusy() && frames >= 167 && frames <= 170,
           "the sequence ends after its note (" + std::to_string(frames) + " frames)");
+}
+
+// A sequence in an arrangement (docs/wsf.md, "Tags"): the tracks left out play at a volume of 0, the tempo ratio
+// changes how fast the ticks go, and the variables are set before the first tick.
+void TestArrangement()
+{
+    // Track 0 opens track 1 at 11 and plays key 60 at velocity 100. Track 1 plays key 64 at velocity 50. Each note
+    // lasts 48 ticks and has the fastest release.
+    const Bytes kTwoTracks = {0x88, 0x01, 0x00, 0x00, 0x0b, 0xd3, 0x7f, 0x3c, 0x64,
+                              0x30, 0xff, 0xd3, 0x7f, 0x40, 0x32, 0x30, 0xff};
+
+    // The volumes of the voices that play after the first frame, from the lowest.
+    const auto volumes = [&kTwoTracks](uint16_t tracks)
+    {
+        Model model(kTwoTracks, kBuild2007, 3);
+        model.engine.StartSequence(0, {.tracks = tracks});
+        model.RunFrame();
+        model.ax.StartFrame();
+        std::vector<uint16_t> found;
+        for (uint32_t i = 0; i < model.ax.VoiceCount(); i++)
+        {
+            const ax::Pb pb = model.ax.ReadPb(i);
+            if (pb.state == 1)
+            {
+                found.push_back(pb.ve.current_volume);
+            }
+        }
+
+        model.ax.FinishFrame();
+        model.engine.FrameProcess();
+        std::sort(found.begin(), found.end());
+
+        return found;
+    };
+
+    const uint16_t kLoud = ExpectedVolume(100);
+    const uint16_t kQuiet = ExpectedVolume(50);
+    Check(volumes(0xffff) == std::vector<uint16_t>{kQuiet, kLoud}, "both tracks play");
+    Check(volumes(0x0001) == std::vector<uint16_t>{0, kLoud}, "track 1 plays at a volume of 0");
+    Check(volumes(0x0002) == std::vector<uint16_t>{0, kQuiet}, "track 0 plays at a volume of 0");
+
+    // A note of 48 ticks and the end. At the default tempo it lasts about 167 frames.
+    const auto frames = [](float ratio)
+    {
+        Model model({0xd3, 0x7f, 0x3c, 0x64, 0x30, 0xff}, kBuild2007);
+        model.engine.StartSequence(0, {.tempo_ratio = ratio});
+        int ran = 0;
+        while (model.engine.IsBusy() && ran < 1000)
+        {
+            model.RunFrame();
+            ran++;
+        }
+
+        return ran;
+    };
+
+    const int normal = frames(1.0f);
+    const int fast = frames(2.0f);
+    const int slow = frames(0.5f);
+    Check(fast >= 84 && fast <= 86 && slow >= 334 && slow <= 336 && normal >= 167 && normal <= 170,
+          "the tempo ratio scales the ticks (" + std::to_string(slow) + ", " + std::to_string(normal) + " and " +
+              std::to_string(fast) + " frames)");
+
+    // Track 0 compares variable 0 with 1, and jumps to 16 if they're equal. There it plays key 64. Otherwise it plays
+    // key 60.
+    const Bytes kBranch = {0xf0, 0x90, 0x00, 0x00, 0x01, 0xa2, 0x89, 0x00, 0x00, 0x10, 0xd3,
+                           0x7f, 0x3c, 0x64, 0x30, 0xff, 0xd3, 0x7f, 0x40, 0x64, 0x30, 0xff};
+    const auto ratio = [](const xsflib::psf::Variables& variables, Model& model)
+    {
+        model.engine.StartSequence(0, {.variables = variables});
+        model.RunFrame();
+        model.ax.StartFrame();
+        const ax::Pb pb = model.FirstPb();
+        model.ax.FinishFrame();
+        model.engine.FrameProcess();
+
+        return ax::Join(pb.src.ratio_hi, pb.src.ratio_lo) / 65536.0;
+    };
+
+    Model unset(kBranch, kBuild2007);
+    Model set(kBranch, kBuild2007);
+    const double low = ratio({}, unset);
+    const double high = ratio({{0, 1}, {16, 3}, {31, -7}}, set);
+    Check(std::abs(high / low - std::pow(2.0, 4.0 / 12.0)) < 0.001, "the first tick reads the player's variable");
+    Check(set.engine.GlobalVariables()[0] == 3 && set.engine.GlobalVariables()[15] == -7,
+          "the global variables are set");
 }
 
 // The voices' PBs after the first frame of a sequence of `commands` played under `build`, and the model to play on.
@@ -973,6 +1061,7 @@ int main()
         TestLastStep();
         TestDrop();
         TestSequence();
+        TestArrangement();
         TestSweepPitch();
         TestTempo();
         TestVelocityRange();

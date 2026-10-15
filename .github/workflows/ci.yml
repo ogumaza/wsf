@@ -23,7 +23,7 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.timeout-minutes || 60 }}
     strategy:
       fail-fast: false
       matrix:
@@ -37,6 +37,7 @@ jobs:
             cmake: -A Win32 -T ClangCL
             foobar2000: true
             xmplay: true
+            timeout-minutes: 90
           - name: macOS ARM64 (Apple Clang)
             os: macos-15
             foobar2000: true

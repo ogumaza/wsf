@@ -109,8 +109,10 @@ std::optional<xsflib::rip::Timing> AnalyzeJAudioSound(const std::vector<uint8_t>
     }
 
     Machine machine(player, *player.GameSystem());
+    // For a JAudio1 game, the sound's ID distinguishes a sequence from an effect.
     return ntdlib::jaudio::AnalyzeGameSound(machine, kJAudioZ2Address + ntdlib::flipper::z2::kHandleOffset,
-                                            profile.watch, JAudioLengthRules(), found, lookups_sound);
+                                            WatchOf(profile, sound_id), JAudioLengthRules(), found, lookups_sound,
+                                            sound_id);
 }
 
 } // namespace wsf::rip

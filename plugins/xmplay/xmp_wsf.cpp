@@ -39,8 +39,8 @@ struct Traits
     // largest archives are hundreds of megabytes.
     static constexpr uint64_t kMaxFileSize = uint64_t{1} << 30;
 
-    // WSF has no tags that set how a file plays.
-    static constexpr std::array<const char*, 0> kPlaybackTags = {};
+    // The arrangement that a rip of an archive may set: the tracks, the tempo and the variables.
+    static constexpr std::array<const char*, 3> kPlaybackTags = {wsf::kTracksTag, wsf::kTempoTag, wsf::kVariablesTag};
 
     static constexpr const char* kVersion = WSF_VERSION;
     static constexpr const char* kAbout =

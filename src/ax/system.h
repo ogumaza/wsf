@@ -3,8 +3,8 @@
 // The CPU side of AX, the audio library in the RVL SDK. The model follows the build that Wii Sports links (December
 // 2006). The model covers the 96 voices and their priorities, the copy of the voices' parameter blocks into main memory
 // each frame, the depop block and the command list that controls what the microcode mixes. Archive mode runs this model
-// instead of the game's code. The model mixes in stereo. With no aux effects, its command list never mixes the aux
-// buses.
+// instead of the game's code. The model mixes in stereo. Its command list mixes an aux bus while the bus has a
+// callback (see RegisterAuxCallback).
 //
 // The model also follows the build of October 2006 (Build::kOctober2006). WarioWare: Smooth Moves links it. That build
 // has 64 voices and a PB of another layout (see LoadPbOctober2006). The build counts other DSP cycles for each voice
@@ -23,6 +23,7 @@
 
 #include "ax/pb.h"
 #include "ax/voice.h"
+#include "axfx/axfx.h"
 
 namespace wsf::ax
 {
@@ -32,6 +33,7 @@ namespace layout
 {
 
 constexpr ntdlib::PAddr kCompressorTable = 0x003ab880; // 0xfc0 bytes
+constexpr ntdlib::PAddr kAuxBuffers = 0x0042b100;      // the rings of the aux buses A, B and C (see kAuxRingSize)
 constexpr ntdlib::PAddr kCommandLists = 0x0042e280;    // two lists of 0x80 bytes
 constexpr ntdlib::PAddr kRemoteBuffers = 0x0042e3c0;   // 4 rings of 180 samples
 constexpr ntdlib::PAddr kSurroundBuffer = 0x0042e960;  // 0x300 bytes
@@ -48,7 +50,18 @@ constexpr uint32_t kOutputBufferSize = kSamplesPerFrame * 4;
 constexpr uint32_t kItdBufferSize = 0x40;
 constexpr uint32_t kUpdateBufferSize = 0x100;
 
+// Each aux bus has a ring of three frames (__AXBufferAuxA, B and C). A frame holds the three channels of the stereo
+// mode, 96 32-bit samples each, in kAuxFrameSize bytes. A and B leave room for a fourth channel for surround.
+constexpr uint32_t kAuxChannelSize = kSamplesPerFrame * 4;
+constexpr uint32_t kAuxFrameSize = 3 * kAuxChannelSize;
+constexpr std::array<uint32_t, 3> kAuxFrameStride = {4 * kAuxChannelSize, 4 * kAuxChannelSize, kAuxFrameSize};
+constexpr std::array<ntdlib::PAddr, 3> kAuxRings = {kAuxBuffers, kAuxBuffers + 3 * kAuxFrameStride[0],
+                                                    kAuxBuffers + 3 * (kAuxFrameStride[0] + kAuxFrameStride[1])};
+
 } // namespace layout
+
+// The aux buses: A, B and C.
+constexpr int kAuxBusCount = 3;
 
 // The input for one DSP frame: the command list to mail to the DSP, and the buffer that the list's OUTPUT command fills
 // with 96 stereo samples (16-bit, big-endian, right then left).
@@ -107,6 +120,22 @@ public:
         frame_callback_ = std::move(callback);
     }
 
+    // An aux bus's callback. It processes the bus's frame in place.
+    using AuxCallback = std::function<void(axfx::AuxFrame& frame)>;
+
+    // AXRegisterAuxACallback, B and C (0x8010500c, 0x80105070 and 0x801050d4; October 2006, 0x8002ee88, 0x8002ee94
+    // and 0x8002eea0). While a bus has a callback, the command list has the DSP mix the bus: it writes the bus's frame
+    // to its ring, and mixes back the frame that the callback processed. An empty callback stops that. In the build of
+    // December 2006, it also marks the ring's three frames to be cleared (__clearAuxA and so on).
+    void RegisterAuxCallback(int bus, AuxCallback callback);
+
+    // AXSetAuxAReturnVolume, B and C (0x80105be8, 0x80105bf0 and 0x80105bf8): the volume at which the DSP mixes the
+    // bus's processed frame back, from the next command list built.
+    void SetAuxReturnVolume(int bus, uint16_t volume)
+    {
+        aux_volume_[bus] = volume;
+    }
+
     // The first part of __AXOutNewFrame (0x80105c00). AX runs __AXOutNewFrame every frame from the audio interface
     // interrupt. This part copies the voices' changes into their PBs in main memory and drops voices that would push
     // the frame over its DSP cycle budget. It also updates the depop block and returns the command list built in the
@@ -145,6 +174,9 @@ private:
     void DepopVoice(const Pb& pb);
     void PrintStudio();
     void ServiceCallbackStack();
+    void ProcessAux();
+    ntdlib::PAddr AuxFrameAddress(int bus, uint32_t position) const;
+    void WriteAuxCommands(uint16_t first_command, uint32_t cycles);
     uint32_t CommandListAddress();
     void WriteCommand(uint16_t word);
     void WriteCommand32(uint32_t value);
@@ -179,6 +211,15 @@ private:
     uint32_t command_list_cycles_ = 0;
     std::array<ntdlib::PAddr, 2> list_output_{}; // the output buffer named in each list
     uint16_t master_volume_ = kMaxVolume;
+
+    // The aux buses (__AXAuxInit, 0x8010495c): their callbacks, return volumes and the frames to clear, and the places
+    // in the rings where the DSP writes, where it reads back and where the callbacks process.
+    std::array<AuxCallback, kAuxBusCount> aux_callbacks_;
+    std::array<uint16_t, kAuxBusCount> aux_volume_{kMaxVolume, kMaxVolume, kMaxVolume};
+    std::array<std::array<bool, 3>, kAuxBusCount> aux_clear_{};
+    uint32_t aux_dsp_write_ = 0;
+    uint32_t aux_dsp_read_ = 1;
+    uint32_t aux_cpu_ = 2;
 
     uint32_t output_frame_ = 0;
     int32_t remote_position_ = 0; // the microcode's write position in the Wii Remote rings

@@ -4,15 +4,15 @@ foobar2000 input component for WSF rips (`.miniwsf`). It uses the same player co
 the game's AX microcode on an emulated GameCube/Wii DSP. In game mode, the game's sound code drives it on an emulated
 Wii. In archive mode, WSF's model of the SDK's sound player drives it.
 
-**Status:** the component builds with Apple Clang for foobar2000 on macOS. It's set up to build with clang-cl (or MSVC)
-for 32-bit and 64-bit foobar2000 on Windows. The Windows build hasn't been tested in foobar2000 yet. `ctest` covers
-the player core.
+**Status:** the component builds with Apple Clang for foobar2000 on macOS. It builds with clang-cl for 32-bit and
+64-bit foobar2000 on Windows. In tests on Windows, 64-bit and 32-bit foobar2000 2.26.1 load, decode, play and seek rips
+of both modes. `ctest` covers the player core.
 
 ## Features
 
 - Like kode54's PSF-family components, the component shows tags as metadata: `game` as album, `year` as date, and
   `replaygain_*` as ReplayGain. Tags can be edited. Editing rewrites the tag area and keeps `_lib`, `length`, `fade`,
-  `volume` and `utf8`.
+  `volume` and `utf8`, and the tags that arrange a sequence: `wsf_tracks`, `wsf_tempo` and `wsf_var`.
 - Length and fade come from the `length` and `fade` tags. Files without a length tag play for the default length and
   fade. They stop early when the sound ends by itself.
 - Advanced preferences › Decoding › WSF decoder: default length and fade, endless playback, and rendering ahead. Endless
@@ -38,11 +38,11 @@ unpacked somewhere (macOS's `tar -xf SDK-<date>.7z` unpacks it).
 
 ```
 cmake -S . -B build-fb2k -DCMAKE_BUILD_TYPE=Release -DFOOBAR2000_SDK_DIR=/path/to/SDK \
-  "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
 cmake --build build-fb2k --target foo_input_wsf
 ```
 
-This produces `build-fb2k/plugins/foobar2000/foo_input_wsf.component`, a bundle for Apple Silicon and Intel Macs. It
+This produces `build-fb2k/plugins/foobar2000/foo_input_wsf.component`, a bundle for Apple Silicon Macs. It
 runs on macOS 11 or later. The SDK's projects have the same minimum. Without the two `CMAKE_OSX_` options, the bundle
 only runs on the architecture of the Mac that built it. For a `.fb2k-component`, put the bundle in a `mac` folder inside
 a zip. The bundle is signed ad hoc. It has no Developer ID signature and isn't notarized.
@@ -61,7 +61,7 @@ ClangCL` and put that DLL at the top level of the zip. With the 64-bit DLL in `p
 `tar -a -c -f foo_input_wsf.zip -C pkg x64`. Add `foo_input_wsf.dll` after `x64` for a 32-bit DLL in `pkg` itself. Then
 rename the zip to `foo_input_wsf.fb2k-component`. Windows PowerShell's `Compress-Archive` writes the folder's name with
 a backslash. The zip format doesn't allow that. foobar2000 doesn't recognize such a package. Omitting `-T ClangCL`
-selects MSVC. MSVC should produce the same audio. Its build runs more slowly.
+selects MSVC. MSVC isn't supported.
 
 The build compiles the SDK's `pfc`, `foobar2000/SDK` and `foobar2000/foobar2000_component_client` sources directly. On
 Windows it links `foobar2000/shared/shared-<arch>.lib` (or `shared.lib`). On macOS it compiles the parts of

@@ -37,6 +37,7 @@ constexpr uint32_t kHollywoodVersion = 0x80003138;
 constexpr uint32_t kIosVersion = 0x80003140;
 constexpr uint32_t kGameId = 0x80003180;
 constexpr uint32_t kApplicationType = 0x80003184;
+constexpr uint32_t kRequestedIosVersion = 0x80003188;
 
 } // namespace low
 
@@ -93,6 +94,9 @@ void System::LoadLowMemory(uint32_t ios_version)
     put32(low::kIpcBufferHi, kIpcBufferHi);
     put32(low::kHollywoodVersion, 0x00000011);
     put32(low::kIosVersion, ios_version << 16);
+    // The IOS that the game's TMD requests. The OSInit of a later SDK stops the game with OSFatal unless the running
+    // IOS is that one, at that revision or later. New Play Control! Donkey Kong Jungle Beat has such an OSInit.
+    put32(low::kRequestedIosVersion, ios_version << 16);
     std::copy(header.begin(), header.begin() + 4, memory_.At(ntdlib::dsp::ToPhysical(low::kGameId), 4));
     put32(low::kApplicationType, 0x80000000);
 }

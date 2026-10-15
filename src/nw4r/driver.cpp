@@ -53,26 +53,6 @@ int MixDelta(uint16_t from, uint16_t to)
     return (to - from) / ax::kSamplesPerFrame;
 }
 
-// Converts a float to an unsigned integer like the game's runtime (__cvt_fp2unsigned, 0x800b1c1c): 0 below 0, all ones
-// from 2^32 (and for NaN), and truncated between.
-uint32_t ToUnsigned(float value)
-{
-    if (value < 0.0f)
-    {
-        return 0;
-    }
-    if (!(value < 4294967296.0f))
-    {
-        return 0xffffffff;
-    }
-    if (value < 2147483648.0f)
-    {
-        return static_cast<uint32_t>(static_cast<int32_t>(value));
-    }
-
-    return static_cast<uint32_t>(static_cast<int32_t>(value - 2147483648.0f)) + 0x80000000u;
-}
-
 // A mix gain as AX's volume (CalcMixVolume). In AX's volume, 0x8000 is 1.
 uint16_t MixVolume(float volume)
 {
@@ -1218,9 +1198,14 @@ void Voice::SetParam(const ntdlib::nwsnd::RevolutionPolicy::ChannelVoiceParam& p
     SetBiquadFilter(param.biquad_type, param.biquad_value);
     SetMainOutVolume(param.main_out_volume);
     SetMainSend(param.main_send);
+
+    // The game adds the sound's sends to the track's sends (SeqTrack::UpdateChannelParam; Animal Crossing: City Folk,
+    // 0x802682b4). The channel then passes the sums on. The model adds them here instead. The sums don't change: each
+    // of the game's other terms is 0.
+    const std::array<float, ax::kAuxBusCount>& sends = engine_->SoundSends();
     for (std::size_t bus = 0; bus < param.fx_send.size(); bus++)
     {
-        SetFxSend(static_cast<int>(bus), param.fx_send[bus]);
+        SetFxSend(static_cast<int>(bus), param.fx_send[bus] + sends[bus]);
     }
 }
 

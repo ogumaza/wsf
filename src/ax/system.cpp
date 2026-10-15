@@ -49,6 +49,7 @@ enum Command : uint16_t
     kCommandSetup = 0,
     kCommandAddToLr = 1,
     kCommandProcess = 4,
+    kCommandMixAuxA = 5, // B and C follow
     kCommandCompressor = 10,
     kCommandOutput = 11,
     kCommandWmOutput = 13,
@@ -60,6 +61,7 @@ enum Command : uint16_t
 enum CommandOctober2006 : uint16_t
 {
     kCommandAfterProcessOctober2006 = 5,
+    kCommandMixAuxAOctober2006 = 6, // B and C follow
     kCommandCompressorOctober2006 = 11,
     kCommandOutputOctober2006 = 12,
     kCommandWmOutputOctober2006 = 14,
@@ -211,8 +213,15 @@ void System::Init(Build build)
         }
     }
 
-    // __AXSPBInit (0x80106648) and __AXClInit (0x80105b6c).
+    // __AXSPBInit (0x80106648), __AXAuxInit (0x8010495c) and __AXClInit (0x80105b6c). __AXAuxInit clears the first
+    // frame of each ring. Main memory starts cleared.
     depop_ = {};
+    aux_callbacks_ = {};
+    aux_volume_ = {kMaxVolume, kMaxVolume, kMaxVolume};
+    aux_clear_ = {};
+    aux_dsp_write_ = 0;
+    aux_dsp_read_ = 1;
+    aux_cpu_ = 2;
     command_list_position_ = 0;
     command_list_write_ = layout::kCommandLists;
     master_volume_ = kMaxVolume;
@@ -326,8 +335,8 @@ Frame System::StartFrame()
 
 void System::FinishFrame()
 {
-    // With no aux callbacks, __AXProcessAux has nothing to do.
     ServiceCallbackStack();
+    ProcessAux();
     if (frame_callback_)
     {
         frame_callback_();
@@ -349,6 +358,84 @@ void System::FinishFrame()
 
     NextFrame(layout::kSurroundBuffer, layout::kOutputBuffers + output_frame_ * layout::kOutputBufferSize, remote);
     output_frame_ = (output_frame_ + 1) & 1;
+}
+
+void System::RegisterAuxCallback(int bus, AuxCallback callback)
+{
+    // The build of October 2006 marks nothing for clearing.
+    if (!callback && build_ != Build::kOctober2006)
+    {
+        aux_clear_[bus] = {true, true, true};
+    }
+
+    aux_callbacks_[bus] = std::move(callback);
+}
+
+void System::ProcessAux()
+{
+    // __AXProcessAux (0x80104c60; October 2006, 0x8002eba4). Each bus with a callback processes the frame that the DSP
+    // wrote two frames ago. The DSP mixes that frame back in the next frame. Without a callback, a frame marked for
+    // clearing is cleared. A callback registered later then starts from silence. Then the three places move on.
+    for (int bus = 0; bus < kAuxBusCount; bus++)
+    {
+        const ntdlib::PAddr address = AuxFrameAddress(bus, aux_cpu_);
+        uint8_t* bytes = memory_->At(address, layout::kAuxFrameSize);
+        if (aux_callbacks_[bus])
+        {
+            axfx::AuxFrame frame;
+            for (int channel = 0; channel < axfx::kChannelCount; channel++)
+            {
+                for (int i = 0; i < kSamplesPerFrame; i++)
+                {
+                    frame.channels[channel][i] = static_cast<int32_t>(
+                        xsflib::LoadBe32(bytes + channel * layout::kAuxChannelSize + static_cast<uint32_t>(i) * 4));
+                }
+            }
+
+            aux_callbacks_[bus](frame);
+            for (int channel = 0; channel < axfx::kChannelCount; channel++)
+            {
+                for (int i = 0; i < kSamplesPerFrame; i++)
+                {
+                    xsflib::StoreBe32(bytes + channel * layout::kAuxChannelSize + static_cast<uint32_t>(i) * 4,
+                                      static_cast<uint32_t>(frame.channels[channel][i]));
+                }
+            }
+        }
+        else if (aux_clear_[bus][aux_cpu_])
+        {
+            std::memset(memory_->At(address, layout::kAuxFrameStride[bus]), 0, layout::kAuxFrameStride[bus]);
+            aux_clear_[bus][aux_cpu_] = false;
+        }
+    }
+
+    aux_dsp_write_ = (aux_dsp_write_ + 1) % 3;
+    aux_dsp_read_ = (aux_dsp_read_ + 1) % 3;
+    aux_cpu_ = (aux_cpu_ + 1) % 3;
+}
+
+ntdlib::PAddr System::AuxFrameAddress(int bus, uint32_t position) const
+{
+    return layout::kAuxRings[bus] + position * layout::kAuxFrameStride[bus];
+}
+
+void System::WriteAuxCommands(uint16_t first_command, uint32_t cycles)
+{
+    // __AXNextFrame's commands for the aux buses in stereo: for each bus with a callback, the return volume, the frame
+    // that the DSP writes the bus to, and the processed frame that it mixes back.
+    for (int bus = 0; bus < kAuxBusCount; bus++)
+    {
+        if (!aux_callbacks_[bus])
+        {
+            continue;
+        }
+
+        WriteCommand(static_cast<uint16_t>(first_command + bus));
+        WriteCommand(aux_volume_[bus]);
+        WriteCommand32(ntdlib::dsp::ToCached(AuxFrameAddress(bus, aux_dsp_write_)));
+        WriteCommand32(ntdlib::dsp::ToCached(AuxFrameAddress(bus, aux_dsp_read_)));
+        command_list_cycles_ += cycles;
+    }
 }
 
 void System::PushCallbackStack(Voice* voice)
@@ -838,8 +925,8 @@ void System::WriteCommand32(uint32_t value)
 void System::NextFrame(ntdlib::PAddr surround, ntdlib::PAddr output,
                        const std::array<ntdlib::PAddr, kRemoteCount>& remote)
 {
-    // __AXNextFrame (0x801051ac) in stereo, with the compressor on and no aux callbacks. The cycle counts are AX's
-    // estimates. SyncPbs uses them.
+    // __AXNextFrame (0x801051ac) in stereo, with the compressor on. The cycle counts are AX's estimates. SyncPbs uses
+    // them.
     list_output_[(command_list_write_ - layout::kCommandLists) / layout::kCommandListSize] = output;
 
     if (build_ == Build::kOctober2006)
@@ -861,6 +948,7 @@ void System::NextFrame(ntdlib::PAddr surround, ntdlib::PAddr output,
 
     WriteCommand(kCommandProcess);
     WriteCommand32(ntdlib::dsp::ToCached(layout::kPbs));
+    WriteAuxCommands(kCommandMixAuxA, 2235);
 
     WriteCommand(kCommandCompressor);
     WriteCommand(kCompressorThreshold);
@@ -902,6 +990,7 @@ void System::NextFrameOctober2006(ntdlib::PAddr surround, ntdlib::PAddr output,
     WriteCommand(kCommandProcess);
     WriteCommand32(ntdlib::dsp::ToCached(layout::kPbs));
     WriteCommand(kCommandAfterProcessOctober2006);
+    WriteAuxCommands(kCommandMixAuxAOctober2006, 1249);
 
     WriteCommand(kCommandCompressorOctober2006);
     WriteCommand(kCompressorThreshold);

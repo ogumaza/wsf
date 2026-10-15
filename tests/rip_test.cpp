@@ -2,11 +2,14 @@
 
 // Tests the ripper's choice of music (rip::IsMusic) on an archive of sounds and players that
 // ntdlib/testing/rsar_files.h builds. Also tests the length analysis on sequences in which one track plays while
-// another polls or counts a variable or marks beats for the game. TestLibraryNames checks the names of libraries in a
-// folder that holds earlier rips (rip::LibraryName).
+// another polls or counts a variable or marks beats for the game, and on a sequence in an arrangement. TestLibraryNames
+// checks the names of libraries in a folder that holds earlier rips (rip::LibraryName). TestJac reads a Jac game's
+// bank file and sequence index, made up in the formats of Pikmin's files. It also checks a piece that plays in parts.
+// TestPikmin2Sounds lists Pikmin 2's sounds from files made up in the game's formats.
 
 #include "rip/rip.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -17,13 +20,18 @@
 #include <system_error>
 #include <vector>
 
+#include "ntdlib/jaudio/wave_system.h"
 #include "ntdlib/rsar/formats.h"
 #include "ntdlib/sound_build.h"
+#include "ntdlib/testing/jaudio_files.h"
 #include "ntdlib/testing/rsar_files.h"
+#include "xsflib/binary.h"
+#include "xsflib/bytes.h"
 #include "xsflib/rip/file_names.h"
 #include "xsflib/rip/tool.h"
 #include "xsflib/testing/check.h"
 
+#include "nw4r/arrangement.h"
 #include "nw4r/rsar_options.h"
 #include "nw4r/util.h"
 
@@ -41,15 +49,15 @@ namespace fs = std::filesystem;
 namespace
 {
 
-// The length analysis of a sequence of `commands`, with the tracks in the mask `tracks`, in an archive that
-// ntdlib/testing/rsar_files.h builds. The archive's waves loop unless `loop` is false, and play at `sample_rate` Hz.
-// The model can't drive an empty microcode. The analyzer then runs the model alone. A frame then has sound while any
-// note plays.
+// The length analysis of a sequence of `commands` in `arrangement`, with the tracks in the mask `tracks`, in an archive
+// that ntdlib/testing/rsar_files.h builds. The archive's waves loop unless `loop` is false, and play at `sample_rate`
+// Hz. The model can't drive an empty microcode. The analyzer then runs the model alone. A frame then has sound while
+// any note plays.
 std::optional<rip::Timing> Measure(const Bytes& commands, uint32_t tracks, bool loop = true,
-                                   uint16_t sample_rate = 32000)
+                                   uint16_t sample_rate = 32000, const nw4r::Arrangement& arrangement = {})
 {
     const rip::LengthAnalyzer analyzer(MakeArchive(MakeSequence(commands), 0, tracks, loop, sample_rate),
-                                       ntdlib::Microcode{}, nw4r::SndBuild{20070608});
+                                       ntdlib::Microcode{}, nw4r::SndBuild{20070608}, arrangement);
     return analyzer.Analyze(0);
 }
 
@@ -288,6 +296,16 @@ void TestInnerLoops()
     CheckTiming("an inner loop doesn't hide the notes of the loop around it", counted, 490, 510, 10000);
 }
 
+void TestArrangement()
+{
+    // Track 0 plays a note of 24 ticks over and over (from 6). Two loops take 500 ms, and half as long at twice the
+    // tempo. The fade stays the same.
+    const Bytes kLoop = {0xD1, 0x7F, 0xD2, 0x7F, 0xD3, 0x7F, 60, 127, 24, 0x89, 0x00, 0x00, 6, 0xFF};
+    CheckTiming("two loops of 24 ticks", Measure(kLoop, 1), 490, 510, 10000);
+    CheckTiming("two loops of 24 ticks at twice the tempo", Measure(kLoop, 1, true, 32000, {.tempo_ratio = 2.0f}), 240,
+                260, 10000);
+}
+
 // Tests the ripper's choice of music (rip::IsMusic).
 void TestIsMusic()
 {
@@ -381,6 +399,218 @@ void TestLibraryNames()
     fs::remove_all(folder, ec);
 }
 
+// Appends `value` to `data`, big-endian.
+void Put32(std::vector<uint8_t>& data, uint32_t value)
+{
+    uint8_t word[4];
+    xsflib::StoreBe32(word, value);
+    data.insert(data.end(), word, word + 4);
+}
+
+// Whether `read` throws xsflib::FormatError.
+template <typename Read>
+bool ThrowsFormatError(const Read& read)
+{
+    try
+    {
+        read();
+    }
+    catch (const xsflib::FormatError&)
+    {
+        return true;
+    }
+
+    return false;
+}
+
+// Tests the readers of a Jac game's bank file and sequence index (rip::ReadJacWaveSystems, rip::ReadJacSounds).
+void TestJac()
+{
+    // A bank file with three wave systems' entries: none for system 0, and a wave system for each of 1 and 2. It has no
+    // banks.
+    const std::vector<uint8_t> one = ntdlib::testing::jaudio_files::WaveSystemFile(1, 2, "one_0.aw");
+    const std::vector<uint8_t> two = ntdlib::testing::jaudio_files::WaveSystemFile(2, 1, "two_0.aw");
+    constexpr uint32_t kList = 0x10, kSystems = 3;
+    const uint32_t first = kList + kSystems * 8;
+    std::vector<uint8_t> banks;
+    for (const uint32_t word : {kList, kSystems, first, 0u, 0u, 0u, first, uint32_t(one.size()),
+                                first + uint32_t(one.size()), uint32_t(two.size())})
+    {
+        Put32(banks, word);
+    }
+    banks.insert(banks.end(), one.begin(), one.end());
+    banks.insert(banks.end(), two.begin(), two.end());
+
+    const std::vector<ntdlib::jaudio::WaveSystem> systems = rip::ReadJacWaveSystems(banks);
+    Check(systems.size() == 2 && systems[0].number == 1 && systems[1].number == 2,
+          "a bank file's wave systems take their places in its list as their numbers");
+    Check(systems.size() == 2 && systems[0].groups.size() == 1 && systems[0].groups[0].archive == "one_0.aw" &&
+              systems[0].waves.size() == 2 && systems[1].groups.size() == 1 &&
+              systems[1].groups[0].archive == "two_0.aw",
+          "a bank file's wave systems name their wave archives and hold their waves");
+
+    std::vector<uint8_t> too_many = banks;
+    xsflib::StoreBe32(&too_many[4], 0x10000000);
+    Check(ThrowsFormatError([&] { rip::ReadJacWaveSystems(too_many); }),
+          "a bank file that lists more wave systems than it can hold is refused");
+    Check(ThrowsFormatError([&] { rip::ReadJacWaveSystems(std::vector<uint8_t>(6)); }),
+          "a bank file shorter than its header is refused");
+
+    // A main.dol with one section at 0x80300000. The section holds a sequence index of six files: the effects, the
+    // system's events, a piece, an empty file, a piece whose name has no extension, and a piece whose name fills its
+    // 14 bytes.
+    constexpr uint32_t kSection = 0x80300000, kIndex = kSection + 0x20;
+    std::vector<uint8_t> dol(0x100);
+    xsflib::StoreBe32(&dol[0x1c], 0x100);    // the first data section's file offset
+    xsflib::StoreBe32(&dol[0x64], kSection); // its address
+    std::vector<uint8_t> section(0x20);
+    const auto add_file = [&section](const std::string& name, uint32_t offset, uint32_t size)
+    {
+        std::vector<uint8_t> entry(0x20);
+        std::copy(name.begin(), name.end(), entry.begin());
+        xsflib::StoreBe32(&entry[0x18], offset);
+        xsflib::StoreBe32(&entry[0x1c], size);
+        section.insert(section.end(), entry.begin(), entry.end());
+    };
+    const std::string header = "BARC----";
+    section.insert(section.end(), header.begin(), header.end());
+    Put32(section, 0);
+    Put32(section, 6);
+    const std::string archive = "test.arc";
+    section.insert(section.end(), archive.begin(), archive.end());
+    section.resize(0x20 + 0x20);
+    add_file("se.jam", 0, 0x100);
+    add_file("sysevent.jam", 0x100, 0x100);
+    add_file("song.jam", 0x200, 0x40);
+    add_file("dummy", 0, 0);
+    add_file("tune", 0x240, 0x20);
+    add_file("fourteen.chars", 0x260, 0x20);
+    xsflib::StoreBe32(&dol[0xac], static_cast<uint32_t>(section.size())); // the first data section's size
+    dol.insert(dol.end(), section.begin(), section.end());
+
+    rip::JAudioProfile profile{};
+    profile.library = rip::JAudioLibrary::kJac;
+    profile.sequence_index = kIndex;
+    const std::vector<rip::JAudioSound> sounds = rip::ReadJacSounds(dol, profile);
+    Check(sounds.size() == 3, "the pieces are the files from number 2 on that aren't empty");
+    Check(sounds.size() == 3 && sounds[0].id == 0x80000002 && sounds[0].label == "song" && sounds[1].id == 0x80000004 &&
+              sounds[1].label == "tune" && sounds[2].id == 0x80000005 && sounds[2].label == "fourteen",
+          "a piece's ID holds the file's number, and the label is the file's name without the extension");
+    Check(sounds.size() == 3 && sounds[1].waves == std::vector<uint32_t>{4u << 16} && sounds[1].music &&
+              !sounds[1].stream,
+          "a piece is music, and plays group 0 of the wave system with its number");
+
+    // The piece "tune" plays in two parts. Part 1 plays group 2 of wave system 4. Part 3 plays group 0 of wave
+    // system 5.
+    profile.parted_piece = 4;
+    profile.parts = {{.number = 1, .system = 4, .group = 2}, {.number = 3, .system = 5, .group = 0}};
+    const std::vector<rip::JAudioSound> parts = rip::ReadJacSounds(dol, profile);
+    Check(parts.size() == 4 && parts[1].id == 0x80000104 && parts[1].label == "tune-1" && parts[2].id == 0x80000304 &&
+              parts[2].label == "tune-3",
+          "each part of a piece in parts is a sound with the part's number in the ID's second byte");
+    Check(parts.size() == 4 && parts[1].waves == std::vector<uint32_t>{4u << 16 | 2} &&
+              parts[2].waves == std::vector<uint32_t>{5u << 16} && parts[1].music && parts[2].music,
+          "a part is music and plays the wave group of the part's entry in the profile");
+    Check(parts.size() == 4 && parts[0].id == 0x80000002 && parts[3].id == 0x80000005,
+          "the other pieces are a sound each");
+    profile.parted_piece = 0;
+    profile.parts.clear();
+
+    // The index holds the count of files at offset 0xc. Seven files run past the end of the section.
+    std::vector<uint8_t> short_index = dol;
+    xsflib::StoreBe32(&short_index[0x100 + 0x20 + 0xc], 7);
+    Check(ThrowsFormatError([&] { rip::ReadJacSounds(short_index, profile); }),
+          "an index whose files run past the end of its section is refused");
+
+    profile.sequence_index = kSection;
+    Check(ThrowsFormatError([&] { rip::ReadJacSounds(dol, profile); }), "an index without its magic is refused");
+    profile.sequence_index = 0x80400000;
+    Check(ThrowsFormatError([&] { rip::ReadJacSounds(dol, profile); }), "an index outside main.dol is refused");
+    Check(ThrowsFormatError([&] { rip::ReadJacSounds(std::vector<uint8_t>(0x10), profile); }),
+          "a main.dol that isn't a DOL is refused");
+}
+
+// Tests the list of Pikmin 2's sounds (rip::ReadPikmin2Sounds) and the watch of its AutoBgm pieces (rip::WatchOf), with
+// New Play Control! Pikmin 2's profile. The start-up archive has the effects sequence, another sequence, two effects of
+// category 0 and one of category 6. The sequence archive holds the effects sequence and the game's 48 pieces. The name
+// table names the second effect and the third, and a sequence.
+void TestPikmin2Sounds()
+{
+    const std::vector<rip::JAudioProfile>& profiles = rip::KnownJAudioProfiles();
+    const auto profile = std::find_if(profiles.begin(), profiles.end(),
+                                      [](const rip::JAudioProfile& p) { return p.game_id == "R92E01"; });
+    if (!Check(profile != profiles.end() && profile->driver == rip::JAudioDriver::kPikmin2,
+               "New Play Control! Pikmin 2 has a profile for Pikmin 2's driver"))
+    {
+        return;
+    }
+
+    namespace files = ntdlib::testing::jaudio_files;
+    const std::vector<uint8_t> aaf = files::AafFile({{16, 127, 0}, {16, 127, 1}, {0}, {0}, {6}}, {"wScene_0.aw"});
+
+    const char* const kPieces[] = {
+        "2pbattle",      "a_iron",      "a_zawinul01", "battle_t",        "book",         "caveboss",
+        "caveconc",      "caveglass",   "cavekeyget",  "cavemetal",       "caverelax",    "cavesoil",
+        "cavetile",      "cavetsumiki", "comp_result", "c_menu",          "c_result",     "ff_annihi",
+        "ff_doped",      "ff_doping",   "ff_keyget",   "ff_playerdown",   "ff_treasureget", "forest",
+        "f_result",      "hiscore",     "id_test",     "kuro_post",       "kuro_pre",     "last",
+        "l_boss",        "m_boss",      "new_00",      "new_01",          "new_02",       "new_03",
+        "new_04",        "new_05",      "new_06",      "new_07",          "new_08",       "n_tutorial",
+        "n_tutorial_1stday", "result",  "u_result",    "worldmap",        "worldmap_intro", "yakushima",
+    };
+    std::vector<files::RarcFileSpec> archive_files = {{0, "se.bms", {0xc1}}};
+    for (const char* piece : kPieces)
+    {
+        archive_files.push_back({static_cast<uint16_t>(archive_files.size()), std::string(piece) + ".bms", {0xff}});
+    }
+
+    // The name table: its header, the 18 categories' records, then the records of a sequence and two effects. The
+    // game's table gives a category 6 effect's ID with bit 11.
+    std::vector<uint8_t> names(0x10 + 18 * 0x20);
+    const auto add_name = [&names](const std::string& name, uint32_t id)
+    {
+        std::vector<uint8_t> record(0x20);
+        std::copy(name.begin(), name.end(), record.begin());
+        xsflib::StoreBe32(&record[0x1c], id);
+        names.insert(names.end(), record.begin(), record.end());
+    };
+    add_name("PSSQ_TEST", 0x80010001);
+    add_name("PSSE_SECOND", 0x0001);
+    add_name("HOMESE_TEST", 0x6800);
+
+    const std::vector<rip::JAudioSound> sounds = rip::ReadPikmin2Sounds(aaf, files::RarcFile(archive_files), names,
+                                                                        *profile);
+    if (!Check(sounds.size() == 48 + 3, "the pieces come first, then the effects, without the table's sequences"))
+    {
+        return;
+    }
+
+    Check(sounds[3].id == 0x80000003 && sounds[3].label == "battle_t" && sounds[3].music && sounds[3].section == "BGM",
+          "a piece's ID holds its number in the driver's table, and its label is its file's name");
+    Check(sounds[3].waves == std::vector<uint32_t>{0, 6} && sounds[31].waves == std::vector<uint32_t>{0},
+          "a piece plays group 0 and the group of its scene");
+    Check(sounds[0].waves.empty(), "a piece that the game never plays has no groups. The ripper finds them");
+    Check(sounds[48].id == 0x800 && sounds[48].label == "se0-0000" && sounds[49].id == 0x801 &&
+              sounds[49].label == "PSSE_SECOND" && sounds[50].id == 0x6800 && sounds[50].label == "HOMESE_TEST",
+          "the name table names an effect, and an effect without a name is named by its category and index");
+    Check(!sounds[48].music && sounds[48].section == "SE" && sounds[48].waves == profile->static_waves,
+          "an effect plays in the groups that the global scene loads");
+
+    const std::vector<uint8_t> short_names(names.begin(), names.begin() + 0x10 + 17 * 0x20);
+    Check(
+        ThrowsFormatError([&] { rip::ReadPikmin2Sounds(aaf, files::RarcFile(archive_files), short_names, *profile); }),
+        "a name table shorter than its categories' records is refused");
+    archive_files.pop_back();
+    Check(ThrowsFormatError([&] { rip::ReadPikmin2Sounds(aaf, files::RarcFile(archive_files), names, *profile); }),
+          "a sequence archive without a piece is refused");
+
+    // The pieces whose conductors pick what the tracks play never repeat.
+    Check(!rip::WatchOf(*profile, 0x80000006).idle_in_calls && !rip::WatchOf(*profile, 0x80000001).idle_in_calls,
+          "the root track of an AutoBgm piece doesn't idle in its polling routine");
+    Check(rip::WatchOf(*profile, 0x80000003).idle_in_calls && rip::WatchOf(*profile, 0x806).idle_in_calls,
+          "the root tracks of the other pieces and the effects idle in calls");
+}
+
 } // namespace
 
 int main()
@@ -392,8 +622,11 @@ int main()
         TestTracksThatWaitForEver();
         TestSwells();
         TestInnerLoops();
+        TestArrangement();
         TestIsMusic();
         TestLibraryNames();
+        TestJac();
+        TestPikmin2Sounds();
     }
     catch (const std::exception& e)
     {
