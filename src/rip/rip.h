@@ -353,10 +353,18 @@ std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const 
 // Archive mode: a .miniwsf that plays sequence `index` from `lib_name`.
 std::vector<uint8_t> BuildArchiveMini(uint32_t index, const std::string& lib_name, Tags tags);
 
-// Archive mode: a copy of the archive that keeps only the data that the sequences at `indices` play. That data is each
-// sequence's file, and its bank's file and wave data. The rest of the groups' data becomes zeros. Zeros compress to
-// almost nothing. The headers and the blocks keep their sizes. Every offset still holds.
+// Archive mode: a copy of the archive that holds only the data that the sequences at `indices` play. That data is each
+// sequence's file, and its bank's file and wave data, in the items where SoundArchive::File finds them. The header, the
+// SYMB block and the INFO block keep their sizes. The FILE block holds only those items, group by group. Items of a
+// group that hold the same bytes, such as banks that share a wave archive, share one copy. The INFO block's groups and
+// items give their new places. Every other item starts at the copy's end. SoundArchive::File then skips it. Each kept
+// file is read back from the copy and compared with the archive's. Throws xsflib::FormatError if one differs, or if the
+// groups' entries don't come before the FILE block. Only a hand-made archive could cause either.
 std::vector<uint8_t> KeepSequenceData(const ntdlib::rsar::SoundArchive& archive, const std::vector<uint32_t>& indices);
+
+// A player loads a program of 1 GiB at most (xsflib's kMaxProgramSize). For a larger program of `size` bytes, returns
+// the rip's message. The message gives both sizes. Returns nothing for a program that a player loads.
+std::optional<std::string> ProgramTooLarge(std::size_t size);
 
 // The file name for `library` in `folder`, from `names` (see xsflib::rip::FileNames::Library). An earlier rip into the
 // folder may have written a library of that name for other sounds or in the other mode. Replacing it would leave that

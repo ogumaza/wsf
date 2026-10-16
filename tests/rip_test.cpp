@@ -5,7 +5,9 @@
 // another polls or counts a variable or marks beats for the game, and on a sequence in an arrangement. TestLibraryNames
 // checks the names of libraries in a folder that holds earlier rips (rip::LibraryName). TestJac reads a Jac game's
 // bank file and sequence index, made up in the formats of Pikmin's files. It also checks a piece that plays in parts.
-// TestPikmin2Sounds lists Pikmin 2's sounds from files made up in the game's formats.
+// TestPikmin2Sounds lists Pikmin 2's sounds from files made up in the game's formats. TestKeepSequenceData cuts an
+// archive of several groups down to the data that its sequences play. TestProgramTooLarge checks the limit on the size
+// of a library's program.
 
 #include "rip/rip.h"
 
@@ -13,11 +15,13 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <optional>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "ntdlib/jaudio/wave_system.h"
@@ -27,6 +31,7 @@
 #include "ntdlib/testing/rsar_files.h"
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
+#include "xsflib/psf/psf.h"
 #include "xsflib/rip/file_names.h"
 #include "xsflib/rip/tool.h"
 #include "xsflib/testing/check.h"
@@ -611,6 +616,318 @@ void TestPikmin2Sounds()
           "the root tracks of the other pieces and the effects idle in calls");
 }
 
+// An archive that MakeGroupedArchive builds, with where its FILE block starts and where its INFO block holds each
+// group's entry and each item's.
+struct GroupedArchive
+{
+    Bytes bytes;
+    std::size_t file_block = 0;
+    std::vector<std::size_t> groups;
+    std::vector<std::vector<std::size_t>> items;
+};
+
+// A group for MakeGroupedArchive: whether the archive holds it, and the IDs of the files that its items hold.
+struct GroupFiles
+{
+    bool internal;
+    std::vector<uint32_t> files;
+};
+
+// A file's places for MakeGroupedArchive: a group and an item of the group for each.
+using FilePlaces = std::vector<std::pair<uint32_t, uint32_t>>;
+
+// An archive of version 1.4 without names. It holds `files` (each file's data and wave data) in `groups`, and `places`
+// lists each file's places. Sound i plays sequence file `sequences[i]` with bank i, and bank i's file is `banks[i]`.
+// Each internal group holds its files, then their wave data, each at a multiple of 32 bytes. An external group's
+// offsets count from the start of its file.
+GroupedArchive MakeGroupedArchive(const std::vector<std::pair<Bytes, Bytes>>& files,
+                                  const std::vector<GroupFiles>& groups, const std::vector<FilePlaces>& places,
+                                  const std::vector<uint32_t>& sequences, const std::vector<uint32_t>& banks)
+{
+    using ntdlib::testing::rsar_files::Grow;
+    using ntdlib::testing::rsar_files::PutRef;
+
+    GroupedArchive archive;
+    Bytes& file = archive.bytes;
+    file.resize(0x40, 0);
+    std::memcpy(file.data(), "RSAR", 4);
+    xsflib::StoreBe16(&file[4], 0xFEFF);
+    xsflib::StoreBe16(&file[6], 0x0104);
+    xsflib::StoreBe16(&file[0xC], 0x40);
+    xsflib::StoreBe16(&file[0xE], 2);
+    const auto put = [&file](std::size_t at, std::size_t value)
+    {
+        xsflib::StoreBe32(&file[at], static_cast<uint32_t>(value));
+    };
+    const auto pad = [](Bytes& data)
+    {
+        data.resize((data.size() + 0x1F) & ~std::size_t{0x1F}, 0);
+    };
+
+    // INFO: the tables of sounds, banks, files and groups. A table holds a count, then a reference to each entry. The
+    // references count from the block's payload.
+    const std::size_t info = Grow(file, 8);
+    std::memcpy(&file[info], "INFO", 4);
+    const std::size_t base = file.size();
+    const std::size_t tables = Grow(file, 0x30);
+    const auto table = [&](std::size_t ref, std::size_t count)
+    {
+        const std::size_t at = Grow(file, 4 + count * 8);
+        put(at, count);
+        PutRef(file, ref, 0, static_cast<uint32_t>(at - base));
+
+        return at + 4;
+    };
+    const auto entry = [&](std::size_t refs, std::size_t i, std::size_t size)
+    {
+        const std::size_t at = Grow(file, size);
+        PutRef(file, refs + i * 8, 0, static_cast<uint32_t>(at - base));
+
+        return at;
+    };
+
+    const std::size_t sound_refs = table(tables, sequences.size());
+    for (std::size_t i = 0; i < sequences.size(); i++)
+    {
+        const std::size_t sound = entry(sound_refs, i, 0x2C);
+        put(sound + 4, sequences[i]);
+        file[sound + 0x16] = 1;
+        const std::size_t sequence = Grow(file, 0x14);
+        PutRef(file, sound + 0x18, 1, static_cast<uint32_t>(sequence - base));
+        put(sequence + 4, i);
+    }
+
+    const std::size_t bank_refs = table(tables + 8, banks.size());
+    for (std::size_t i = 0; i < banks.size(); i++)
+    {
+        put(entry(bank_refs, i, 8) + 4, banks[i]);
+    }
+
+    const std::size_t file_refs = table(tables + 0x18, files.size());
+    for (std::size_t f = 0; f < files.size(); f++)
+    {
+        const std::size_t at = entry(file_refs, f, 0x1C);
+        put(at, files[f].first.size());
+        put(at + 4, files[f].second.size());
+        const std::size_t place_refs = table(at + 0x14, places[f].size());
+        for (std::size_t p = 0; p < places[f].size(); p++)
+        {
+            const std::size_t place = entry(place_refs, p, 8);
+            put(place, places[f][p].first);
+            put(place + 4, places[f][p].second);
+        }
+    }
+
+    const std::size_t group_refs = table(tables + 0x20, groups.size());
+    for (std::size_t g = 0; g < groups.size(); g++)
+    {
+        archive.groups.push_back(entry(group_refs, g, 0x28));
+        if (!groups[g].internal)
+        {
+            const std::size_t path = Grow(file, 8);
+            std::memcpy(&file[path], "GROUP", 5);
+            PutRef(file, archive.groups[g] + 8, 0, static_cast<uint32_t>(path - base));
+        }
+
+        const std::size_t item_refs = table(archive.groups[g] + 0x20, groups[g].files.size());
+        std::vector<std::size_t>& items = archive.items.emplace_back();
+        for (std::size_t i = 0; i < groups[g].files.size(); i++)
+        {
+            items.push_back(entry(item_refs, i, 0x18));
+            put(items[i], groups[g].files[i]);
+        }
+    }
+
+    pad(file);
+    put(info + 4, file.size() - info);
+    put(0x18, info);
+    put(0x1C, file.size() - info);
+
+    // FILE: each internal group's files, then their wave data. An external group's file holds them in the same way.
+    archive.file_block = Grow(file, 0x20);
+    std::memcpy(&file[archive.file_block], "FILE", 4);
+    for (std::size_t g = 0; g < groups.size(); g++)
+    {
+        Bytes external;
+        Bytes& out = groups[g].internal ? file : external;
+        const std::size_t group = archive.groups[g];
+        const std::vector<std::size_t>& items = archive.items[g];
+        std::size_t at = out.size();
+        put(group + 0x10, at);
+        for (std::size_t i = 0; i < items.size(); i++)
+        {
+            const Bytes& data = files[groups[g].files[i]].first;
+            put(items[i] + 4, out.size() - at);
+            put(items[i] + 8, data.size());
+            out.insert(out.end(), data.begin(), data.end());
+            pad(out);
+        }
+
+        put(group + 0x14, out.size() - at);
+        at = out.size();
+        put(group + 0x18, at);
+        for (std::size_t i = 0; i < items.size(); i++)
+        {
+            const Bytes& data = files[groups[g].files[i]].second;
+            put(items[i] + 0xC, out.size() - at);
+            put(items[i] + 0x10, data.size());
+            out.insert(out.end(), data.begin(), data.end());
+            pad(out);
+        }
+
+        put(group + 0x1C, out.size() - at);
+    }
+
+    put(archive.file_block + 4, file.size() - archive.file_block);
+    put(0x20, archive.file_block);
+    put(0x24, file.size() - archive.file_block);
+    put(8, file.size());
+
+    return archive;
+}
+
+// Whether two files hold the same bytes, wave data included, or neither is there.
+bool SameFile(const std::optional<ntdlib::rsar::FileData>& a, const std::optional<ntdlib::rsar::FileData>& b)
+{
+    return a.has_value() == b.has_value() &&
+           (!a || (std::ranges::equal(a->file, b->file) && std::ranges::equal(a->wave_data, b->wave_data)));
+}
+
+// Tests the copy of an archive that holds only the data that some sequences play (rip::KeepSequenceData).
+void TestKeepSequenceData()
+{
+    using ntdlib::rsar::SoundArchive;
+    using ntdlib::testing::rsar_files::MakeNewBank;
+    using ntdlib::testing::rsar_files::MakeOldBank;
+    using ntdlib::testing::rsar_files::MakeOldWaveData;
+    using ntdlib::testing::rsar_files::MakeRwar;
+
+    // Sound 0 plays file 0 with bank 0 (file 2). Sound 1 plays file 1 with bank 1 (file 3). Both internal groups hold
+    // files 0 and 2. File 0's first place is in group 1, and file 2's in group 0. File 3's first place is in group 2,
+    // which lies outside the archive.
+    const std::vector<std::pair<Bytes, Bytes>> files = {
+        {MakeSequence({0xFF}), {}},
+        {MakeSequence({60, 127, 24, 0xFF}), {}},
+        {MakeNewBank(), MakeRwar()},
+        {MakeOldBank(), MakeOldWaveData()},
+    };
+    const GroupedArchive grouped =
+        MakeGroupedArchive(files, {{true, {1, 0, 2}}, {true, {0, 2, 3}}, {false, {3}}},
+                           {{{1, 0}, {0, 1}}, {{0, 0}}, {{0, 2}, {1, 1}}, {{2, 0}, {1, 2}}}, {0, 1}, {2, 3});
+    const SoundArchive archive = SoundArchive::Load(grouped.bytes, nw4r::kRsarOptions);
+
+    // A size rounded up to a multiple of 32 bytes.
+    const auto padded = [](std::size_t size)
+    {
+        return (size + 0x1F) & ~std::size_t{0x1F};
+    };
+
+    // The size of a copy that holds `kept` once each, at multiples of 32 bytes after the FILE block's header.
+    const auto size_holding = [&](const std::vector<uint32_t>& kept)
+    {
+        std::size_t size = grouped.file_block + 0x20;
+        for (const uint32_t f : kept)
+        {
+            size += padded(files[f].first.size()) + padded(files[f].second.size());
+        }
+
+        return size;
+    };
+
+    const Bytes one = rip::KeepSequenceData(archive, {0});
+    const SoundArchive cut = SoundArchive::Load(one, nw4r::kRsarOptions);
+    const xsflib::Reader r(one, true);
+    Check(one.size() == size_holding({0, 2}), "the copy holds the sequence's file and its bank's once each");
+    Check(r.U32(8) == one.size() && r.U32(0x24) == one.size() - grouped.file_block &&
+              r.U32(grouped.file_block + 4) == r.U32(0x24) && !cut.Truncated(),
+          "the header and the FILE block give the copy's size");
+    Check(SameFile(archive.File(0), cut.File(0)) && SameFile(archive.File(2), cut.File(2)),
+          "the sequence and its bank read the same from the copy");
+    Check(!cut.File(1) && !cut.File(3), "the copy doesn't hold the other sequence and bank");
+    Check(uint64_t{cut.Groups()[0].offset} + cut.Groups()[0].items[1].offset == one.size() &&
+              cut.Groups()[0].items[1].size == files[0].first.size(),
+          "a copy of a file that File doesn't read starts at the copy's end");
+
+    // Before its files, the copy differs only in the sizes and in the places of the internal groups and their items.
+    std::vector<bool> may_differ(grouped.file_block + 8);
+    const auto field = [&may_differ](std::size_t at, std::size_t size)
+    {
+        std::fill_n(may_differ.begin() + static_cast<std::ptrdiff_t>(at), size, true);
+    };
+    field(8, 4);
+    field(0x24, 4);
+    field(grouped.file_block + 4, 4);
+    for (std::size_t g = 0; g < 2; g++)
+    {
+        field(grouped.groups[g] + 0x10, 0x10);
+        for (const std::size_t item : grouped.items[g])
+        {
+            field(item + 4, 4);
+            field(item + 0xC, 4);
+        }
+    }
+
+    bool same = true;
+    for (std::size_t i = 0; i < may_differ.size(); i++)
+    {
+        same = same && (may_differ[i] || one[i] == grouped.bytes[i]);
+    }
+
+    Check(same, "the copy keeps the archive's tables and the external group's places");
+
+    const Bytes both = rip::KeepSequenceData(archive, {0, 1});
+    const SoundArchive cut_both = SoundArchive::Load(both, nw4r::kRsarOptions);
+    bool all_same = true;
+    for (uint32_t f = 0; f < files.size(); f++)
+    {
+        all_same = all_same && cut_both.File(f) && SameFile(archive.File(f), cut_both.File(f));
+    }
+
+    Check(both.size() == size_holding({0, 1, 2, 3}) && all_same,
+          "a copy for both sequences holds each file once and reads the same");
+
+    // Banks 0 and 1 (files 1 and 2) share a wave archive in the group. Both sounds play file 0.
+    GroupedArchive shared = MakeGroupedArchive({files[0], files[2], {files[3].first, files[2].second}},
+                                               {{true, {0, 1, 2}}}, {{{0, 0}}, {{0, 1}}, {{0, 2}}}, {0, 0}, {1, 2});
+    xsflib::StoreBe32(&shared.bytes[shared.items[0][2] + 0xC],
+                      xsflib::LoadBe32(&shared.bytes[shared.items[0][1] + 0xC]));
+    const SoundArchive shared_archive = SoundArchive::Load(shared.bytes, nw4r::kRsarOptions);
+    const Bytes shared_cut = rip::KeepSequenceData(shared_archive, {0, 1});
+    Check(shared_cut.size() == shared.file_block + 0x20 + padded(files[0].first.size()) +
+                                   padded(files[2].first.size()) + padded(files[3].first.size()) +
+                                   padded(files[2].second.size()),
+          "banks that share a wave archive share one copy of it");
+
+    // A FILE block that starts before the groups' entries.
+    Bytes early = grouped.bytes;
+    xsflib::StoreBe32(&early[0x20], 0x40);
+    const SoundArchive early_files = SoundArchive::Load(early, nw4r::kRsarOptions);
+    Check(ThrowsFormatError([&] { rip::KeepSequenceData(early_files, {0}); }),
+          "an archive whose files start before its groups' entries is refused");
+
+    // File 0's first place is an empty item past the archive's end. File skips it in the archive, but not at the end
+    // of the copy. The copy would then read differently.
+    GroupedArchive crafted =
+        MakeGroupedArchive({files[0], files[2]}, {{true, {0, 0, 1}}}, {{{0, 0}, {0, 1}}, {{0, 2}}}, {0}, {1});
+    const std::size_t empty = crafted.items[0][0];
+    xsflib::StoreBe32(&crafted.bytes[empty + 4], 0x7FFFFFFF);
+    xsflib::StoreBe32(&crafted.bytes[empty + 8], 0);
+    xsflib::StoreBe32(&crafted.bytes[empty + 0x10], 0);
+    const SoundArchive crafted_archive = SoundArchive::Load(crafted.bytes, nw4r::kRsarOptions);
+    Check(SameFile(crafted_archive.File(0), archive.File(0)), "File reads the second copy of the sequence");
+    Check(ThrowsFormatError([&] { rip::KeepSequenceData(crafted_archive, {0}); }),
+          "a copy that would read differently from the archive is refused");
+}
+
+// Tests the limit on a library's program (rip::ProgramTooLarge).
+void TestProgramTooLarge()
+{
+    Check(!rip::ProgramTooLarge(xsflib::psf::kMaxProgramSize), "a program of 1 GiB loads");
+    Check(rip::ProgramTooLarge(xsflib::psf::kMaxProgramSize + 1) ==
+              "the library would hold 1025 MiB. A player loads at most 1024 MiB.",
+          "a larger program is refused, with both sizes");
+}
+
 } // namespace
 
 int main()
@@ -627,6 +944,8 @@ int main()
         TestLibraryNames();
         TestJac();
         TestPikmin2Sounds();
+        TestKeepSequenceData();
+        TestProgramTooLarge();
     }
     catch (const std::exception& e)
     {

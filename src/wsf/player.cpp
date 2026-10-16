@@ -134,6 +134,11 @@ bool Player::StartSource()
         ntdlib::flipper::AppendAudioBlock(system_output_, block);
     };
 
+    if (prepare_game_)
+    {
+        prepare_game_(*system_);
+    }
+
     // Run until the driver reports that the sound plays. Discard the silence before that point.
     return RunUntilSoundPlays(kBootTimeout);
 }

@@ -79,7 +79,7 @@ u32  size of the payload in bytes (excluding padding)
 | `SND ` | `u32 sound index` | Archive mode: the sound to play, as its index in the sound archive's sound table. The last one in loading order takes effect. |
 
 Unknown chunk types are skipped. Chunks are applied in order. For the same address or path, later data replaces earlier
-data.
+data. A player loads a decompressed program of at most 1 GiB.
 
 ### Loading order
 
@@ -683,6 +683,11 @@ stays as it was. A new `.miniwsf` replaces an earlier one of the same name. The 
 play. A `.wsflib` that no `.miniwsf` names any more stays in the folder too. To replace earlier rips, rip into an empty
 folder or delete the earlier rips first.
 
+`wsfrip` refuses to write a `.wsflib` whose program would be over 1 GiB. The message gives the program's size. In
+archive mode and in game mode for JAudio, a rip of fewer sounds, such as with `--bgm` or `--only`, makes a smaller
+library. A game-mode library for NW4R SND holds the whole sound archive. For an archive over 1 GiB, `--mode archive`
+rips only the data that the sequences play.
+
 `--only` selects the sequences whose labels match a regular expression. `--bgm` selects the music. The music is the
 sequences whose labels contain BGM, in any case, and those that play on a music player. A music player has BGM, MUSIC,
 SONG or FANFARE among the words of its name separated by underscores, and not SE. Digits may follow the word. Games name
@@ -837,10 +842,15 @@ to the limit.
 The `.wsflib` holds the sound archive and AX's microcode as `FILE` chunks. It also holds an archive descriptor. Each
 `.miniwsf` selects one sequence with a `SND ` chunk. Lengths come from the same analysis as in game mode.
 
-The archive in the `.wsflib` keeps only the data that the ripped sequences play: each sequence's file, and its bank's
-file and wave data. The rest of the data in the archive's groups is zeros. The archive keeps its size and its layout. A
-game's archive can hold hundreds of megabytes of sound effects and voices that a rip of its music doesn't play.
-Zeros compress to almost nothing.
+The archive in the `.wsflib` holds only the data that the ripped sequences play: each sequence's file, and its bank's
+file and wave data. A game's archive can hold hundreds of megabytes of sound effects and voices that a rip of its music
+doesn't play. The archive's header, `SYMB` block and `INFO` block keep their sizes. The `FILE` block holds the kept
+files group by group. Each starts at a multiple of 32 bytes. A file that several groups hold is kept once: the first
+copy in the file's list of places that lies inside the archive. Banks in a group often share a wave archive. The new
+archive then holds one copy of it. The `INFO` block's groups and items give the new places. The other items start at
+the archive's end. The ripper reads each kept file back from the new archive and checks that it's the same. The archive
+keeps RSAR's format. Players older than 1.4.1 play it too. Rips made with 1.2.0 to 1.4.0 hold the layout of the whole
+archive. Zeros take the place of the data that they don't play.
 
 A sound archive doesn't contain AX's microcode. For a game, the ripper takes the microcode from the game's `main.dol`.
 For a loose `.brsar`, it takes the microcode from the `main.dol` that `--microcode` names or that's given with the

@@ -32,6 +32,7 @@ jobs:
             os: windows-2025
             cmake: -A x64 -T ClangCL
             foobar2000: true
+            timeout-minutes: 90
           - name: Windows x86 (clang-cl)
             os: windows-2025
             cmake: -A Win32 -T ClangCL

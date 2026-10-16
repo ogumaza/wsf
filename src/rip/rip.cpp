@@ -30,11 +30,13 @@
 #include "ntdlib/jaudio/aaf.h"
 #include "ntdlib/jaudio/rarc.h"
 #include "ntdlib/rsar/formats.h"
+#include "ntdlib/rsar/reference.h"
 #include "ntdlib/sound_build.h"
 #include "xsflib/ascii.h"
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
 #include "xsflib/files.h"
+#include "xsflib/psf/psf.h"
 #include "xsflib/rip/length.h"
 #include "xsflib/sha1.h"
 #include "xsflib/text.h"
@@ -1283,6 +1285,12 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const ntdlib::disc::GameFiles& 
     d.entry = dol->Entry();
     d.status_address = DriverBlock::kAddress + DriverBlock::kStatusOffset;
     d.ios_version = game.tmd.size() >= 0x18c ? xsflib::LoadBe32(&game.tmd[0x188]) : profile.ios_version;
+    if (const std::optional<std::string> too_large = ProgramTooLarge(program.Data().size()))
+    {
+        return fail(*too_large +
+                    " A game-mode library holds the whole sound archive. Add --mode archive to rip only the "
+                    "data that the sequences play.");
+    }
 
     return xsflib::psf::WritePsf(kPsfVersionWsf, d.Serialize(), program.Data(), tags);
 }
@@ -2473,6 +2481,10 @@ std::optional<std::vector<uint8_t>> BuildJAudioLibrary(const ntdlib::disc::GameF
     d.entry = dol->Entry();
     d.status_address = DriverBlock::kAddress + DriverBlock::kStatusOffset;
     d.ios_version = game.tmd.size() >= 0x18c ? xsflib::LoadBe32(&game.tmd[0x188]) : profile.ios_version;
+    if (const std::optional<std::string> too_large = ProgramTooLarge(program.Data().size()))
+    {
+        return fail(*too_large + " Rip fewer sounds at a time, with --only.");
+    }
 
     return xsflib::psf::WritePsf(kPsfVersionWsf, d.Serialize(), program.Data(), tags);
 }
@@ -2680,6 +2692,23 @@ ntdlib::jaudio::GameWatch WatchOf(const JAudioProfile& profile, uint32_t sound_i
     return watch;
 }
 
+std::optional<std::string> ProgramTooLarge(std::size_t size)
+{
+    if (size <= xsflib::psf::kMaxProgramSize)
+    {
+        return std::nullopt;
+    }
+
+    // Whole mebibytes, rounded up. A program just over the limit then shows as larger than it.
+    const auto mebibytes = [](std::size_t bytes)
+    {
+        return std::to_string((bytes + (std::size_t{1} << 20) - 1) >> 20) + " MiB";
+    };
+
+    return "the library would hold " + mebibytes(size) + ". A player loads at most " +
+           mebibytes(xsflib::psf::kMaxProgramSize) + ".";
+}
+
 std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const std::vector<uint8_t>& archive,
                                          const std::string& microcode_path, const ntdlib::Microcode& microcode,
                                          nw4r::SndBuild build, const Tags& tags, const ArchiveEffects& effects)
@@ -2701,6 +2730,10 @@ std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const 
     ProgramBuilder program;
     program.AddFile(archive_path, archive);
     program.AddFile(microcode_path, words);
+    if (const std::optional<std::string> too_large = ProgramTooLarge(program.Data().size()))
+    {
+        throw xsflib::FormatError(*too_large + " Rip fewer sequences at a time, such as with --bgm or --only.");
+    }
 
     return xsflib::psf::WritePsf(kPsfVersionWsf, descriptor.Serialize(), program.Data(), tags);
 }
@@ -2715,50 +2748,94 @@ std::vector<uint8_t> BuildArchiveMini(uint32_t index, const std::string& lib_nam
     return xsflib::psf::WritePsf(kPsfVersionWsf, {}, program.Data(), tags);
 }
 
-std::vector<uint8_t> KeepSequenceData(const ntdlib::rsar::SoundArchive& archive, const std::vector<uint32_t>& indices)
+namespace
 {
-    const std::span<const uint8_t> all = archive.Bytes();
-    std::vector<uint8_t> kept(all.begin(), all.end());
 
-    // Clears `size` bytes from `offset`, up to the copy's end at most.
-    const auto clear = [&kept](uint64_t offset, uint64_t size)
+// An RSAR's FILE block keeps each file at a multiple of 32 bytes.
+constexpr std::size_t kFileAlignment = 0x20;
+
+// The largest archive whose offsets fit RSAR's 32-bit fields.
+constexpr std::size_t kMaxArchiveSize = 0xFFFFFFFF;
+
+// Pads `data` with zeros to a multiple of kFileAlignment.
+void PadToFileAlignment(std::vector<uint8_t>& data)
+{
+    data.resize((data.size() + kFileAlignment - 1) / kFileAlignment * kFileAlignment, 0);
+}
+
+// Where an archive's INFO block holds a group's entry and its items' entries (SoundArchiveFileReader::ReadGroupInfo,
+// main.dol 0x80042ac4, and ReadGroupItemInfo, 0x80042bd4).
+struct GroupEntries
+{
+    std::size_t group = 0;
+    std::vector<std::size_t> items;
+};
+
+// The groups' entries, in the order of SoundArchive::Groups. The INFO block's payload starts with references to its
+// tables. The groups' table is the fifth. A table holds a count, then a reference to each entry. The references count
+// from the payload.
+std::vector<GroupEntries> FindGroupEntries(const xsflib::Reader& r)
+{
+    const std::size_t base = std::size_t{r.U32(0x18)} + 8;
+    const auto entries = [&r, base](std::size_t table_ref)
     {
-        if (offset < kept.size())
+        std::vector<std::size_t> found;
+        const ntdlib::rsar::Reference table = ntdlib::rsar::ReadRef(r, table_ref);
+        if (table.IsOffset())
         {
-            const uint64_t end = std::min<uint64_t>(offset + size, kept.size());
-            std::fill(kept.begin() + static_cast<std::ptrdiff_t>(offset),
-                      kept.begin() + static_cast<std::ptrdiff_t>(end), uint8_t{0});
+            const std::size_t at = base + table.offset;
+            const uint32_t count = r.U32(at);
+            for (uint32_t i = 0; i < count; i++)
+            {
+                found.push_back(base + ntdlib::rsar::ReadRef(r, at + 4 + i * std::size_t{8}).offset);
+            }
         }
+
+        return found;
     };
 
-    // The groups that the archive holds: their files, then their wave data.
-    for (const ntdlib::rsar::SoundArchive::Group& group : archive.Groups())
+    std::vector<GroupEntries> groups;
+    for (const std::size_t group : entries(base + 0x20))
     {
-        if (group.internal)
+        groups.push_back({group, entries(group + 0x20)});
+    }
+
+    return groups;
+}
+
+// True if `entries` hold each of `groups` and its items, and lie before the FILE block at `file_block`.
+bool EntriesBeforeFiles(const std::vector<GroupEntries>& entries,
+                        const std::vector<ntdlib::rsar::SoundArchive::Group>& groups, std::size_t file_block)
+{
+    if (entries.size() != groups.size())
+    {
+        return false;
+    }
+
+    for (std::size_t g = 0; g < groups.size(); g++)
+    {
+        if (entries[g].items.size() != groups[g].items.size() || entries[g].group + 0x28 > file_block)
         {
-            clear(group.offset, group.size);
-            clear(group.wave_data_offset, group.wave_data_size);
+            return false;
+        }
+
+        for (const std::size_t item : entries[g].items)
+        {
+            if (item + 0x14 > file_block)
+            {
+                return false;
+            }
         }
     }
 
-    // Copies a file and its wave data back from the spans that File returns.
-    const auto keep = [&](std::span<const uint8_t> data)
-    {
-        if (!data.empty())
-        {
-            std::copy(data.begin(), data.end(), kept.begin() + (data.data() - all.data()));
-        }
-    };
-    const auto keep_file = [&](uint32_t file_id)
-    {
-        if (const std::optional<ntdlib::rsar::FileData> file = archive.File(file_id))
-        {
-            keep(file->file);
-            keep(file->wave_data);
-        }
-    };
+    return true;
+}
 
-    // The data that the model reads for each sequence: its file, and its bank's file and wave data.
+// The files that the model reads for the sequences at `indices`: each sequence's file, and its bank's file and wave
+// data (Engine::StartSequence and Engine::GetBank).
+std::vector<uint32_t> SequenceFiles(const ntdlib::rsar::SoundArchive& archive, const std::vector<uint32_t>& indices)
+{
+    std::vector<uint32_t> files;
     for (const uint32_t index : indices)
     {
         if (index >= archive.Sounds().size())
@@ -2767,14 +2844,211 @@ std::vector<uint8_t> KeepSequenceData(const ntdlib::rsar::SoundArchive& archive,
         }
 
         const ntdlib::rsar::SoundInfo& sound = archive.Sounds()[index];
-        keep_file(sound.file_id);
+        files.push_back(sound.file_id);
         if (sound.bank < archive.Banks().size())
         {
-            keep_file(archive.Banks()[sound.bank].file_id);
+            files.push_back(archive.Banks()[sound.bank].file_id);
         }
     }
 
-    return kept;
+    return files;
+}
+
+// For each group, which of its items SoundArchive::File reads for `files`. File returns spans into the archive's bytes.
+// An item whose file and wave data have those offsets and sizes holds them. Like File, the test ignores the item's
+// file ID.
+std::vector<std::vector<bool>> ItemsRead(const ntdlib::rsar::SoundArchive& archive, const std::vector<uint32_t>& files)
+{
+    const std::vector<ntdlib::rsar::SoundArchive::Group>& groups = archive.Groups();
+    std::vector<std::vector<bool>> read(groups.size());
+    for (std::size_t g = 0; g < groups.size(); g++)
+    {
+        read[g].resize(groups[g].items.size());
+    }
+
+    const auto offset = [start = archive.Bytes().data()](std::span<const uint8_t> data)
+    {
+        return static_cast<uint64_t>(data.data() - start);
+    };
+    for (const uint32_t file_id : files)
+    {
+        const std::optional<ntdlib::rsar::FileData> file = archive.File(file_id);
+        for (std::size_t g = 0; file && g < groups.size(); g++)
+        {
+            for (std::size_t i = 0; i < groups[g].items.size(); i++)
+            {
+                const ntdlib::rsar::SoundArchive::Group::Item& item = groups[g].items[i];
+                read[g][i] = read[g][i] ||
+                             (groups[g].internal && uint64_t{groups[g].offset} + item.offset == offset(file->file) &&
+                              item.size == file->file.size() &&
+                              uint64_t{groups[g].wave_data_offset} + item.wave_data_offset == offset(file->wave_data) &&
+                              item.wave_data_size == file->wave_data.size());
+            }
+        }
+    }
+
+    return read;
+}
+
+// Where a group's kept items lie in the copy that KeepSequenceData makes: the group's files, then their wave data.
+struct GroupPlace
+{
+    std::size_t offset = 0, size = 0, wave_data_offset = 0, wave_data_size = 0;
+    std::vector<std::size_t> files, waves; // each kept item's offsets, from the group's two offsets
+};
+
+// Appends each group's kept items to `copy`: their files, then their wave data, each at a multiple of 32 bytes. Items
+// of a group that hold the same bytes share one copy of them. Banks often share a wave archive. A group outside the
+// archive keeps its place.
+std::vector<GroupPlace> AppendKeptItems(const ntdlib::rsar::SoundArchive& archive,
+                                        const std::vector<std::vector<bool>>& kept, std::vector<uint8_t>& copy)
+{
+    // The offsets and sizes of a group's bytes that the copy holds, and where each copy starts from the group's offset.
+    using Copies = std::map<std::pair<uint64_t, uint32_t>, std::size_t>;
+
+    // Appends the bytes at `offset` in the archive, unless `copies` holds them already. Returns where they start from
+    // `base` in the copy.
+    const std::span<const uint8_t> all = archive.Bytes();
+    const auto append = [&all, &copy](Copies& copies, uint64_t offset, uint32_t size, std::size_t base)
+    {
+        const auto [at, added] = copies.try_emplace({offset, size}, 0);
+        if (added)
+        {
+            PadToFileAlignment(copy);
+            at->second = copy.size() - base;
+            const std::span<const uint8_t> data = all.subspan(static_cast<std::size_t>(offset), size);
+            copy.insert(copy.end(), data.begin(), data.end());
+        }
+
+        return at->second;
+    };
+
+    const std::vector<ntdlib::rsar::SoundArchive::Group>& groups = archive.Groups();
+    std::vector<GroupPlace> places(groups.size());
+    for (std::size_t g = 0; g < groups.size(); g++)
+    {
+        if (!groups[g].internal)
+        {
+            continue;
+        }
+
+        const ntdlib::rsar::SoundArchive::Group& group = groups[g];
+        GroupPlace& place = places[g];
+        place.files.resize(group.items.size());
+        place.waves.resize(group.items.size());
+        PadToFileAlignment(copy);
+        place.offset = copy.size();
+        Copies files;
+        for (std::size_t i = 0; i < group.items.size(); i++)
+        {
+            if (kept[g][i])
+            {
+                place.files[i] =
+                    append(files, uint64_t{group.offset} + group.items[i].offset, group.items[i].size, place.offset);
+            }
+        }
+
+        place.size = copy.size() - place.offset;
+        PadToFileAlignment(copy);
+        place.wave_data_offset = copy.size();
+        Copies waves;
+        for (std::size_t i = 0; i < group.items.size(); i++)
+        {
+            if (kept[g][i])
+            {
+                place.waves[i] = append(waves, uint64_t{group.wave_data_offset} + group.items[i].wave_data_offset,
+                                        group.items[i].wave_data_size, place.wave_data_offset);
+            }
+        }
+
+        place.wave_data_size = copy.size() - place.wave_data_offset;
+    }
+
+    PadToFileAlignment(copy);
+
+    return places;
+}
+
+// Writes the copy's size into its header and its FILE block's header, and each group's place and each item's into its
+// INFO block. An item that isn't kept starts at the copy's end.
+void WritePlaces(const ntdlib::rsar::SoundArchive& archive, const std::vector<std::vector<bool>>& kept,
+                 const std::vector<GroupEntries>& entries, const std::vector<GroupPlace>& places,
+                 std::size_t file_block, std::vector<uint8_t>& copy)
+{
+    const auto put = [&copy](std::size_t at, std::size_t value)
+    {
+        xsflib::StoreBe32(&copy[at], static_cast<uint32_t>(value));
+    };
+
+    const std::size_t end = copy.size();
+    put(0x08, end);
+    put(0x24, end - file_block);
+    put(file_block + 4, end - file_block);
+    for (std::size_t g = 0; g < places.size(); g++)
+    {
+        if (!archive.Groups()[g].internal)
+        {
+            continue;
+        }
+
+        const GroupPlace& place = places[g];
+        put(entries[g].group + 0x10, place.offset);
+        put(entries[g].group + 0x14, place.size);
+        put(entries[g].group + 0x18, place.wave_data_offset);
+        put(entries[g].group + 0x1C, place.wave_data_size);
+        for (std::size_t i = 0; i < entries[g].items.size(); i++)
+        {
+            put(entries[g].items[i] + 4, kept[g][i] ? place.files[i] : end - place.offset);
+            put(entries[g].items[i] + 0xC, kept[g][i] ? place.waves[i] : end - place.wave_data_offset);
+        }
+    }
+}
+
+// Whether two files hold the same bytes, wave data included, or neither is there.
+bool SameFile(const std::optional<ntdlib::rsar::FileData>& a, const std::optional<ntdlib::rsar::FileData>& b)
+{
+    return a.has_value() == b.has_value() &&
+           (!a || (std::ranges::equal(a->file, b->file) && std::ranges::equal(a->wave_data, b->wave_data)));
+}
+
+} // namespace
+
+std::vector<uint8_t> KeepSequenceData(const ntdlib::rsar::SoundArchive& archive, const std::vector<uint32_t>& indices)
+{
+    // The copy keeps the archive up to its files: the header, the SYMB and INFO blocks and the FILE block's header. The
+    // groups' entries must lie there.
+    const std::span<const uint8_t> all = archive.Bytes();
+    const xsflib::Reader r(all, true);
+    const std::size_t file_block = r.U32(0x20);
+    const std::vector<GroupEntries> entries = FindGroupEntries(r);
+    if (file_block + 8 > all.size() || !EntriesBeforeFiles(entries, archive.Groups(), file_block))
+    {
+        throw xsflib::FormatError("the archive's tables of groups don't come before its files");
+    }
+
+    // The FILE block then holds the items that the model reads.
+    const std::vector<uint32_t> files = SequenceFiles(archive, indices);
+    const std::vector<std::vector<bool>> kept = ItemsRead(archive, files);
+    std::vector<uint8_t> copy(all.begin(), all.begin() + static_cast<std::ptrdiff_t>(file_block + 8));
+    const std::vector<GroupPlace> places = AppendKeptItems(archive, kept, copy);
+    if (copy.size() > kMaxArchiveSize)
+    {
+        throw xsflib::FormatError("the files that the sequences play are too large for a sound archive");
+    }
+
+    WritePlaces(archive, kept, entries, places, file_block, copy);
+
+    // The model reads each sequence's files from the copy. They must hold the archive's bytes.
+    const ntdlib::rsar::SoundArchive cut = ntdlib::rsar::SoundArchive::Load(copy, nw4r::kRsarOptions);
+    for (const uint32_t file_id : files)
+    {
+        if (!SameFile(archive.File(file_id), cut.File(file_id)))
+        {
+            throw xsflib::FormatError("the files that the sequences play can't be cut out of the archive");
+        }
+    }
+
+    return copy;
 }
 
 namespace

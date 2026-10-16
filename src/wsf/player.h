@@ -8,9 +8,11 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ntdlib/flipper/file_disc.h"
@@ -60,6 +62,13 @@ public:
         interpret_effects_ = interpret;
     }
 
+    // A test that watches the game's code from the start sets `prepare` before a start. Game mode calls it with the
+    // emulated Wii between the boot's set-up and the game's first instruction.
+    void PrepareGame(std::function<void(wii::System&)> prepare)
+    {
+        prepare_game_ = std::move(prepare);
+    }
+
     // The frames in which WSF's models ran the effects in game mode, since the start.
     uint64_t NativeEffectFrames() const;
 
@@ -99,6 +108,7 @@ private:
     std::unique_ptr<wii::System> system_;
     std::unique_ptr<NativeEffects> native_effects_; // declared after the system that it watches
     bool interpret_effects_ = false;
+    std::function<void(wii::System&)> prepare_game_;
     std::vector<int16_t> system_output_;
     std::unique_ptr<ArchivePlayer> archive_;
 };
