@@ -4,6 +4,8 @@
 
 #include "ntdlib/fused.h"
 
+#include "axfx/util.h"
+
 namespace wsf::axfx
 {
 namespace
@@ -38,7 +40,7 @@ uint32_t Delay::GetMemSize(const Params& params)
 bool Delay::Init(const Params& params)
 {
     params_ = params;
-    active_ = kOff;
+    active_ = kStopped;
     for (int channel = 0; channel < kChannelCount; channel++)
     {
         if (params_.delay[channel] == 0 || params_.delay[channel] > kMaxDelay)
@@ -62,7 +64,7 @@ bool Delay::Init(const Params& params)
         return false;
     }
 
-    active_ = (active_ | kSkip) & ~kOff;
+    active_ = (active_ | kSkipFrame) & ~kStopped;
 
     return true;
 }
@@ -84,7 +86,7 @@ void Delay::Process(AuxFrame& frame)
 {
     if (active_ != 0)
     {
-        active_ &= ~kSkip;
+        active_ &= ~kSkipFrame;
         return;
     }
 
@@ -99,12 +101,7 @@ void Delay::Process(AuxFrame& frame)
             const int32_t delayed = line[position];
             const uint32_t feedback = static_cast<uint32_t>(Scale(delayed, feedback_gain_[channel]));
             line[position] = static_cast<int32_t>(static_cast<uint32_t>(sample) + feedback);
-            position++;
-            if (position >= length_[channel])
-            {
-                position = 0;
-            }
-
+            Step(position, length_[channel]);
             sample = Scale(delayed, out_gain_[channel]);
         }
     }
@@ -129,7 +126,7 @@ bool Delay::InitParams()
 
 void Delay::FreeLines()
 {
-    active_ |= kOff;
+    active_ |= kStopped;
     for (std::vector<int32_t>& line : line_)
     {
         line = std::vector<int32_t>();

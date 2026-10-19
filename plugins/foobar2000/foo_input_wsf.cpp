@@ -35,8 +35,8 @@ struct Traits
     static constexpr std::array<const char*, 1> kExtensions = {"miniwsf"};
     static constexpr uint8_t kPsfVersion = wsf::kPsfVersionWsf;
 
-    // The tags that arrange a sequence in archive mode. Editing or removing the tags keeps them as they are.
-    static constexpr std::array<const char*, 3> kKeptTags = {wsf::kTempoTag, wsf::kTracksTag, wsf::kVariablesTag};
+    // The tags that arrange a sequence in archive mode: the tracks, the tempo and the variables.
+    static constexpr std::array<const char*, 3> kPlaybackTags = {wsf::kTracksTag, wsf::kTempoTag, wsf::kVariablesTag};
 
     // The largest file read into memory: as large as a program may be. A .wsflib holds a game's sound archive. The
     // largest archives are hundreds of megabytes.

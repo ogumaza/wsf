@@ -119,10 +119,12 @@ Windows, use the commands above.
 
 ```
 src/ax/       AX's CPU side, and the exchange with its microcode
+src/axfx/     the models of the SDK's effects for AX's aux buses (AXFX)
 src/nw4r/     the model of nw4r::snd that plays archive mode
 src/wii/      the Wii for game mode: its hardware, IOS, and a disc made of a rip's files
 src/wsf/      the format and the player
-src/rip/      the ripper, the game profiles and the drivers' images
+src/rip/      the ripper: the parts that every game shares, the game profiles, a file for each sound library
+              and the drivers' images
 src/cli/      wsfrip and wsfplay
 externals/xsflib/    a library for players and rippers of the PSF family
 externals/ntdlib/    a library for the hardware and formats of Nintendo's consoles

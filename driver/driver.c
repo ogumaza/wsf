@@ -2,7 +2,7 @@
 
 /*
  * WSF guest driver for games whose sound code is NintendoWare for Revolution's nw4r::snd. It's compiled for Broadway
- * and stored in every game-mode .wsflib of such a game. A JAudio2 game's .wsflib contains the driver in jaudio.c
+ * and stored in every game-mode .wsflib of such a game. A JAudio game's .wsflib contains one of the JAudio drivers
  * instead. The player boots the game's startup code: the OS initialisation and the static constructors. The rip patches
  * the game's main to branch here.
  *
@@ -21,7 +21,8 @@
  * For a game with an effect profile, the driver also sets up the game's effects on AX's aux buses (docs/wsf.md,
  * "Effects"). It makes the game's effect objects before it starts the sound. AX's frame callback then appends them in
  * the first frame after the sound has started. Archive mode does the same. In each frame, the callback lets the sound's
- * variables pick the presets of an effect that has them.
+ * variables pick the presets of an effect that has them. The profile can also give tracks that the game silences on the
+ * sound (docs/wsf.md, "Tracks that the game silences"). The driver sets their volumes to 0 as the sound starts.
  * `driver_params.status` reports the driver's progress to the player (see docs/wsf.md).
  *
  * Build with driver/build.py (clang). The result is committed as src/rip/driver_blob.h. Building WSF itself requires
@@ -109,6 +110,11 @@ struct Params {
         u32 shutdown;      /* void FxXxx::Shutdown() */
         u32 update_buffer; /* void FxXxx::UpdateBuffer(int channels, void** buffers, ...) */
     } native[4];
+    /* The tracks that the game silences on the sound (none while silenced_tracks is 0). The driver writes a volume of
+       0 into each, as SeqSound::SetTrackVolume does. */
+    u32 seq_tracks;      /* the offset of the SeqPlayer's 16 track pointers in SeqSound */
+    u32 track_volume;    /* the offset of the volume, a float, in SeqTrack */
+    u32 silenced_tracks; /* bit N for track N; patched by a .miniwsf */
 };
 
 #define NO_GROUP 0xffffffffu
@@ -241,6 +247,18 @@ static void frame_callback(void) {
     }
 }
 
+/* SeqSound::SetTrackVolume(silenced_tracks, 0) on the sound that `handle` holds. 0 is a float's 0.0. */
+static void silence_tracks(void) {
+    volatile struct Params* p = &driver_params;
+    for (u32 i = 0; i < 16; i++) {
+        if (!(p->silenced_tracks & (1u << i)))
+            continue;
+        const u32 track = *(volatile u32*)(handle + p->seq_tracks + i * 4);
+        if (track)
+            *(volatile u32*)(track + p->track_volume) = 0;
+    }
+}
+
 /* Makes the effect objects, each with a work buffer large enough for its Params, and takes over AX's frame callback. */
 static void set_up_effects(void) {
     volatile struct Params* p = &driver_params;
@@ -304,27 +322,32 @@ __attribute__((noreturn)) void driver_main(void) {
     if (p->bank_group_id != NO_GROUP && !(((fn4)p->load_group)(player, p->bank_group_id, heap, 0) & 0xff))
         fail(8);
 
-    /* nw4r::snd's sound system and threads, then the sound. With effects, no AX frame comes between the start of the
-       sound and the first update. That update passes the game's send on the sound to its player. AX's next frame then
-       appends the effects. */
+    /* nw4r::snd's sound system and threads, then the sound. With effects or silenced tracks, no AX frame comes between
+       the start of the sound and the driver's writes to it. The silenced tracks are then silent from the sound's first
+       frame. With effects, an update in that window passes the game's send on the sound to its player. AX's next frame
+       then appends the effects. */
     if (p->init_flag)
         *(volatile unsigned char*)p->init_flag = 0;
     ((fn2)p->init_sound_system)(p->sound_priority, p->dvd_priority);
     const u32 effects = p->effect_count != 0;
+    const u32 at_once = effects || p->silenced_tracks;
     u32 msr = 0;
-    if (effects) {
+    if (effects)
         set_up_effects();
+    if (at_once)
         msr = disable_interrupts();
-    }
     if (((fn6)p->start_sound)(player + p->startable_offset, (u32)&handle, p->sound_id, 0, 0, 0) != 0)
         fail(7);
+    if (p->silenced_tracks && handle)
+        silence_tracks();
     if (effects) {
         if (p->send_bus < 3 && handle)
             *(volatile u32*)(handle + p->sound_sends + p->send_bus * 4) = p->send;
         ((fn1)p->update)(player);
         effects_state = 1;
-        restore_interrupts(msr);
     }
+    if (at_once)
+        restore_interrupts(msr);
     p->status = STATUS_PLAYING;
 
     for (;;) {

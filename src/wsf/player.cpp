@@ -33,9 +33,6 @@ constexpr uint64_t kStepCycles = wii::System::kCpuClock / 1000;
 // Longest time allowed from boot until the driver reports that the sound plays.
 constexpr uint64_t kBootTimeout = uint64_t{10} * wii::System::kCpuClock;
 
-// The partition header, stored in the set as a FILE chunk. The disc starts with it.
-constexpr char kHeaderPath[] = "sys/boot.bin";
-
 } // namespace
 
 struct Player::SourceSnapshot : xsflib::player::ModeSnapshot<ArchivePlayer::Snapshot, wii::System::Snapshot>
@@ -93,11 +90,10 @@ uint64_t Player::EmulatedCycles() const
 
 bool Player::StartSource()
 {
+    // A restart releases the source of the last start first.
+    Unload();
     if (set_.archive)
     {
-        native_effects_.reset();
-        system_.reset();
-        disc_.reset();
         archive_ = std::make_unique<ArchivePlayer>();
         if (auto err = archive_->Start(set_))
         {
@@ -107,11 +103,7 @@ bool Player::StartSource()
         return true;
     }
 
-    archive_.reset();
-
     // The disc: the partition's header and the set's files.
-    native_effects_.reset();
-    system_.reset();
     disc_ = ntdlib::flipper::DiscFromFiles(set_.files, kHeaderPath, ntdlib::disc::kWiiMagicOffset,
                                            ntdlib::disc::kWiiMagic, 4);
     system_ = std::make_unique<wii::System>(*disc_);

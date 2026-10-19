@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+// Game mode's length analysis and wave discovery for a JAudio game (see jaudio_analysis.h).
+
 #include "rip/jaudio_analysis.h"
 
 #include <cstddef>
@@ -73,12 +75,12 @@ ntdlib::jaudio::GameLengthRules JAudioLengthRules()
     return rules;
 }
 
-} // namespace
-
-std::optional<xsflib::rip::Timing> AnalyzeJAudioSound(const std::vector<uint8_t>& library, const JAudioProfile& profile,
-                                                      uint32_t sound_id, std::span<const uint32_t> waves,
-                                                      std::set<ntdlib::jaudio::WaveUse>* found, bool lookups_sound,
-                                                      std::string* start_error)
+// Runs ntdlib's analysis of the game's code (see AnalyzeJAudioSound) on the set of `library` and a mini for sound
+// `sound_id`, with `waves` loaded. With `lookups_sound`, each lookup of a wave counts as a sound (see FindJAudioWaves).
+std::optional<xsflib::rip::Timing> PlayAndWatch(const std::vector<uint8_t>& library, const JAudioProfile& profile,
+                                                uint32_t sound_id, std::span<const uint32_t> waves,
+                                                std::set<ntdlib::jaudio::WaveUse>* found, bool lookups_sound,
+                                                std::string* start_error)
 {
     const std::map<std::string, std::vector<uint8_t>> files = {
         {kLibName, library},
@@ -113,6 +115,22 @@ std::optional<xsflib::rip::Timing> AnalyzeJAudioSound(const std::vector<uint8_t>
     return ntdlib::jaudio::AnalyzeGameSound(machine, kJAudioZ2Address + ntdlib::flipper::z2::kHandleOffset,
                                             WatchOf(profile, sound_id), JAudioLengthRules(), found, lookups_sound,
                                             sound_id);
+}
+
+} // namespace
+
+std::optional<xsflib::rip::Timing> AnalyzeJAudioSound(const std::vector<uint8_t>& library, const JAudioProfile& profile,
+                                                      uint32_t sound_id, std::span<const uint32_t> waves,
+                                                      std::set<ntdlib::jaudio::WaveUse>* found,
+                                                      std::string* start_error)
+{
+    return PlayAndWatch(library, profile, sound_id, waves, found, false, start_error);
+}
+
+bool FindJAudioWaves(const std::vector<uint8_t>& library, const JAudioProfile& profile, uint32_t sound_id,
+                     std::set<ntdlib::jaudio::WaveUse>& found)
+{
+    return PlayAndWatch(library, profile, sound_id, {}, &found, true, nullptr).has_value();
 }
 
 } // namespace wsf::rip

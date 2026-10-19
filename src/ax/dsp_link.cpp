@@ -26,6 +26,26 @@ constexpr uint64_t kStepLimit = 20'000'000;
 // microcode loop that waits for the next mail. They change no state.
 constexpr uint64_t kBatchSteps = 256;
 
+// Bit 31 of a mailbox is set while the mailbox holds a mail that hasn't been read.
+constexpr uint32_t kMailboxFull = 0x80000000;
+
+// Runs `dsp` in batches until `done` returns true. Returns false if the DSP halts first or runs kStepLimit steps.
+template <typename Done>
+bool RunUntil(ntdlib::dsp::Dsp<ntdlib::dsp::WiiMemory>& dsp, Done done)
+{
+    for (uint64_t steps = 0; !done(); steps += kBatchSteps)
+    {
+        if (steps >= kStepLimit || dsp.Halted())
+        {
+            return false;
+        }
+
+        dsp.Run(kBatchSteps);
+    }
+
+    return true;
+}
+
 } // namespace
 
 bool DspLink::Start(std::span<const uint16_t> microcode, uint32_t address)
@@ -62,29 +82,14 @@ bool DspLink::SendMail(uint32_t mail)
     dsp_->CpuWriteMailboxHigh(static_cast<uint16_t>(mail >> 16));
     dsp_->CpuWriteMailboxLow(static_cast<uint16_t>(mail));
 
-    for (uint64_t steps = 0; dsp_->MailboxToDsp() & 0x80000000; steps += kBatchSteps)
-    {
-        if (steps >= kStepLimit || dsp_->Halted())
-        {
-            return false;
-        }
-
-        dsp_->Run(kBatchSteps);
-    }
-
-    return true;
+    return RunUntil(*dsp_, [this] { return (dsp_->MailboxToDsp() & kMailboxFull) == 0; });
 }
 
 bool DspLink::WaitForMail(uint32_t& mail)
 {
-    for (uint64_t steps = 0; !(dsp_->MailboxToCpu() & 0x80000000); steps += kBatchSteps)
+    if (!RunUntil(*dsp_, [this] { return (dsp_->MailboxToCpu() & kMailboxFull) != 0; }))
     {
-        if (steps >= kStepLimit || dsp_->Halted())
-        {
-            return false;
-        }
-
-        dsp_->Run(kBatchSteps);
+        return false;
     }
 
     // This code takes the place of the DSP library's interrupt handler. The microcode raises that interrupt when it

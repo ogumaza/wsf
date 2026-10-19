@@ -102,6 +102,9 @@ private:
     // Carries out the request at `address`. Returns false for one that stays pending, such as an event hook.
     bool Execute(ntdlib::PAddr address, int32_t& result);
 
+    // Whether a reply waits and may go out once it's due: the PPC has taken the last reply (X2) and cleared Y1.
+    bool CanSendReply() const;
+
     int32_t Open(const std::string& path);
     void SetIrq();
 

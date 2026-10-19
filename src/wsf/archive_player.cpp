@@ -16,6 +16,7 @@
 #include "xsflib/bytes.h"
 #include "xsflib/player/archive_source.h"
 
+#include "nw4r/arrangement.h"
 #include "nw4r/effect_setup.h"
 #include "nw4r/engine.h"
 #include "nw4r/rsar_options.h"
@@ -26,7 +27,7 @@ namespace
 {
 
 // WSF's steps of archive mode: the set's archive and AX's microcode, the model of NW4R SND and AX, and the sequence in
-// the arrangement that the tags give.
+// the arrangement that the tags and the descriptor give.
 struct ArchiveTraits
 {
     using Set = const LoadedSet;
@@ -40,7 +41,7 @@ struct ArchiveTraits
         const std::vector<uint8_t>* archive = nullptr;
         ntdlib::Microcode microcode;
         uint32_t sound = 0;
-        nw4r::Arrangement arrangement; // from the tags
+        nw4r::Arrangement arrangement; // from the tags and the descriptor's tracks
     };
 
     static constexpr bool kKeepArchive = false;
@@ -71,8 +72,9 @@ struct ArchiveTraits
             return "no sequence selected";
         }
 
+        // The tracks that the game plays of the sound, unless the tags give others.
         prepared.sound = *set.sound;
-        prepared.arrangement = ArrangementFromTags(set.tags);
+        prepared.arrangement = ArrangementFromTags(set.tags, nw4r::TracksOf(d.effects.tracks, prepared.sound));
         prepared.microcode.address = d.microcode_address;
         for (std::size_t i = 0; i < ntdlib::kMicrocodeWords; i++)
         {
@@ -111,10 +113,8 @@ struct ArchiveTraits
     {
         // The effects that the game puts on the aux buses for the sound, and the sends that it sets on the sound. The
         // first AX frame after the sequence has started appends the effects.
-        const std::vector<nw4r::EffectSetup>& effects = prepared.descriptor->effects;
-        model.engine->SetEffects(nw4r::EffectsFor(effects, prepared.sound),
-                                 nw4r::FollowsVariables(effects, prepared.sound),
-                                 nw4r::SendsOf(prepared.descriptor->sends, prepared.sound));
+        const nw4r::ArchiveEffects& effects = prepared.descriptor->effects;
+        model.engine->SetEffects(effects.setups, effects.sends, prepared.sound);
         if (!model.engine->StartSequence(prepared.sound, prepared.arrangement))
         {
             return "sound " + std::to_string(prepared.sound) + " isn't a sequence, or its data isn't in the archive";

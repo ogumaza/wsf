@@ -4,8 +4,7 @@
 // of the biquad filter that later builds add. Modelled on Wii Sports' main.dol (NW4R SND of 2007). A function that
 // follows one of the game's routines gives its address. NW4R SND and the SDK are built without fused multiply-adds. The
 // same single-precision operations in the same order therefore give the game's results. The header also defines
-// SndBuild, the build of NW4R SND that a main.dol links. The checks for the builds of November 2008 and September 2009
-// are here too.
+// SndBuild, the build of NW4R SND that a main.dol links.
 
 #pragma once
 
@@ -25,22 +24,6 @@ namespace wsf::nw4r
 // The build of NW4R SND that a main.dol links (ntdlib/sound_build.h).
 using SndBuild = ntdlib::SndBuild;
 
-// Builds from November 2008 on take the low-pass filter's cutoff from a table (see CalcLpfFreq). The earliest build
-// seen with the table is of November 20 2008. The latest build seen without it is of September 19 2008. The builds
-// between those dates haven't been checked. They count as the older kind.
-inline bool SinceNovember2008(const SndBuild& build)
-{
-    return build.date >= 20081120;
-}
-
-// Builds from September 2009 on let a voice's volume and envelope go above full level (see Voice::SetVolume). The
-// earliest build seen that does is of September 24 2009. The latest build seen that doesn't is of November 20 2008. The
-// builds between those dates haven't been checked. They count as the older kind.
-inline bool SinceSeptember2009(const SndBuild& build)
-{
-    return build.date >= 20090924;
-}
-
 // Converts a float to an unsigned integer like the game's runtime (__cvt_fp2unsigned, 0x800b1c1c): 0 below 0, all ones
 // from 2^32 (and for NaN), and truncated between.
 using axfx::ToUnsigned;
@@ -59,19 +42,15 @@ inline float CalcPanRatio(float pan, const PanInfo& info)
     return ntdlib::nwsnd::CalcPanRatio<ntdlib::nwsnd::RevolutionPolicy>(pan, info, ntdlib::nwsnd::OutputMode::kStereo);
 }
 
-// The low-pass filter's cutoff in Hz for a scale of 0..1: 32000 * 2^(10 (scale - 1)) (Util::CalcLpfFreq, 0x8004eb98).
-// The game computes the power with its C library's pow in double precision. Builds from November 2008 on take the
-// cutoff from a table instead. The Wii U's library (CafePolicy) reads the table in the same way: 80 Hz below
-// 0.13561438, 16000 Hz from 0.9, and steps a thirtieth apart between them. These builds hold the scale to 0 and 1 here,
-// not in Voice::SetLpfFreq. The model holds it in both places. The cutoffs come out the same.
+// The low-pass filter's cutoff in Hz for a scale of 0..1 in `build` (Util::CalcLpfFreq, 0x8004eb98):
+// 32000 * 2^(10 (scale - 1)). The game computes the power with its C library's pow in double precision. Builds from
+// November 2008 on take the cutoff from a table instead (SndBuild::SinceNovember2008). The Wii U's library reads the
+// table in the same way: 80 Hz below 0.13561438, 16000 Hz from 0.9, and steps a thirtieth apart between them. These
+// builds hold the scale to 0 and 1 here, not in Voice::SetLpfFreq. The model holds it in both places. The cutoffs come
+// out the same.
 inline uint16_t CalcLpfFreq(float scale, const SndBuild& build)
 {
-    if (SinceNovember2008(build))
-    {
-        return ntdlib::nwsnd::CalcLpfFreq<ntdlib::nwsnd::CafePolicy>(scale);
-    }
-
-    return ntdlib::nwsnd::CalcLpfFreq<ntdlib::nwsnd::RevolutionPolicy>(scale);
+    return ntdlib::nwsnd::CalcLpfFreq<ntdlib::nwsnd::RevolutionPolicy>(scale, build);
 }
 
 // The biquad filter's coefficients b0, b1, b2, a1 and a2 for a filter `type` at a `value` of 0 (mildest) to 1, in

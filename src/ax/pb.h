@@ -30,6 +30,9 @@ constexpr int kRemoteSamplesPerFrame = 18;
 constexpr int kSampleRate = 32000;
 constexpr int kRemoteCount = 4;
 
+// The aux buses: A, B and C.
+constexpr int kAuxBusCount = 3;
+
 // AX has 96 voices (AX_VOICE_MAX) and 32 priorities, as the Wii U's AX has (ntdlib::ax). Priority 0 marks a free voice.
 // Priority 31 is the highest. The build of October 2006 has 64 voices.
 using ntdlib::ax::kPriorityFree;
@@ -47,7 +50,15 @@ using ntdlib::ax::SampleFormat;
 constexpr uint32_t kAdpcmSamplesPerFrame = 14;
 constexpr uint32_t kAdpcmNibblesPerFrame = 16;
 
+// PCM decodes with no prediction. The ADPCM block's gain scales its samples to 16 bits.
+constexpr uint16_t kPcm16Gain = 0x800;
+constexpr uint16_t kPcm8Gain = 0x100;
+
 using ntdlib::ax::VoiceState;
+
+// The values of Pb::src_select and Pb::type.
+using ntdlib::ax::SrcMode;
+using ntdlib::ax::VoiceType;
 
 // Values of the `on` word in PbLpf, PbBiquad and the remote filter. The remote filter can be either type.
 constexpr uint16_t kLpfOn = 1;
@@ -269,12 +280,12 @@ struct Pb
     uint16_t next_lo = 0;
     uint16_t curr_hi = 0; // + 0x4: this PB's address
     uint16_t curr_lo = 0;
-    uint16_t src_select = 0;    // + 0x8: 0 polyphase (4 taps), 1 linear, 2 none
+    uint16_t src_select = 0;    // + 0x8: the SrcMode
     uint16_t coef_select = 0;   // + 0xa: the polyphase coefficients: 0 8 kHz, 1 12 kHz, 2 16 kHz
     uint16_t mixer_ctrl_hi = 0; // + 0xc
     uint16_t mixer_ctrl_lo = 0;
     uint16_t state = 0;          // + 0x10
-    uint16_t type = 0;           // + 0x12: 0 normal, 1 stream
+    uint16_t type = 0;           // + 0x12: the VoiceType
     PbMix mix;                   // + 0x14
     PbItd itd;                   // + 0x44
     PbDpop dpop;                 // + 0x52

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 
 // Unit tests for the WSF file format code (src/wsf/format.*): the version byte, the process and archive descriptors
-// with the archive's effects, what WSF's format gives xsflib's set loader (its PSF version, its descriptors and its
-// driver block), and the tags that arrange a sequence in archive mode. xsflib's psf_test and psf_set_test cover the PSF
-// container, tags, times, program chunks, the loader and the variables tag's syntax.
+// with the archive's effects and the tracks that the game plays, what WSF's format gives xsflib's set loader (its PSF
+// version, its descriptors and its driver block), and the tags that arrange a sequence in archive mode. xsflib's
+// psf_test and psf_set_test cover the PSF container, tags, times, program chunks, the loader and the variables tag's
+// syntax.
 
 #include "wsf/format.h"
 
@@ -97,8 +98,8 @@ static void TestLoadSet()
         XSFLIB_CHECK(LoadSet("dir/flags.wsflib", reader, set).has_value());
     }
 
-    // A driver block of version 1 (NW4R SND's driver) or 2 (JAudio2's) plays. A block of another version doesn't. Like
-    // the rest of the Wii's memory, the block's words are big-endian.
+    // A driver block of version 1 (NW4R SND's driver) or 2 (the JAudio drivers) plays. A block of another version
+    // doesn't. Like the rest of the Wii's memory, the block's words are big-endian.
     const auto driver_block = [](uint32_t version)
     {
         std::vector<uint8_t> block(0x20, 0);
@@ -273,34 +274,37 @@ static void TestEffects()
     chorus.type = nw4r::EffectType::kChorus;
     chorus.presets = {{1, 2, 3}, {4, 5, 6}};
     chorus.sounds = {7, 70000};
-    d.effects = {reverb, chorus};
-    d.sends = {{12, 0, 0.25f}, {13, 1, 0.5f}};
+    d.effects.setups = {reverb, chorus};
+    d.effects.sends = {{12, 0, 0.25f}, {13, 1, 0.5f}};
 
     ArchiveDescriptor dry = d;
-    dry.effects.clear();
-    dry.sends.clear();
+    dry.effects.setups.clear();
+    dry.effects.sends.clear();
     const std::vector<uint8_t> raw = d.Serialize();
     const auto back = ArchiveDescriptor::Parse(raw);
 
     // 4 for the count, 12 + 6 * 4 for the reverb, 12 + 2 * 3 * 4 + 2 * 4 for the chorus, and 4 + 2 * 12 for the sends.
     XSFLIB_CHECK(raw.size() == dry.Serialize().size() + 4 + 36 + 44 + 28);
-    XSFLIB_CHECK(back && back->effects.size() == 2 && back->sends.size() == 2);
-    XSFLIB_CHECK(back && back->effects[0].bus == 0 && back->effects[0].type == nw4r::EffectType::kReverbHi &&
-                 back->effects[0].params == reverb.params && back->effects[0].presets.empty() &&
-                 back->effects[0].sounds.empty());
-    XSFLIB_CHECK(back && back->effects[1].bus == 2 && back->effects[1].type == nw4r::EffectType::kChorus &&
-                 back->effects[1].presets == chorus.presets && back->effects[1].sounds == chorus.sounds);
-    XSFLIB_CHECK(back && back->sends[1].sound == 13 && back->sends[1].bus == 1 && back->sends[1].send == 0.5f);
+    XSFLIB_CHECK(back && back->effects.setups.size() == 2 && back->effects.sends.size() == 2);
+    XSFLIB_CHECK(back && back->effects.setups[0].bus == 0 &&
+                 back->effects.setups[0].type == nw4r::EffectType::kReverbHi &&
+                 back->effects.setups[0].params == reverb.params && back->effects.setups[0].presets.empty() &&
+                 back->effects.setups[0].sounds.empty());
+    XSFLIB_CHECK(back && back->effects.setups[1].bus == 2 &&
+                 back->effects.setups[1].type == nw4r::EffectType::kChorus &&
+                 back->effects.setups[1].presets == chorus.presets && back->effects.setups[1].sounds == chorus.sounds);
+    XSFLIB_CHECK(back && back->effects.sends[1].sound == 13 && back->effects.sends[1].bus == 1 &&
+                 back->effects.sends[1].send == 0.5f);
 
     // Only the presets' sounds follow the variables. Each sound gets its sends by bus.
-    XSFLIB_CHECK(nw4r::FollowsVariables(d.effects, 70000) && !nw4r::FollowsVariables(d.effects, 12));
-    XSFLIB_CHECK((nw4r::SendsOf(d.sends, 13) == std::array<float, 3>{0.0f, 0.5f, 0.0f}));
-    XSFLIB_CHECK((nw4r::SendsOf(d.sends, 14) == std::array<float, 3>{}));
+    XSFLIB_CHECK(nw4r::FollowsVariables(d.effects.setups, 70000) && !nw4r::FollowsVariables(d.effects.setups, 12));
+    XSFLIB_CHECK((nw4r::SendsOf(d.effects.sends, 13) == std::array<float, 3>{0.0f, 0.5f, 0.0f}));
+    XSFLIB_CHECK((nw4r::SendsOf(d.effects.sends, 14) == std::array<float, 3>{}));
 
     // A descriptor without effects has neither block.
     const auto dry_back = ArchiveDescriptor::Parse(dry.Serialize());
 
-    XSFLIB_CHECK(dry_back && dry_back->effects.empty() && dry_back->sends.empty());
+    XSFLIB_CHECK(dry_back && dry_back->effects.setups.empty() && dry_back->effects.sends.empty());
 
     // An effect of a type that the player doesn't know is skipped. One whose words don't fit its type, or whose bus
     // isn't A, B or C, is skipped too.
@@ -309,16 +313,68 @@ static void TestEffects()
     odd[first_effect + 1] = 9;
     const auto skipped = ArchiveDescriptor::Parse(odd);
 
-    XSFLIB_CHECK(skipped && skipped->effects.size() == 1 && skipped->effects[0].type == nw4r::EffectType::kChorus &&
-                 skipped->sends.size() == 2);
+    XSFLIB_CHECK(skipped && skipped->effects.setups.size() == 1 &&
+                 skipped->effects.setups[0].type == nw4r::EffectType::kChorus && skipped->effects.sends.size() == 2);
 
     odd = raw;
     odd[first_effect] = 3;
 
-    XSFLIB_CHECK(ArchiveDescriptor::Parse(odd) && ArchiveDescriptor::Parse(odd)->effects.size() == 1);
+    XSFLIB_CHECK(ArchiveDescriptor::Parse(odd) && ArchiveDescriptor::Parse(odd)->effects.setups.size() == 1);
 
     // Effects that run past the end of the descriptor make it unreadable.
     XSFLIB_CHECK(!ArchiveDescriptor::Parse(std::vector<uint8_t>(raw.begin(), raw.end() - 30)).has_value());
+}
+
+static void TestTracks()
+{
+    // The tracks that the game plays of some sounds follow the sends (docs/wsf.md, "Archive descriptor").
+    ArchiveDescriptor d;
+    d.archive_path = "Sound/b.brsar";
+    d.microcode_path = "ax_microcode.bin";
+    d.snd_build = 20080000;
+    d.effects.sends = {{12, 0, 0.25f}};
+    d.effects.tracks = {{12, 0x07ff}, {13, 0x7fff}};
+
+    ArchiveDescriptor without = d;
+    without.effects.tracks.clear();
+    const std::vector<uint8_t> raw = d.Serialize();
+    const auto back = ArchiveDescriptor::Parse(raw);
+
+    // 4 for the count, and 2 * 8 for the sounds and their tracks.
+    XSFLIB_CHECK(raw.size() == without.Serialize().size() + 4 + 16);
+    XSFLIB_CHECK(back && back->effects.sends.size() == 1 && back->effects.tracks.size() == 2 &&
+                 back->effects.tracks[0].sound == 12 && back->effects.tracks[0].tracks == 0x07ff &&
+                 back->effects.tracks[1].sound == 13 && back->effects.tracks[1].tracks == 0x7fff);
+
+    // A sound that the block doesn't list plays every track.
+    XSFLIB_CHECK(nw4r::TracksOf(d.effects.tracks, 13) == 0x7fff &&
+                 nw4r::TracksOf(d.effects.tracks, 14) == nw4r::kAllTracks);
+
+    // Tracks without effects or sends follow empty blocks of both.
+    ArchiveDescriptor plain = without;
+    plain.effects.sends.clear();
+    ArchiveDescriptor only = plain;
+    only.effects.tracks = {{5, 0x0001}};
+    const auto only_back = ArchiveDescriptor::Parse(only.Serialize());
+
+    XSFLIB_CHECK(only.Serialize().size() == plain.Serialize().size() + 4 + 4 + 4 + 8);
+    XSFLIB_CHECK(only_back && only_back->effects.setups.empty() && only_back->effects.sends.empty() &&
+                 only_back->effects.tracks.size() == 1 && only_back->effects.tracks[0].sound == 5 &&
+                 only_back->effects.tracks[0].tracks == 0x0001);
+
+    // A sound's tracks above track 15 make the player skip the sound's entry. Tracks that run past the end of the
+    // descriptor make it unreadable.
+    std::vector<uint8_t> odd = raw;
+    odd[raw.size() - 16 + 6] = 1;
+    const auto skipped = ArchiveDescriptor::Parse(odd);
+
+    XSFLIB_CHECK(skipped && skipped->effects.tracks.size() == 1 && skipped->effects.tracks[0].sound == 13);
+    XSFLIB_CHECK(!ArchiveDescriptor::Parse(std::vector<uint8_t>(raw.begin(), raw.end() - 4)).has_value());
+
+    // A wsf_tracks tag replaces the tracks that the descriptor gives a sound. A malformed one leaves them.
+    XSFLIB_CHECK(ArrangementFromTags({}, 0x07ff).tracks == 0x07ff);
+    XSFLIB_CHECK(ArrangementFromTags({{"wsf_tracks", "11-13"}}, 0x07ff).tracks == 0x3800);
+    XSFLIB_CHECK(ArrangementFromTags({{"wsf_tracks", "16"}}, 0x07ff).tracks == 0x07ff);
 }
 
 static void TestEffectsBySound()
@@ -371,6 +427,7 @@ int main()
     TestArchiveMode();
     TestEffects();
     TestEffectsBySound();
+    TestTracks();
     TestArrangementTags();
     TestDescriptor();
     TestLoadSet();

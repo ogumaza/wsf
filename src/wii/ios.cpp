@@ -22,6 +22,14 @@ namespace wsf::wii
 namespace
 {
 
+// The registers, by their offsets from 0x0D000000: the PPC's request, the PPC's control, IOS's reply, and the PPC's
+// Hollywood interrupts, flagged and enabled.
+constexpr uint32_t kPpcMsg = 0x00;
+constexpr uint32_t kPpcCtrl = 0x04;
+constexpr uint32_t kArmMsg = 0x08;
+constexpr uint32_t kPpcIrqFlag = 0x30;
+constexpr uint32_t kPpcIrqMask = 0x34;
+
 // PPCCTRL's bits.
 constexpr uint32_t kX1 = 1u << 0;  // the PPC sends a request
 constexpr uint32_t kY2 = 1u << 1;  // IOS has taken it
@@ -561,15 +569,15 @@ uint32_t Ios::Read(uint32_t offset) const
 {
     switch (offset)
     {
-    case 0x00:
+    case kPpcMsg:
         return ppc_message_;
-    case 0x04:
+    case kPpcCtrl:
         return ppc_control_;
-    case 0x08:
+    case kArmMsg:
         return arm_message_;
-    case 0x30:
+    case kPpcIrqFlag:
         return irq_flags_;
-    case 0x34:
+    case kPpcIrqMask:
         return irq_mask_;
     default:
         return 0;
@@ -580,11 +588,11 @@ void Ios::Write(uint32_t offset, uint32_t value)
 {
     switch (offset)
     {
-    case 0x00:
+    case kPpcMsg:
         ppc_message_ = value;
         break;
 
-    case 0x04:
+    case kPpcCtrl:
         {
             // Writing 1 to Y1 or Y2 clears it. X2 releases the reply. X1 sends the request in PPCMSG.
             ppc_control_ = (ppc_control_ & (kY1 | kY2) & ~value) | (value & (kIy1 | kIy2));
@@ -608,11 +616,11 @@ void Ios::Write(uint32_t offset, uint32_t value)
             break;
         }
 
-    case 0x30:
+    case kPpcIrqFlag:
         irq_flags_ &= ~value;
         break;
 
-    case 0x34:
+    case kPpcIrqMask:
         irq_mask_ = value;
         break;
 
@@ -629,7 +637,7 @@ bool Ios::InterruptPending() const
 uint64_t Ios::NextEvent() const
 {
     uint64_t next = ack_due_;
-    if (!replies_.empty() && !reply_out_ && !(ppc_control_ & kY1))
+    if (CanSendReply())
     {
         next = std::min(next, replies_.front().due);
     }
@@ -647,7 +655,7 @@ void Ios::Advance(uint64_t now)
     }
 
     // The next reply. It goes out once the PPC has taken the last one.
-    if (!replies_.empty() && !reply_out_ && !(ppc_control_ & kY1) && now >= replies_.front().due)
+    if (CanSendReply() && now >= replies_.front().due)
     {
         const Request reply = replies_.front();
         replies_.pop_front();
@@ -665,6 +673,11 @@ void Ios::Advance(uint64_t now)
         reply_out_ = true;
         SetIrq();
     }
+}
+
+bool Ios::CanSendReply() const
+{
+    return !replies_.empty() && !reply_out_ && !(ppc_control_ & kY1);
 }
 
 void Ios::SetIrq()

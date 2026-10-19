@@ -13,17 +13,20 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <utility>
 #include <vector>
 
 #include "ntdlib/dsp/dsp.h"
 #include "ntdlib/dsp/memory.h"
+#include "ntdlib/nwsnd/length_hooks.h"
 #include "ntdlib/rsar/formats.h"
 #include "ntdlib/sound_build.h"
 #include "ntdlib/types.h"
 
 #include "ax/dsp_link.h"
+#include "ax/pb.h"
 #include "ax/system.h"
 #include "nw4r/arrangement.h"
 #include "nw4r/driver.h"
@@ -48,7 +51,9 @@ struct LoadedBank
     ntdlib::PAddr wave_address = 0;     // where wave_data is in MEM2
 };
 
-class Engine
+// The engine for one sound archive (see the file's comment). The length analysis's hooks for the sequence's loops, for
+// every track's passes and for each open of a track by another track come from ntdlib's LengthHooks.
+class Engine : public ntdlib::nwsnd::LengthHooks
 {
 public:
     // The engine's state between sound frames, for a snapshot of the model: its pools, its players' state and the
@@ -65,12 +70,12 @@ public:
         Effects effects;
     };
 
-    // The hooks that the length analysis and the tests set (see SetLoopHook, SetVoiceParamHook and
+    // The other hooks that the length analysis and the tests set (see SetCommandStartHook, SetVoiceParamHook and
     // SetChannelEventHook).
-    using LoopHook = std::function<void(int track, uint32_t target)>;
     using VoiceParamHook =
         std::function<void(ChannelId owner, const ntdlib::nwsnd::RevolutionPolicy::ChannelVoiceParam& param)>;
     using ChannelEventHook = std::function<void(const Channel& channel, Channel::CallbackStatus status)>;
+    using CommandStartHook = std::function<void(int track, uint32_t offset)>;
 
     // Sets up NW4R SND's side of AX (AxManager::Init, 0x800313c4): the zero buffer, and the frame callback through
     // which AX's interrupt ends the voices' ramps (SoundThread::AxCallbackFunc, 0x80047c44) and runs the effects' part
@@ -135,13 +140,14 @@ public:
         return global_variables_;
     }
 
-    // Sets up the effects that the game puts on the aux buses for the sound (see Effects::Set). With
-    // `follow_variables`, the variables of the sequence that starts first pick the presets. `sends` are the sends that
-    // the game sets on the sound, by bus. Every sequence that the engine plays gets them.
-    void SetEffects(const std::vector<EffectSetup>& setups, bool follow_variables,
-                    const std::array<float, ax::kAuxBusCount>& sends = {})
+    // Sets up the effects that the game puts on the aux buses for `sound`, and the sends that it sets on the sound,
+    // from a set's `setups` and `sends` (see EffectsFor, FollowsVariables, SendsOf and Effects::Set). Where the sound's
+    // variables pick an effect's presets, the engine reads the variables of the sequence that starts first. Every
+    // sequence that the engine plays gets the effects and the sends.
+    void SetEffects(const std::vector<EffectSetup>& setups, const std::vector<SoundSend>& sends, uint32_t sound)
     {
-        effects_.Set(setups, AxfxBuild(build_), follow_variables, sends);
+        effects_.Set(EffectsFor(setups, sound), AxfxBuild(build_), FollowsVariables(setups, sound),
+                     SendsOf(sends, sound));
     }
 
     // Whether any effect is set up.
@@ -180,21 +186,32 @@ public:
     // Whether a sequence is still playing, or any note still sounds.
     bool IsBusy() const;
 
-    // The length analysis's hook for the sequence's loops. While it's set, the players report their loops to it (see
-    // ntdlib's SequenceSoundPlayer).
-    void SetLoopHook(LoopHook hook)
+    // The length analysis's hook for each command that a track starts. ntdlib's sequence player calls OnCommandStart as
+    // a track starts a command. The hook receives the track and the offset of the command's first byte, prefixes
+    // included.
+    void SetCommandStartHook(CommandStartHook hook)
     {
-        on_loop_ = std::move(hook);
+        on_command_start_ = std::move(hook);
     }
 
-    bool FollowsLoops() const
+    void OnCommandStart(const SeqPlayer&, int track, uint32_t offset, uint32_t, bool)
     {
-        return static_cast<bool>(on_loop_);
+        if (on_command_start_)
+        {
+            on_command_start_(track, offset);
+        }
     }
 
-    void OnLoop(const SeqPlayer&, int track, uint32_t target)
+    // The counted loops that the length analysis takes as endless, each a track and the start of its loop's body (see
+    // ntdlib's LoopsForEver). The players end every other counted loop as the game does.
+    void SetEndlessLoops(std::set<std::pair<int, uint32_t>> loops)
     {
-        on_loop_(track, target);
+        endless_loops_ = std::move(loops);
+    }
+
+    bool LoopsForEver(const SeqPlayer&, int track, uint32_t address) const
+    {
+        return endless_loops_.contains({track, address});
     }
 
     // Hooks for tests. While set, the voice parameter hook receives the values that a channel gives its voice in each
@@ -253,7 +270,8 @@ private:
 
     Effects effects_;
 
-    LoopHook on_loop_;
+    CommandStartHook on_command_start_;
+    std::set<std::pair<int, uint32_t>> endless_loops_;
     VoiceParamHook on_voice_param_;
     ChannelEventHook on_channel_event_;
 };

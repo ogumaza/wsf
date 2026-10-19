@@ -34,6 +34,27 @@ T Clamp(T value, T low, T high)
     return value < low ? low : (high < value ? high : value);
 }
 
+// Fills the Exp parameters of a 2008 reverb as the class's SetParam does. The longest pre-delay bounds the pre-delay as
+// given, before the game raises a negative one to 0. The game checks each upper bound before the lower one.
+template <typename Params>
+void FillExpParams(Params& p, const EffectParams& params, const Reverb2008Words& words)
+{
+    const float max = Word(params, words.pre_delay_time_max);
+    const float pre_delay = Word(params, 0);
+    const float fused_time = Word(params, 1);
+    p.early_mode = params[static_cast<std::size_t>(words.early_mode)];
+    p.pre_delay_time_max = max < 0.0f ? 0.0f : max;
+    p.pre_delay_time = max < pre_delay ? max : (pre_delay < 0.0f ? 0.0f : pre_delay);
+    p.fused_mode = params[static_cast<std::size_t>(words.fused_mode)];
+    p.fused_time = fused_time < 0.0f ? 0.0f : fused_time;
+    p.coloration = Clamp(Word(params, 2), 0.0f, 1.0f);
+    p.damping = Clamp(Word(params, 3), 0.0f, 1.0f);
+    p.early_gain = Clamp(Word(params, words.early_gain), 0.0f, 1.0f);
+    p.fused_gain = Clamp(Word(params, words.fused_gain), 0.0f, 1.0f);
+    p.out_gain = Clamp(Word(params, words.out_gain), 0.0f, 1.0f);
+    p.send_gain = 0.0f;
+}
+
 } // namespace
 
 axfx::Build AxfxBuild(const SndBuild& build)
@@ -43,7 +64,7 @@ axfx::Build AxfxBuild(const SndBuild& build)
         return axfx::Build::kOctober2006;
     }
 
-    return build.Since2008() ? axfx::Build::kSeptember2008 : axfx::Build::kDecember2006;
+    return build.SinceMarch2008() ? axfx::Build::kSeptember2008 : axfx::Build::kDecember2006;
 }
 
 Effect::Effect(EffectType type, axfx::Build build) : slot_(MakeSlot(type, build))
@@ -94,21 +115,8 @@ bool Effect::SetParam(const EffectParams& params)
         // delay lines if their longest pre-delay stays the same.
         axfx::ReverbHiExp::Params& p = slot->params;
         const float old_max = p.pre_delay_time_max;
-        const float max = Word(params, 7);
-        const float pre_delay = Word(params, 0);
-        const float fused_time = Word(params, 1);
-        p.early_mode = params[6];
-        p.pre_delay_time_max = max < 0.0f ? 0.0f : max;
-        p.pre_delay_time = max < pre_delay ? max : (pre_delay < 0.0f ? 0.0f : pre_delay);
-        p.fused_mode = params[8];
-        p.fused_time = fused_time < 0.0f ? 0.0f : fused_time;
-        p.coloration = Clamp(Word(params, 2), 0.0f, 1.0f);
-        p.damping = Clamp(Word(params, 3), 0.0f, 1.0f);
+        FillExpParams(p, params, kReverbHi2008Words);
         p.crosstalk = Clamp(Word(params, 4), 0.0f, 1.0f);
-        p.early_gain = Clamp(Word(params, 9), 0.0f, 1.0f);
-        p.fused_gain = Clamp(Word(params, 10), 0.0f, 1.0f);
-        p.out_gain = Clamp(Word(params, 5), 0.0f, 1.0f);
-        p.send_gain = 0.0f;
         if (!active_)
         {
             return true;
@@ -119,26 +127,11 @@ bool Effect::SetParam(const EffectParams& params)
 
     if (auto* slot = std::get_if<Slot<axfx::ReverbStdExp>>(&slot_))
     {
-        // FxReverbStd::SetParam of 2008 (Mario Kart Wii, 0x80094d00, and Wii Music, 0x800b813c) fills the Exp
-        // parameters. The longest pre-delay bounds the pre-delay as given, before the game raises a negative one to 0.
-        // The game checks each upper bound before the lower one. While the reverb runs, the class keeps the delay lines
-        // if their longest pre-delay stays the same.
+        // FxReverbStd::SetParam of 2008 (Mario Kart Wii, 0x80094d00, and Wii Music, 0x800b813c). While the reverb runs,
+        // the class keeps the delay lines if their longest pre-delay stays the same.
         axfx::ReverbStdExp::Params& p = slot->params;
         const float old_max = p.pre_delay_time_max;
-        const float max = Word(params, 6);
-        const float pre_delay = Word(params, 0);
-        const float fused_time = Word(params, 1);
-        p.early_mode = params[5];
-        p.pre_delay_time_max = max < 0.0f ? 0.0f : max;
-        p.pre_delay_time = max < pre_delay ? max : (pre_delay < 0.0f ? 0.0f : pre_delay);
-        p.fused_mode = params[7];
-        p.fused_time = fused_time < 0.0f ? 0.0f : fused_time;
-        p.coloration = Clamp(Word(params, 2), 0.0f, 1.0f);
-        p.damping = Clamp(Word(params, 3), 0.0f, 1.0f);
-        p.early_gain = Clamp(Word(params, 8), 0.0f, 1.0f);
-        p.fused_gain = Clamp(Word(params, 9), 0.0f, 1.0f);
-        p.out_gain = Clamp(Word(params, 4), 0.0f, 1.0f);
-        p.send_gain = 0.0f;
+        FillExpParams(p, params, kReverbStd2008Words);
         if (!active_)
         {
             return true;

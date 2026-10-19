@@ -28,12 +28,14 @@ namespace
 {
 
 // A sample's index from a PB address. The index counts from address 0 in the format's units. ADPCM indices skip the two
-// header nibbles of each 16-nibble frame.
+// header nibbles of each 16-nibble frame. An address on a header gives the frame's first sample. For such an address,
+// the game's conversion (AxVoice::SampleByDspAddress) gives a sample before the frame.
 uint64_t SampleAt(uint32_t address, ax::SampleFormat format)
 {
     if (format == ax::SampleFormat::kAdpcm)
     {
-        return uint64_t{address / 16} * 14 + std::max<uint32_t>(address % 16, 2) - 2;
+        return uint64_t{address / ax::kAdpcmNibblesPerFrame} * ax::kAdpcmSamplesPerFrame +
+               std::max<uint32_t>(address % ax::kAdpcmNibblesPerFrame, 2) - 2;
     }
 
     return address;
@@ -191,7 +193,7 @@ Channel* Engine::NoteOn(const std::vector<uint32_t>& banks, int slot, const Note
     channel->envelope.SetDecay(region->decay);
     channel->envelope.SetSustain(region->sustain);
     channel->envelope.SetRelease(region->release);
-    if (build_.Since2008())
+    if (build_.SinceMarch2008())
     {
         // Bank::NoteOn sets the region's hold, note-off type and key group too (Mario Kart Wii, 0x8008d41c and
         // 0x8008d490).

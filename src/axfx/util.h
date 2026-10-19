@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
 
 // What the effects' models share: the games' sample rate, their runtime's conversion of a float to an unsigned integer,
-// and the reverbs' range check, comb gains and line steps.
+// the reverbs' range check, comb gains, allpasses and low-pass weight, the lines' steps, and the reverbs' line
+// clearing.
 
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace wsf::axfx
 {
@@ -46,6 +49,23 @@ inline float CombCoef(uint32_t length, float time)
     return static_cast<float>(std::pow(10.0, static_cast<double>(exponent)));
 }
 
+// One sample of a reverb's allpass of gain `coef` (the coloration), whose line holds `delayed`, the sample from one
+// line's length ago. Stores the new sample in its place and returns the output.
+inline float Allpass(float& delayed, float input, float coef)
+{
+    const float output = delayed;
+    const float stored = input + output * coef;
+    delayed = stored;
+
+    return output - stored * coef;
+}
+
+// The weight that a reverb's low-pass gives its last output: 1 - damping, capped at 0.95.
+inline float LowpassCoef(float damping)
+{
+    return std::min(1.0f - damping, 0.95f);
+}
+
 // Moves a line's position on by a sample. The position wraps to 0 at the line's length.
 inline void Step(uint32_t& position, uint32_t length)
 {
@@ -54,6 +74,17 @@ inline void Step(uint32_t& position, uint32_t length)
     {
         position = 0;
     }
+}
+
+// What the reverbs' __BzeroDelayLines and __FreeDelayLine do to each delay line.
+inline void ClearLine(std::vector<float>& line)
+{
+    std::fill(line.begin(), line.end(), 0.0f);
+}
+
+inline void ReleaseLine(std::vector<float>& line)
+{
+    line = {};
 }
 
 } // namespace wsf::axfx

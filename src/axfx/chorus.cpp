@@ -119,7 +119,7 @@ uint32_t ChorusExp::GetMemSize()
 bool ChorusExp::Init(const Params& params)
 {
     params_ = params;
-    active_ |= kOff;
+    active_ |= kStopped;
     size_ = kLineSize;
     for (std::vector<float>& line : line_)
     {
@@ -138,7 +138,7 @@ bool ChorusExp::Init(const Params& params)
         return false;
     }
 
-    active_ &= ~kOff;
+    active_ &= ~kStopped;
 
     return true;
 }
@@ -151,7 +151,7 @@ bool ChorusExp::Settings(const Params& params)
         return false;
     }
 
-    active_ = (active_ | kSkip) & ~kOff;
+    active_ = (active_ | kSkipFrame) & ~kStopped;
 
     return true;
 }
@@ -170,7 +170,7 @@ void ChorusExp::Process(AuxFrame& frame, const AuxFrame* bus_in, AuxFrame* bus_o
 {
     if (active_ != 0)
     {
-        active_ &= ~kSkip;
+        active_ &= ~kSkipFrame;
         return;
     }
 
@@ -204,11 +204,7 @@ void ChorusExp::Process(AuxFrame& frame, const AuxFrame* bus_in, AuxFrame* bus_o
             }
 
             hist_index_ = (hist_index_ + 1) & 3;
-            read++;
-            if (read >= size_)
-            {
-                read = 0;
-            }
+            Step(read, size_);
         }
 
         last_pos_ = position & 0xffff0000;
@@ -239,12 +235,7 @@ void ChorusExp::Process(AuxFrame& frame, const AuxFrame* bus_in, AuxFrame* bus_o
             }
         }
 
-        in_pos_++;
-        if (in_pos_ >= size_)
-        {
-            in_pos_ = 0;
-        }
-
+        Step(in_pos_, size_);
         out_pos_ += 0x10000;
         if (out_pos_ >= size_fp_)
         {
@@ -278,9 +269,9 @@ bool ChorusExp::InitParams()
         }
     }
 
-    const float step = 32000.0f / p.rate * 0.00390625f;
+    const float step = kSampleRate / p.rate * 0.00390625f;
     lfo_ = Lfo{};
-    lfo_.phase_add = ntdlib::PowerPcToInt32(65536.0f * (256.0f * p.rate / 32000.0f));
+    lfo_.phase_add = ntdlib::PowerPcToInt32(65536.0f * (256.0f * p.rate / kSampleRate));
     lfo_.depth_samp = ntdlib::PowerPcToInt32(65536.0f * depth_samples);
     lfo_.grad_factor = ntdlib::PowerPcToInt32(65536.0f * (depth_samples / step));
     lfo_.last_num = 0xffffffff;
@@ -292,7 +283,7 @@ bool ChorusExp::InitParams()
 
 void ChorusExp::FreeLines()
 {
-    active_ |= kOff;
+    active_ |= kStopped;
     for (std::vector<float>& line : line_)
     {
         line = std::vector<float>();

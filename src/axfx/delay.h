@@ -52,11 +52,6 @@ public:
     void Process(AuxFrame& frame);
 
 private:
-    // The flags in `active_` (AXFX_DELAY's active). kOff: the effect is off. Init, Settings and Shutdown set the flag.
-    // A successful Init clears it. kSkip: the next Process leaves its frame unchanged and clears the flag.
-    static constexpr uint32_t kOff = 1;
-    static constexpr uint32_t kSkip = 2;
-
     // __InitParams (0x80109c9c; October 2006, 0x800330b8).
     bool InitParams();
 
@@ -69,7 +64,10 @@ private:
     std::array<uint32_t, kChannelCount> length_{};
     std::array<int32_t, kChannelCount> feedback_gain_{};
     std::array<int32_t, kChannelCount> out_gain_{};
-    uint32_t active_ = kOff;
+
+    // AXFX_DELAY's `active` field (see kStopped). Init, Settings and Shutdown set kStopped. A successful Init clears it
+    // and sets kSkipFrame.
+    uint32_t active_ = kStopped;
 };
 
 } // namespace wsf::axfx

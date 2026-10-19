@@ -63,7 +63,27 @@ uint16_t MixVolume(float volume)
 // September 2009 on hold it only to 0. The gain can then go above full level.
 float HeldGain(float gain, const SndBuild& build)
 {
-    return SinceSeptember2009(build) ? std::max(gain, 0.0f) : std::clamp(gain, 0.0f, 1.0f);
+    return build.SinceSeptember2009() ? std::max(gain, 0.0f) : std::clamp(gain, 0.0f, 1.0f);
+}
+
+// The mix at the volumes of `mix`, with no ramps.
+ax::PbMix StillMix(const AxVoice::MixParam& mix)
+{
+    ax::PbMix still;
+    still.l = mix.l;
+    still.r = mix.r;
+    still.s = mix.s;
+    still.aux_a_l = mix.aux_a_l;
+    still.aux_a_r = mix.aux_a_r;
+    still.aux_a_s = mix.aux_a_s;
+    still.aux_b_l = mix.aux_b_l;
+    still.aux_b_r = mix.aux_b_r;
+    still.aux_b_s = mix.aux_b_s;
+    still.aux_c_l = mix.aux_c_l;
+    still.aux_c_r = mix.aux_c_r;
+    still.aux_c_s = mix.aux_c_s;
+
+    return still;
 }
 
 } // namespace
@@ -160,25 +180,25 @@ void AxVoice::SetSrcType(SrcType type, float pitch)
     switch (type)
     {
     case SrcType::kNone:
-        pb.src_select = 2;
+        pb.src_select = static_cast<uint16_t>(ax::SrcMode::kNone);
         break;
 
     case SrcType::kLinear:
-        pb.src_select = 1;
+        pb.src_select = static_cast<uint16_t>(ax::SrcMode::kLinear);
         break;
 
     case SrcType::k4Tap8k:
-        pb.src_select = 0;
+        pb.src_select = static_cast<uint16_t>(ax::SrcMode::kFourTap);
         pb.coef_select = 0;
         break;
 
     case SrcType::k4Tap12k:
-        pb.src_select = 0;
+        pb.src_select = static_cast<uint16_t>(ax::SrcMode::kFourTap);
         pb.coef_select = 1;
         break;
 
     case SrcType::k4Tap16k:
-        pb.src_select = 0;
+        pb.src_select = static_cast<uint16_t>(ax::SrcMode::kFourTap);
         pb.coef_select = 2;
         break;
 
@@ -213,11 +233,11 @@ void AxVoice::SetAdpcm(const ntdlib::rsar::DspAdpcmInfo& info)
         break;
 
     case ax::SampleFormat::kPcm16:
-        adpcm.gain = 0x800;
+        adpcm.gain = ax::kPcm16Gain;
         break;
 
     case ax::SampleFormat::kPcm8:
-        adpcm.gain = 0x100;
+        adpcm.gain = ax::kPcm8Gain;
         break;
     }
 
@@ -255,20 +275,7 @@ bool AxVoice::SetMix(const MixParam& mix)
     // and AXSetVoiceMix).
     if (engine_->Build().October2006())
     {
-        ax::PbMix pb_mix;
-        pb_mix.l = mix.l;
-        pb_mix.r = mix.r;
-        pb_mix.s = mix.s;
-        pb_mix.aux_a_l = mix.aux_a_l;
-        pb_mix.aux_a_r = mix.aux_a_r;
-        pb_mix.aux_a_s = mix.aux_a_s;
-        pb_mix.aux_b_l = mix.aux_b_l;
-        pb_mix.aux_b_r = mix.aux_b_r;
-        pb_mix.aux_b_s = mix.aux_b_s;
-        pb_mix.aux_c_l = mix.aux_c_l;
-        pb_mix.aux_c_r = mix.aux_c_r;
-        pb_mix.aux_c_s = mix.aux_c_s;
-        SetVoiceMix(pb_mix, true);
+        SetVoiceMix(StillMix(mix), true);
 
         return false;
     }
@@ -357,7 +364,7 @@ void AxVoice::SetVe(float volume, float init_volume)
     // AxVoiceParamBlock::SetVoiceVe: the first call also sets where the envelope starts. A gain of 1 is 32767. In older
     // builds, Voice's setters have already held the gain to 1 (see HeldGain). Builds from September 2009 on hold the
     // envelope's volume within 0 to 0xffff here.
-    const bool above_full = SinceSeptember2009(engine_->Build());
+    const bool above_full = engine_->Build().SinceSeptember2009();
     const auto to_volume = [above_full](float gain)
     {
         const int32_t value = ntdlib::nwsnd::RevolutionPolicy::ToInt32(32767.0f * gain);
@@ -454,14 +461,14 @@ void AxVoice::SetPriority(uint32_t priority)
     }
 }
 
-void AxVoice::SetVoiceType(uint16_t type)
+void AxVoice::SetVoiceType(ax::VoiceType type)
 {
     if (!IsAvailable())
     {
         return;
     }
 
-    vpb_->pb.type = type;
+    vpb_->pb.type = static_cast<uint16_t>(type);
     sync_ |= ax::sync::kType;
 }
 
@@ -498,7 +505,7 @@ void AxVoice::Sync()
     ax::PbVe& ve = vpb_->pb.ve;
     ve.current_volume = prev_volume_;
     const auto delta_in = static_cast<int16_t>((volume_ - prev_volume_) / ax::kSamplesPerFrame);
-    const int16_t delta_out = delta_in + (delta_in > 0 ? 1 : 0) != 0 ? 1 : -1;
+    const int16_t delta_out = delta_in != 0 ? 1 : -1;
     const int predicted_in = prev_volume_ + delta_in * ax::kSamplesPerFrame;
     const int predicted_out = prev_volume_ + delta_out * ax::kSamplesPerFrame;
     int16_t delta = std::abs(volume_ - predicted_in) < std::abs(volume_ - predicted_out) ? delta_in : delta_out;
@@ -515,7 +522,7 @@ void AxVoice::Sync()
         }
     };
 
-    const int max_volume = SinceSeptember2009(engine_->Build()) ? 0xffff : 32767;
+    const int max_volume = engine_->Build().SinceSeptember2009() ? 0xffff : 32767;
     const auto keep_in_range = [&]
     {
         const int next_volume = prev_volume_ + delta * ax::kSamplesPerFrame;
@@ -529,7 +536,7 @@ void AxVoice::Sync()
         }
     };
 
-    if (engine_->Build().Since2008())
+    if (engine_->Build().SinceMarch2008())
     {
         keep_in_range();
         land();
@@ -674,20 +681,7 @@ void AxVoice::ResetDelta()
 
     // The envelope and the mix stop their ramps where they are.
     UpdateDelta();
-    ax::PbMix mix;
-    mix.l = mix_prev_.l;
-    mix.r = mix_prev_.r;
-    mix.aux_a_l = mix_prev_.aux_a_l;
-    mix.aux_a_r = mix_prev_.aux_a_r;
-    mix.aux_b_l = mix_prev_.aux_b_l;
-    mix.aux_b_r = mix_prev_.aux_b_r;
-    mix.aux_c_l = mix_prev_.aux_c_l;
-    mix.aux_c_r = mix_prev_.aux_c_r;
-    mix.s = mix_prev_.s;
-    mix.aux_a_s = mix_prev_.aux_a_s;
-    mix.aux_b_s = mix_prev_.aux_b_s;
-    mix.aux_c_s = mix_prev_.aux_c_s;
-    SetVoiceMix(mix, true);
+    SetVoiceMix(StillMix(mix_prev_), true);
 }
 
 AxVoiceManager::AxVoiceManager(Engine& engine) : engine_(engine)
@@ -835,37 +829,31 @@ bool Voice::Acquire(int channels, int priority, ChannelId owner)
     {
         OnAxVoiceDropped(dropped);
     };
+    // Whether dropping the voices of no higher priority would free `needed` AX voices.
+    const auto can_drop = [this, priority](int needed)
+    {
+        for (const VoiceId id : engine_->Voices().PrioVoices())
+        {
+            const Voice& other = engine_->Voices().At(id);
+            if (priority < other.Priority())
+            {
+                break;
+            }
+
+            needed -= other.AxVoiceCount();
+            if (needed <= 0)
+            {
+                break;
+            }
+        }
+
+        return needed <= 0;
+    };
     for (int i = 0; i < channels; i++)
     {
         AxVoice* voice = manager.AcquireAxVoice(ax_priority, on_drop);
-        if (voice == nullptr)
+        if (voice == nullptr && can_drop(channels - i))
         {
-            int rest = channels - i;
-            for (const VoiceId id : engine_->Voices().PrioVoices())
-            {
-                const Voice& other = engine_->Voices().At(id);
-                if (priority < other.Priority())
-                {
-                    break;
-                }
-
-                rest -= other.AxVoiceCount();
-                if (rest <= 0)
-                {
-                    break;
-                }
-            }
-
-            if (rest > 0)
-            {
-                for (int j = 0; j < i; j++)
-                {
-                    manager.FreeAxVoice(table[j]);
-                }
-
-                return false;
-            }
-
             voice = manager.AcquireAxVoice(ax_priority == kAxPriorityTop ? kAxPriorityTop : kAxPriorityDrop, on_drop);
         }
 
@@ -1034,7 +1022,7 @@ void Voice::Setup(const WaveData& data)
         }
 
         voice->SetSrcType(AxVoice::SrcType::k4TapAuto, pitch_);
-        voice->SetVoiceType(0);
+        voice->SetVoiceType(ax::VoiceType::kNormal);
     }
 
     starting_ = false;
@@ -1213,34 +1201,22 @@ void Voice::SetPriority(int priority)
 {
     priority_ = priority;
     engine_->Voices().ChangeVoicePriority(this);
-    if (priority_ != 1)
+    if (priority_ != kPriorityRelease)
     {
         return;
     }
 
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (ax_voices_[i] != nullptr)
-        {
-            ax_voices_[i]->SetPriority(kAxPriorityRelease);
-        }
-    }
+    ForEachAxVoice([](AxVoice& voice) { voice.SetPriority(kAxPriorityRelease); });
 }
 
 void Voice::UpdateVoicesPriority()
 {
-    if (priority_ == 1)
+    if (priority_ == kPriorityRelease)
     {
         return;
     }
 
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (ax_voices_[i] != nullptr)
-        {
-            ax_voices_[i]->SetPriority(kAxPriorityNormal);
-        }
-    }
+    ForEachAxVoice([](AxVoice& voice) { voice.SetPriority(kAxPriorityNormal); });
 }
 
 bool Voice::IsPlayFinished() const
@@ -1250,13 +1226,7 @@ bool Voice::IsPlayFinished() const
 
 void Voice::CalcAxSrc(bool initial)
 {
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (ax_voices_[i] != nullptr)
-        {
-            ax_voices_[i]->SetSrc(pitch_, initial);
-        }
-    }
+    ForEachAxVoice([this, initial](AxVoice& voice) { voice.SetSrc(pitch_, initial); });
 }
 
 bool Voice::CalcAxVe()
@@ -1276,13 +1246,7 @@ bool Voice::CalcAxVe()
         const auto init = static_cast<uint16_t>(static_cast<int32_t>(32767.0f * (start * ve_init_volume_)));
         const auto end = static_cast<uint16_t>(static_cast<int32_t>(32767.0f * (volume * ve_target_volume_)));
         const auto delta = static_cast<int16_t>((end - init) / ax::kSamplesPerFrame);
-        for (int i = 0; i < channel_count_; i++)
-        {
-            if (ax_voices_[i] != nullptr)
-            {
-                ax_voices_[i]->SetVeOctober2006(init, delta);
-            }
-        }
+        ForEachAxVoice([init, delta](AxVoice& voice) { voice.SetVeOctober2006(init, delta); });
 
         prev_ve_volume_ = volume;
         first_ve_update_ = false;
@@ -1293,13 +1257,7 @@ bool Voice::CalcAxVe()
 
     const float target = volume * ve_target_volume_;
     const float init = volume * ve_init_volume_;
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (ax_voices_[i] != nullptr)
-        {
-            ax_voices_[i]->SetVe(target, init);
-        }
-    }
+    ForEachAxVoice([target, init](AxVoice& voice) { voice.SetVe(target, init); });
 
     return false;
 }
@@ -1328,24 +1286,12 @@ bool Voice::CalcAxMix()
 void Voice::CalcAxLpf()
 {
     const int freq = CalcLpfFreq(lpf_freq_, engine_->Build());
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (ax_voices_[i] != nullptr)
-        {
-            ax_voices_[i]->SetLpf(static_cast<uint16_t>(freq));
-        }
-    }
+    ForEachAxVoice([freq](AxVoice& voice) { voice.SetLpf(static_cast<uint16_t>(freq)); });
 }
 
 void Voice::CalcAxBiquadFilter()
 {
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (ax_voices_[i] != nullptr)
-        {
-            ax_voices_[i]->SetBiquad(biquad_type_, biquad_value_);
-        }
-    }
+    ForEachAxVoice([this](AxVoice& voice) { voice.SetBiquad(biquad_type_, biquad_value_); });
 }
 
 void Voice::CalcMixParam(int channel, AxVoice::MixParam& mix) const
@@ -1390,46 +1336,22 @@ void Voice::CalcMixParam(int channel, AxVoice::MixParam& mix) const
 
 void Voice::SyncAxVoice()
 {
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (ax_voices_[i] != nullptr)
-        {
-            ax_voices_[i]->Sync();
-        }
-    }
+    ForEachAxVoice([](AxVoice& voice) { voice.Sync(); });
 }
 
 void Voice::RunAllAxVoice()
 {
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (ax_voices_[i] != nullptr)
-        {
-            ax_voices_[i]->Run();
-        }
-    }
+    ForEachAxVoice([](AxVoice& voice) { voice.Run(); });
 }
 
 void Voice::StopAllAxVoice()
 {
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (ax_voices_[i] != nullptr)
-        {
-            ax_voices_[i]->Stop();
-        }
-    }
+    ForEachAxVoice([](AxVoice& voice) { voice.Stop(); });
 }
 
 void Voice::ResetDelta()
 {
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (ax_voices_[i] != nullptr)
-        {
-            ax_voices_[i]->ResetDelta();
-        }
-    }
+    ForEachAxVoice([](AxVoice& voice) { voice.ResetDelta(); });
 }
 
 void Voice::OnAxVoiceDropped(AxVoice* dropped)
@@ -1588,7 +1510,7 @@ void VoiceManager::UpdateEachVoicePriority(std::list<VoiceId>::iterator begin)
 {
     for (auto it = begin; it != prio_list_.end(); ++it)
     {
-        if (At(*it).Priority() <= 1)
+        if (At(*it).Priority() <= Voice::kPriorityRelease)
         {
             return;
         }

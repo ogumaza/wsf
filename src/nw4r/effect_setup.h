@@ -12,6 +12,9 @@
 #include <cstdint>
 #include <vector>
 
+#include "ax/pb.h"
+#include "nw4r/arrangement.h"
+
 namespace wsf::nw4r
 {
 
@@ -59,6 +62,24 @@ constexpr int EffectParamWords(EffectType type)
 }
 
 using EffectParams = std::array<uint32_t, kEffectParamWords>;
+
+// The word of each parameter of a 2008 reverb whose place differs between FxReverbHi and FxReverbStd. Both classes
+// start with preDelayTime, fusedTime, coloration and damping.
+struct Reverb2008Words
+{
+    int out_gain;
+    int early_mode;
+    int pre_delay_time_max;
+    int fused_mode;
+    int early_gain;
+    int fused_gain;
+};
+
+// The words of those parameters in kReverbHi2008 and kReverbStd2008. FxReverbHi's crossTalk is word 4.
+constexpr Reverb2008Words kReverbHi2008Words = {
+    .out_gain = 5, .early_mode = 6, .pre_delay_time_max = 7, .fused_mode = 8, .early_gain = 9, .fused_gain = 10};
+constexpr Reverb2008Words kReverbStd2008Words = {
+    .out_gain = 4, .early_mode = 5, .pre_delay_time_max = 6, .fused_mode = 7, .early_gain = 8, .fused_gain = 9};
 
 // One effect on a bus. With no presets, the effect is set up as the sound starts, with `params`, for the sounds in
 // `sounds`. An effect that lists no sounds is set up for every sound that no other effect without presets on its bus
@@ -146,12 +167,12 @@ struct SoundSend
 };
 
 // The sends that the game sets on `sound`, by bus: 0 for a bus without one. Of two sends to one bus, the later counts.
-inline std::array<float, 3> SendsOf(const std::vector<SoundSend>& sends, uint32_t sound)
+inline std::array<float, ax::kAuxBusCount> SendsOf(const std::vector<SoundSend>& sends, uint32_t sound)
 {
-    std::array<float, 3> found{};
+    std::array<float, ax::kAuxBusCount> found{};
     for (const SoundSend& send : sends)
     {
-        if (send.sound == sound && send.bus >= 0 && send.bus < 3)
+        if (send.sound == sound && send.bus >= 0 && send.bus < ax::kAuxBusCount)
         {
             found[static_cast<std::size_t>(send.bus)] = send.send;
         }
@@ -159,5 +180,16 @@ inline std::array<float, 3> SendsOf(const std::vector<SoundSend>& sends, uint32_
 
     return found;
 }
+
+// The effects that a game puts on the aux buses for the sounds of one of its sound archives, and what it sets on some
+// of those sounds as they start: sends to the buses (docs/wsf.md, "Effects"), and the volumes of the tracks that it
+// silences (docs/wsf.md, "Tracks that the game silences"). A game's effect profile gives them. The archive descriptor
+// holds them for archive mode.
+struct ArchiveEffects
+{
+    std::vector<EffectSetup> setups;
+    std::vector<SoundSend> sends;
+    std::vector<SoundTracks> tracks;
+};
 
 } // namespace wsf::nw4r

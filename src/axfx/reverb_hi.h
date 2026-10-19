@@ -73,22 +73,12 @@ public:
     void Process(AuxFrame& frame);
 
 private:
-    // The game's `active` field: while it isn't 0, the callback leaves frames as they are. Init sets kStopped. A
-    // successful Init clears the bit again. Settings sets kSkipFrame. The callback then leaves one frame alone and
-    // clears that bit.
-    static constexpr uint32_t kStopped = 1;
-    static constexpr uint32_t kSkipFrame = 2;
-
     static constexpr int kTaps = 3;
     static constexpr int kCombs = 3;
     static constexpr int kAllpasses = 2;
 
     // One sample of one channel's network, before the crosstalk.
     float ProcessChannel(int channel, float input, float fused_gain, float lowpass_gain);
-
-    // One sample of an allpass whose line holds `delayed`, the sample from one line's length ago. Stores the new
-    // sample in its place and returns the output.
-    float Allpass(float& delayed, float input) const;
 
     // Moves each line's position on by a sample.
     void AdvancePositions();
@@ -106,6 +96,9 @@ private:
 
     Build build_;
     Params params_;
+
+    // The game's `active` field (see kStopped). Init sets kStopped. A successful Init clears the bit again. Settings
+    // sets kSkipFrame.
     uint32_t active_ = kStopped;
 
     // The early reflections. The model allocates the line for the September 2008 build only. The others never write

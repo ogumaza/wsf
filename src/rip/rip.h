@@ -61,7 +61,7 @@ struct GameProfile
     uint32_t startable_offset; // SoundArchivePlayer's SoundStartable base
     uint32_t ios_version;      // the IOS that the game's TMD requests
     uint32_t init_flag;        // the sound system's flag byte, checked by Setup in 2008 builds, or 0
-    std::array<FunctionSignature, kProfileFunctions> signatures;
+    std::array<FunctionSignature, kProfileFunctions> signatures; // main's, then those of ai_init to update
     std::string derived_from = {}; // the profile that a derived profile comes from (see FindProfile), or nothing
 };
 
@@ -72,9 +72,13 @@ const std::vector<GameProfile>& KnownProfiles();
 // title's TMD and decrypted contents, and the sound archives inside CRI's CPK archives.
 ntdlib::disc::GameOptions DiscOptions();
 
+// Whether the game IDs `game_id` and `other_id` belong to releases of one game. A game's releases share the first three
+// characters of their game IDs. The fourth gives the region.
+bool SameGame(const std::string& game_id, const std::string& other_id);
+
 // The profile for a game: the one for its main.dol, or else one derived from the profile of another release or revision
-// of the game. A game's releases share the first three characters of their game IDs. Their main.dols link the same
-// functions at other addresses (see DeriveProfile). Returns nothing if neither exists.
+// of the game (see SameGame). The main.dols of a game's releases link the same functions at other addresses (see
+// DeriveProfile). Returns nothing if neither profile exists.
 std::optional<GameProfile> FindProfile(const ntdlib::disc::GameFiles& game);
 
 // Finds `source`'s functions in `dol` by their signatures. A small function can match in several places. The functions
@@ -96,15 +100,6 @@ struct SoundData
 // group that holds each. Returns nothing if no group in the archive holds one of them.
 std::optional<SoundData> FindSoundData(const ntdlib::rsar::SoundArchive& archive, uint32_t index);
 
-// The effects that a game puts on the aux buses for the sounds of one of its sound archives, and the sends that it sets
-// on some of those sounds (docs/wsf.md, "Effects"). `dol_sha1` names the main.dol whose effect profile gives them.
-struct ArchiveEffects
-{
-    std::vector<nw4r::EffectSetup> effects;
-    std::vector<nw4r::SoundSend> sends;
-    std::string dol_sha1;
-};
-
 // Whether WSF has an effect profile for the main.dol with `dol_sha1`. An effect profile gives the effects that the game
 // sets up for each of its sound archives. Only the release whose main.dol it was made from has one. Other games' rips
 // play without effects.
@@ -112,33 +107,34 @@ bool HasEffectProfile(const std::string& dol_sha1);
 
 // The effects of the game whose main.dol has `dol_sha1` for `archive`. The archive's file name in `archive_path` picks
 // them. Empty for a game without an effect profile, and for an archive that the game plays without effects.
-ArchiveEffects FindEffects(const std::string& dol_sha1, const std::string& archive_path,
-                           const ntdlib::rsar::SoundArchive& archive);
+nw4r::ArchiveEffects FindEffects(const std::string& dol_sha1, const std::string& archive_path,
+                                 const ntdlib::rsar::SoundArchive& archive);
 
 // Game mode: builds the .wsflib for the sound archive at `archive_path` on the disc (no leading '/'). The library holds
 // the game's code with main patched to branch to the driver, the driver, the partition's header and the archive. The
 // driver sets up the effects of `effects` that a sound gets when no effect lists it, with the game's functions. Returns
-// nullopt and sets `error` if main.dol isn't a DOL, the archive's path is longer than the driver supports, the archive
-// can't be read, or the driver can't set up all of the effects.
+// nullopt and sets `error` if main.dol isn't a DOL, the archive's path is longer than the driver supports, the driver
+// can't set up all of the effects, the archive can't be read, or the library is larger than a player loads.
 std::optional<std::vector<uint8_t>> BuildLibrary(const ntdlib::disc::GameFiles& game, const GameProfile& profile,
                                                  const std::string& archive_path,
                                                  const ntdlib::rsar::SoundArchive& archive, const Tags& tags,
-                                                 std::string* error = nullptr, const ArchiveEffects& effects = {});
+                                                 std::string* error = nullptr,
+                                                 const nw4r::ArchiveEffects& effects = {});
 
 // Game mode: a .miniwsf that plays sequence `index`, with `data`, from `lib_name`. It tells the driver whether the
 // sound's variables pick the presets of `effects`, and the send that the game sets on the sound. For a sound that gets
-// other effects than the library's, it gives the driver those effects.
+// other effects than the library's, it gives the driver those effects. Their classes' functions come from the effect
+// profile of the main.dol with `dol_sha1`.
 std::vector<uint8_t> BuildMini(uint32_t index, const SoundData& data, const std::string& lib_name, Tags tags,
-                               const ArchiveEffects& effects = {});
+                               const nw4r::ArchiveEffects& effects = {}, const std::string& dol_sha1 = {});
 
-// The address of the JAudio2 driver's Z2Params (driver/jaudio.c): after the block's header of three words. Every
-// JAudio2 driver's block starts the same way. After the header come the sound, its handle and its wave groups, at
-// Z2Params' offsets. A .miniwsf and the length analysis therefore write and read them at the same addresses for every
-// driver.
+// The address of Z2Params in driver/jaudio.c's block: after the block's header of three words. Every JAudio driver's
+// block starts the same way. After the header come the sound, its handle and its wave groups, at Z2Params' offsets. A
+// .miniwsf and the length analysis therefore write and read them at the same addresses for every driver.
 inline constexpr uint32_t kJAudioZ2Address = DriverBlock::kAddress + 0x0c;
 
-// The OS functions that the JAudio2 driver's sleep calls (see driver/jaudio.c). The driver sleeps with them in a game
-// that has no sleep of the calling thread.
+// The OS functions that driver/jaudio.c's sleep calls. The driver sleeps with them in a game that has no sleep of the
+// calling thread.
 struct JAudioAlarm
 {
     uint32_t set_alarm = 0;          // OSSetAlarm
@@ -148,9 +144,8 @@ struct JAudioAlarm
     uint32_t resume_thread = 0;      // OSResumeThread
 };
 
-// The JAudio2 functions and variables that the JAudio2 driver's functions for one wave group use (see
-// driver/jaudio.c). The driver loads and erases a group with them in a game whose scene manager has no functions for
-// one group.
+// The JAudio2 functions and variables that driver/jaudio.c's functions for one wave group use. The driver loads and
+// erases a group with them in a game whose scene manager has no functions for one group.
 struct JAudioWaveArcs
 {
     uint32_t section_heap = 0; // the variable that holds JAUSectionHeap's instance
@@ -174,8 +169,8 @@ enum class JAudioLibrary : uint8_t
     kJac,
     // A later JAudio1, with a start-up archive (AAF) that holds the sound table, the instrument banks and the wave
     // systems. New Play Control! Pikmin 2 is one such game. As for kJac, the profile gives the paths of the start-up
-    // archive (`sound_archive`) and the sequence archive (`sequence_archive`), and FindJacFiles finds them. The game's
-    // sound layer plays the music. ReadPikmin2Sounds lists Pikmin 2's sounds.
+    // archive (`sound_archive`) and the sequence archive (`sequence_archive`), and FindJAudio1Files finds them. The
+    // game's sound layer plays the music. ReadPikmin2Sounds lists Pikmin 2's sounds.
     kAaf,
 };
 
@@ -233,45 +228,57 @@ struct JAudioProfile
     std::vector<JacPart> parts = {};
     // The path of the name table (.asn) of an AAF game's sounds on the disc, or empty for none.
     std::string sound_names = {};
-    uint32_t main;                      // patched to branch to the driver
-    ntdlib::flipper::z2::Profile z2;    // the start-up's sizes and the game's functions
-    uint32_t sleep;                     // the game's sleep of the calling thread for an OSTime, or 0
-    uint32_t reset_data;                // the variable that holds the reset data's address
-    uint32_t reset_flag;                // the reset data's byte that lets the audio set-up read the disc
-    JAudioAlarm alarm = {};             // for a game whose sleep is 0
-    JAudioWaveArcs wave_arcs = {};      // for a game whose z2.load_se_wave, z2.load_bgm_wave and z2.wave_status are 0
-    uint32_t ios_version;               // the IOS that the game's TMD requests
-    ntdlib::jaudio::GameWatch watch;    // what the length analysis and the wave discovery watch
-    std::vector<uint32_t> static_waves; // the groups that the audio set-up loads itself: (system << 16) | group
+    uint32_t main;                        // patched to branch to the driver
+    ntdlib::flipper::z2::Profile z2 = {}; // the start-up's sizes and the game's functions
+    uint32_t sleep = 0;                   // the game's sleep of the calling thread for an OSTime, or 0
+    uint32_t reset_data = 0;              // the variable that holds the reset data's address
+    uint32_t reset_flag = 0;              // the reset data's byte that lets the audio set-up read the disc
+    JAudioAlarm alarm = {};               // for a game whose sleep is 0
+    JAudioWaveArcs wave_arcs = {};        // for a game whose z2.load_se_wave, z2.load_bgm_wave and z2.wave_status are 0
+    uint32_t ios_version;                 // the IOS that the game's TMD requests
+    ntdlib::jaudio::GameWatch watch;      // what the length analysis and the wave discovery watch
+    std::vector<uint32_t> static_waves;   // the groups that the audio set-up loads itself: (system << 16) | group
     // The driver that the game's rips hold. driver/jaudio.c (kZ2) takes `z2` and the Wii's fields above.
     JAudioDriver driver = JAudioDriver::kZ2;
     // Another driver takes these words as its parameters, in the order of its block after the wave list.
     std::vector<uint32_t> params = {};
     // The sound files that the driver loads besides the start-up archive and the wave archives, by their paths on the
-    // disc. A rip's library holds them. With none listed, it holds the RARC archives that FindJAudioFiles finds.
+    // disc. A rip's library holds them. With none listed, it holds the archives that FindJAudioFiles finds.
     std::vector<std::string> files = {};
 };
 
 const std::vector<JAudioProfile>& KnownJAudioProfiles();
 
-// The JAudio2 profile for a game's main.dol, by the game's ID and the main.dol's SHA-1, or nothing.
+// The JAudio profile for a game's main.dol, by the game's ID and the main.dol's SHA-1, or nothing.
 std::optional<JAudioProfile> FindJAudioProfile(const ntdlib::disc::GameFiles& game);
 
-// A JAudio2 game's sound files on the disc (paths without a leading '/'): its start-up archive (BAA), found by its
-// header, and the RARC archives in the start-up archive's folder and below it, found by theirs. A start-up archive may
-// be compressed with Yaz0. Its header is then the header of the decoded data.
+// The sound library of a JAudio game with the profile `profile`: the one that the profile names, or JAudio2 for a game
+// without a profile. Without a profile, the ripper finds only a JAudio2 game's sound files (see FindJAudio2Files).
+JAudioLibrary SoundLibraryOf(const JAudioProfile* profile);
+
+// A JAudio game's sound files on the disc, by their paths without a leading '/'. `baa` is the start-up archive, or a
+// Jac game's bank file. `archives` holds the other sound archives. FindJAudio2Files finds a JAudio2 game's files.
+// FindJAudio1Files finds a JAudio1 game's.
 struct JAudioFiles
 {
     std::string baa;
     std::vector<std::string> archives;
 };
 
-// Finds the game's sound files. Returns nothing if the disc has no start-up archive.
-std::optional<JAudioFiles> FindJAudioFiles(const ntdlib::disc::GameFiles& game);
+// Finds a JAudio2 game's sound files: its start-up archive (BAA), found by its header, and the RARC archives in the
+// start-up archive's folder and below it, found by theirs. A start-up archive may be compressed with Yaz0. Its header
+// is then the header of the decoded data. Returns nothing if the disc has no start-up archive.
+std::optional<JAudioFiles> FindJAudio2Files(const ntdlib::disc::GameFiles& game);
 
-// Reads the start-up archive at `path` on the disc into `data`, decoded from Yaz0 if it's compressed. Returns false if
-// the file can't be read or decoded.
-bool ReadStartUpArchive(const ntdlib::disc::GameFiles& game, const std::string& path, std::vector<uint8_t>& data);
+// Reads the sound file at `path` on the disc into `data` as the game reads it: decoded from Yaz0 if it's compressed.
+// Returns false if the file can't be read or decoded.
+bool ReadSoundFile(const ntdlib::disc::GameFiles& game, const std::string& path, std::vector<uint8_t>& data);
+
+// The disc's files that every library of a JAudio game holds besides its AW files: the start-up archive, then the other
+// sound files that the driver loads. The other files are the profile's `files`, or else the RARC archives beside the
+// start-up archive. For a Jac game, the bank file takes the start-up archive's place, and the sequence archive is among
+// the other files.
+std::vector<std::string> LibraryFiles(const JAudioFiles& files, const JAudioProfile& profile);
 
 // The disc's paths of the AW files that hold `groups`, each (system << 16) | group, in the start-up archive's folder or
 // below it. Each path comes once, in the order of the files' names. If an AW file isn't there, returns nothing and sets
@@ -280,15 +287,16 @@ std::optional<std::vector<std::string>> FindAwFiles(const ntdlib::disc::GameFile
                                                     const std::vector<ntdlib::jaudio::WaveSystem>& systems,
                                                     std::span<const uint32_t> groups, std::string* missing = nullptr);
 
-// Game mode for a JAudio2 game: builds the .wsflib. It holds the game's code with main patched to branch to the
+// Game mode for a JAudio game: builds the .wsflib. It holds the game's code with main patched to branch to the
 // profile's driver, the driver with the profile, the partition's header and the disc's files at `paths`. Returns
-// nullopt and sets `error` if main.dol or a file can't be read, or if WSF has no such driver.
+// nullopt and sets `error` if main.dol isn't a DOL, WSF has no such driver, the profile has more parameters than the
+// driver's block holds, a file can't be read, or the library is larger than a player loads.
 std::optional<std::vector<uint8_t>> BuildJAudioLibrary(const ntdlib::disc::GameFiles& game,
                                                        const JAudioProfile& profile,
                                                        const std::vector<std::string>& paths, const Tags& tags,
                                                        std::string* error = nullptr);
 
-// Game mode for a JAudio2 game: a .miniwsf that plays sound `sound_id` from `lib_name`, with the wave groups `waves`
+// Game mode for a JAudio game: a .miniwsf that plays sound `sound_id` from `lib_name`, with the wave groups `waves`
 // loaded, each (system << 16) | group. Throws std::invalid_argument for more than ntdlib's 64 groups.
 std::vector<uint8_t> BuildJAudioMini(uint32_t sound_id, std::span<const uint32_t> waves, const std::string& lib_name,
                                      Tags tags);
@@ -307,15 +315,31 @@ struct JAudioSound
     std::vector<uint32_t> waves = {};
 };
 
-// A Jac game's sound files (JAudioLibrary::kJac): the bank file that the profile names in `baa`, and the sequence
-// archive in `archives`. Returns nothing if either file isn't on the disc.
-std::optional<JAudioFiles> FindJacFiles(const ntdlib::disc::GameFiles& game, const JAudioProfile& profile);
+// A JAudio2 game's sounds, from the start-up archive's sound table, with the names of the table's sections. A sound
+// without a name is labelled with its ID. Music is a sound whose label contains BGM, or a sound of the section that
+// the name table calls BGM. IsMusic takes the same labels for NW4R SND. Throws xsflib::FormatError if the archive is
+// damaged.
+std::vector<JAudioSound> ReadJAudio2Sounds(std::span<const uint8_t> baa);
+
+// A JAudio1 game's sound files (JAudioLibrary::kJac and kAaf), at the paths that the profile gives: a Jac game's bank
+// file or an AAF start-up archive in `baa`, and the sequence archive in `archives`. Returns nothing if either file
+// isn't on the disc.
+std::optional<JAudioFiles> FindJAudio1Files(const ntdlib::disc::GameFiles& game, const JAudioProfile& profile);
+
+// The sound files of a JAudio game with a profile, found by the function for the profile's library: FindJAudio1Files
+// for a JAudio1 game, or FindJAudio2Files for a JAudio2 game. Returns nothing and sets `error` if the disc lacks them.
+std::optional<JAudioFiles> FindJAudioFiles(const ntdlib::disc::GameFiles& game, const JAudioProfile& profile,
+                                           std::string* error = nullptr);
 
 // The wave systems of a Jac game's bank file. The file starts with the offset and the count of the wave systems'
 // entries, then the same for the banks' entries. An entry gives a wave system's or a bank's offset and size in the
 // file. A wave system's number is the entry's place in the list. A size of 0 means none. Throws xsflib::FormatError if
 // the file or a wave system is damaged.
 std::vector<ntdlib::jaudio::WaveSystem> ReadJacWaveSystems(std::span<const uint8_t> bank_file);
+
+// The wave systems of a game whose sound library is `library`, from `start_up`: JAudio2's start-up archive, a Jac
+// game's bank file (ReadJacWaveSystems) or an AAF start-up archive. Throws xsflib::FormatError if the file is damaged.
+std::vector<ntdlib::jaudio::WaveSystem> ReadWaveSystems(JAudioLibrary library, std::span<const uint8_t> start_up);
 
 // A Jac game's pieces of music, from the sequence index in `dol` at the profile's `sequence_index`. The index is a
 // BARC: a 32-byte header ("BARC", four bytes, a word, the number of files and the sequence archive's name), then a
@@ -340,6 +364,15 @@ std::vector<JAudioSound> ReadJacSounds(std::span<const uint8_t> dol, const JAudi
 std::vector<JAudioSound> ReadPikmin2Sounds(std::span<const uint8_t> aaf, std::span<const uint8_t> sequence_archive,
                                            std::span<const uint8_t> names, const JAudioProfile& profile);
 
+// A JAudio game's sounds, read by the function for its sound library: ReadJAudio2Sounds from the start-up archive
+// `start_up`, ReadJacSounds from main.dol, or ReadPikmin2Sounds from the AAF start-up archive in `start_up`, the
+// sequence archive in `files` and the profile's name table. `profile` is null for a JAudio2 game without one. Returns
+// nothing and sets `error` if a file can't be read. Throws xsflib::FormatError if a file is damaged.
+std::optional<std::vector<JAudioSound>> ReadJAudioSounds(const ntdlib::disc::GameFiles& game, const JAudioFiles& files,
+                                                         const JAudioProfile* profile,
+                                                         std::span<const uint8_t> start_up,
+                                                         std::string* error = nullptr);
+
 // What the length analysis watches for sound `sound_id`: the profile's `watch`. Pikmin 2's AutoBgm pieces never repeat.
 // Their root tracks' polls of the game stay moves (see GameWatch's `idle_in_calls`).
 ntdlib::jaudio::GameWatch WatchOf(const JAudioProfile& profile, uint32_t sound_id);
@@ -348,7 +381,8 @@ ntdlib::jaudio::GameWatch WatchOf(const JAudioProfile& profile, uint32_t sound_i
 // archive descriptor names the game's build of NW4R SND, and gives the effects. The model follows that build.
 std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const std::vector<uint8_t>& archive,
                                          const std::string& microcode_path, const ntdlib::Microcode& microcode,
-                                         nw4r::SndBuild build, const Tags& tags, const ArchiveEffects& effects = {});
+                                         nw4r::SndBuild build, const Tags& tags,
+                                         const nw4r::ArchiveEffects& effects = {});
 
 // Archive mode: a .miniwsf that plays sequence `index` from `lib_name`.
 std::vector<uint8_t> BuildArchiveMini(uint32_t index, const std::string& lib_name, Tags tags);
@@ -398,9 +432,10 @@ class LengthAnalyzer
 {
 public:
     // The model follows the game's `build` of NW4R SND. Each sequence plays in `arrangement`, with `effects`. A
-    // sequence with effects ends where their output falls silent.
+    // sequence with effects ends where their output falls silent. A sequence that `effects` gives tracks for plays only
+    // those of the arrangement's tracks. `wsfrip --tracks` gives effects without tracks: its tracks replace the game's.
     LengthAnalyzer(const std::vector<uint8_t>& archive_bytes, const ntdlib::Microcode& microcode, nw4r::SndBuild build,
-                   const nw4r::Arrangement& arrangement = {}, const ArchiveEffects& effects = {});
+                   const nw4r::Arrangement& arrangement = {}, const nw4r::ArchiveEffects& effects = {});
 
     ~LengthAnalyzer();
 

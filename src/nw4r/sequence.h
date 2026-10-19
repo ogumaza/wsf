@@ -71,7 +71,7 @@ struct SequencePolicy : ChannelPolicy
     // The track's pan, surround pan and sends (SeqTrack::UpdateChannelParam, 0x80046d0c). The game can add pans and
     // sends for the player and the track. Archive mode leaves them at 0, and the model leaves them out.
     static Outputs CombineOutputs(const Outputs&, const Outputs&, float pan, float span, float main_send,
-                                  const std::array<float, 3>& fx_send)
+                                  const std::array<float, kFxSendCount>& fx_send)
     {
         Outputs outputs;
         outputs.pan = pan;

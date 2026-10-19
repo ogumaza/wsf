@@ -59,8 +59,9 @@ std::string FormatTracks(uint16_t tracks);
 // or out of range.
 std::optional<float> ParseTempo(std::string_view text);
 
-// The arrangement that a set's tags give. A tag that's missing, malformed or out of range changes nothing.
-nw4r::Arrangement ArrangementFromTags(const Tags& tags);
+// The arrangement that a set's tags give. A tag that's missing, malformed or out of range changes nothing. Without a
+// wsf_tracks tag, `tracks` play.
+nw4r::Arrangement ArrangementFromTags(const Tags& tags, uint16_t tracks = nw4r::kAllTracks);
 
 // The process descriptor: the reserved area of a game-mode set (docs/wsf.md, "Process descriptor").
 struct ProcessDescriptor
@@ -81,6 +82,10 @@ struct ProcessDescriptor
     uint32_t ios_version = 0;    // the IOS that the game's TMD names (21 for IOS21)
     uint32_t flags = kFlagDspRequired;
 };
+
+// The FILE chunk of a game-mode set that holds the partition's 0x440-byte header. The disc starts with it (docs/wsf.md,
+// "The emulated system (game mode)").
+constexpr char kHeaderPath[] = "sys/boot.bin";
 
 // Descriptor of an archive-mode set (docs/wsf.md, "Archive mode"). WSF's model of the SDK's sound player (nw4r::snd and
 // AX) plays the sound archive on the game's AX microcode. The game's code isn't used.
@@ -105,9 +110,9 @@ struct ArchiveDescriptor
     uint32_t snd_build = 0;         // the game's build of NW4R SND, by its date (YYYYMMDD), or 0 if unknown
 
     // The effects on the aux buses and the sends that the game sets on sounds (docs/wsf.md, "Effects"), after the
-    // build. A descriptor without them gives none. Parse skips an effect of a type that it doesn't know.
-    std::vector<nw4r::EffectSetup> effects;
-    std::vector<nw4r::SoundSend> sends;
+    // build. A descriptor without them gives none. Parse skips an effect of a type that it doesn't know. Then the
+    // tracks that the game plays of some sounds (docs/wsf.md, "Tracks that the game silences").
+    nw4r::ArchiveEffects effects;
 };
 
 // The builder of a program's MEM, FILE and SND chunks (xsflib::psf).
@@ -121,8 +126,8 @@ struct DriverBlock
     static constexpr uint32_t kMagic = 0x57534644; // "WSFD"
     static constexpr uint32_t kVersion = 1;
 
-    // The JAudio2 driver's block (driver/jaudio.c). NW4R SND's driver keeps version 1. A player of WSF 1.1.0 accepts
-    // version 1 alone.
+    // The block of the JAudio drivers (driver/jaudio.c and the others). NW4R SND's driver keeps version 1. A player of
+    // WSF 1.1.0 accepts version 1 alone.
     static constexpr uint32_t kJAudioVersion = 2;
 
     static constexpr uint32_t kVersionOffset = 0x04;
@@ -161,17 +166,12 @@ struct SetFormat
 };
 
 // A complete set: the chunks of a file and its libraries in loading order, the effective descriptor (exactly one of
-// `descriptor` and `archive`) and the tags of the top-level file.
+// `descriptor` and `archive`) and the tags of the top-level file. LoadSet loads a WSF or miniWSF file with its _lib and
+// _libN chain. Paths in _lib tags are relative to the directory of the file that names them: its path up to the last of
+// `separators`. LoadSet returns an error for a set that a version 1 player can't play. That's a set whose descriptor
+// fails its Check(), or a game-mode set whose driver block has a version other than 1 (NW4R SND's driver) and 2 (the
+// JAudio drivers).
 using LoadedSet = xsflib::psf::LoadedSet<SetFormat>;
-
-// Loads a WSF/miniWSF file with its _lib/_libN chain. Paths in _lib tags are relative to the directory of the file that
-// names them: that file's path up to the last of `separators`. Returns an error for a set that a version 1 player can't
-// play. That's a set whose descriptor fails its Check(), or a game-mode set whose driver block has a version other than
-// 1 (NW4R SND's driver) and 2 (JAudio2's).
-inline std::optional<std::string> LoadSet(const std::string& path, const FileReader& reader, LoadedSet& out,
-                                          std::string_view separators = "/\\")
-{
-    return xsflib::psf::LoadSet(path, reader, out, separators);
-}
+using xsflib::psf::LoadSet;
 
 } // namespace wsf

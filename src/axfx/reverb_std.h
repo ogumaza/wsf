@@ -69,19 +69,11 @@ public:
     void Process(AuxFrame& frame);
 
 private:
-    // The bits of the game's `active` field (see ReverbHiExp).
-    static constexpr uint32_t kStopped = 1;
-    static constexpr uint32_t kSkipFrame = 2;
-
     static constexpr int kCombs = 2;
     static constexpr int kAllpasses = 2;
 
     // One sample of one channel's network.
     float ProcessChannel(int channel, float input, float early_gain, float fused_gain, float lowpass_gain);
-
-    // One sample of an allpass whose line holds `delayed`, the sample from one line's length ago. Stores the new
-    // sample in its place and returns the output.
-    float Allpass(float& delayed, float input) const;
 
     // Moves each line's position on by a sample.
     void AdvancePositions();
@@ -94,7 +86,12 @@ private:
     void ClearDelayLines();
     void FreeDelayLines();
 
+    // Calls `function` for every delay line.
+    void ForEachLine(void (*function)(std::vector<float>& line));
+
     Params params_;
+
+    // The game's `active` field (see kStopped). The class sets and clears the bits as ReverbHiExp does.
     uint32_t active_ = kStopped;
 
     // The early line. It feeds back into itself.

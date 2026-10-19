@@ -2,7 +2,6 @@
 
 #include "axfx/reverb_std.h"
 
-#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -182,21 +181,12 @@ float ReverbStdExp::ProcessChannel(int channel, float input, float early_gain, f
     }
 
     // An allpass, the low-pass and a second allpass.
-    const float allpass0 = Allpass(allpass_line_[channel][0][allpass_pos_[0]], combs[0] + combs[1]);
+    const float allpass0 = Allpass(allpass_line_[channel][0][allpass_pos_[0]], combs[0] + combs[1], allpass_coef_);
     const float lowpass = lowpass_gain * allpass0 + lpf_coef_ * last_lpf_out_[channel];
     last_lpf_out_[channel] = lowpass;
-    const float allpass1 = Allpass(allpass_line_[channel][1][allpass_pos_[1]], lowpass);
+    const float allpass1 = Allpass(allpass_line_[channel][1][allpass_pos_[1]], lowpass, allpass_coef_);
 
     return early * early_gain + allpass1 * fused_gain;
-}
-
-float ReverbStdExp::Allpass(float& delayed, float input) const
-{
-    const float output = delayed;
-    const float stored = input + output * allpass_coef_;
-    delayed = stored;
-
-    return output - stored * allpass_coef_;
 }
 
 void ReverbStdExp::AdvancePositions()
@@ -256,15 +246,9 @@ bool ReverbStdExp::InitParams()
         allpass_length_[allpass] = sizes[kCombs + allpass];
     }
 
-    // The coloration is the allpasses' gain. The low-pass weighs its last output by 1 - damping. That weight is capped
-    // at 0.95.
+    // The coloration is the allpasses' gain. The damping sets the low-pass's weight.
     allpass_coef_ = p.coloration;
-    lpf_coef_ = 1.0f - p.damping;
-    if (lpf_coef_ > 0.95f)
-    {
-        lpf_coef_ = 0.95f;
-    }
-
+    lpf_coef_ = LowpassCoef(p.damping);
     last_lpf_out_.fill(0.0f);
 
     return true;
@@ -272,34 +256,29 @@ bool ReverbStdExp::InitParams()
 
 void ReverbStdExp::ClearDelayLines()
 {
-    const auto clear = [](std::vector<float>& line)
-    {
-        std::fill(line.begin(), line.end(), 0.0f);
-    };
-    for (int channel = 0; channel < kChannelCount; channel++)
-    {
-        clear(early_line_[channel]);
-        clear(pre_delay_line_[channel]);
-        for (std::vector<float>& line : comb_line_[channel])
-        {
-            clear(line);
-        }
-
-        for (std::vector<float>& line : allpass_line_[channel])
-        {
-            clear(line);
-        }
-    }
+    ForEachLine(ClearLine);
 }
 
 void ReverbStdExp::FreeDelayLines()
 {
+    ForEachLine(ReleaseLine);
+}
+
+void ReverbStdExp::ForEachLine(void (*function)(std::vector<float>& line))
+{
     for (int channel = 0; channel < kChannelCount; channel++)
     {
-        early_line_[channel] = {};
-        pre_delay_line_[channel] = {};
-        comb_line_[channel] = {};
-        allpass_line_[channel] = {};
+        function(early_line_[channel]);
+        function(pre_delay_line_[channel]);
+        for (std::vector<float>& line : comb_line_[channel])
+        {
+            function(line);
+        }
+
+        for (std::vector<float>& line : allpass_line_[channel])
+        {
+            function(line);
+        }
     }
 }
 

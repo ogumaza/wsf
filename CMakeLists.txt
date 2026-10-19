@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for wsfrip, wsfplay, the foobar2000 component, Windows file properties and macOS bundles
 # (xsflib_add_version below). For a release, update it here and add notes in docs/release-notes/.
-project(wsf VERSION 1.4.1 LANGUAGES C CXX)
+project(wsf VERSION 1.5.0 LANGUAGES C CXX)
 
 # xsflib: the code that WSF shares with the other PSF players and with the converters, as a submodule. Its
 # XsflibProject.cmake sets what the projects built on it start with: C++20, a release build by default, the static C
@@ -105,12 +105,16 @@ add_library(wsf_rip STATIC
     src/rip/driver_blob.h
     src/rip/galaxy_driver_blob.h
     src/rip/galaxy2_driver_blob.h
+    src/rip/jaudio.cpp
     src/rip/jaudio_driver_blob.h
     src/rip/jungle_beat_driver_blob.h
+    src/rip/nw4r.cpp
     src/rip/pikmin_driver_blob.h
     src/rip/pikmin2_driver_blob.h
+    src/rip/profiles.cpp
     src/rip/rip.cpp
     src/rip/rip.h
+    src/rip/sound_libraries.h
 )
 target_link_libraries(wsf_rip PUBLIC wsf_format wsf_nw4r ntdlib::disc ntdlib::flipper ntdlib::jaudio xsflib::rip
                               PRIVATE ntdlib::disc_containers)
@@ -135,7 +139,7 @@ target_compile_options(wsfplay PRIVATE ${WSF_WARNINGS})
 xsflib_add_version(wsfplay VERSION ${wsf_VERSION} DEFINE WSF_VERSION DESCRIPTION "WSF renderer" PRODUCT WSF
                    COPYRIGHT "Copyright (c) 2026 the WSF authors. MIT licence.")
 
-# Game mode's length analysis and wave discovery for JAudio2 games: the rip's sets play on the player while ntdlib's
+# Game mode's length analysis and wave discovery for JAudio games: the rip's sets play on the player while ntdlib's
 # analysis watches the game's code.
 add_library(wsf_jaudio_analysis STATIC src/rip/jaudio_analysis.cpp src/rip/jaudio_analysis.h)
 target_link_libraries(wsf_jaudio_analysis PUBLIC wsf_rip PRIVATE wsf_player)
@@ -169,21 +173,26 @@ if (XMPLAY_SDK_DIR)
     add_subdirectory(plugins/xmplay)
 endif()
 
-enable_testing()
+# The tests. -DWSF_TESTS=OFF leaves them out of a build that only makes the programs and plugins, such as CI's macOS
+# job.
+option(WSF_TESTS "Build WSF's tests and register them with CTest." ON)
+if (WSF_TESTS)
+    enable_testing()
 
-# The unit tests: wsf_<name>_test from tests/<name>_test.cpp, registered as wsf_<name>. The tests that build sound
-# archives use ntdlib's builders (ntdlib::testing).
-xsflib_add_project_test(wsf ax wsf_ax)
-xsflib_add_project_test(wsf format wsf_format)
-xsflib_add_project_test(wsf nw4r wsf_nw4r ntdlib::testing)
-xsflib_add_project_test(wsf rip wsf_rip ntdlib::testing)
+    # The unit tests: wsf_<name>_test from tests/<name>_test.cpp, registered as wsf_<name>. The tests that build sound
+    # archives use ntdlib's builders (ntdlib::testing).
+    xsflib_add_project_test(wsf ax wsf_ax)
+    xsflib_add_project_test(wsf format wsf_format)
+    xsflib_add_project_test(wsf nw4r wsf_nw4r ntdlib::testing)
+    xsflib_add_project_test(wsf rip wsf_rip ntdlib::testing)
 
-# The tools report the version they were built as.
-string(REPLACE "." "\\." version_pattern ${wsf_VERSION})
-foreach (tool wsfrip wsfplay)
-    add_test(NAME version_${tool} COMMAND ${tool} --version)
-    set_tests_properties(version_${tool} PROPERTIES PASS_REGULAR_EXPRESSION "^${tool} ${version_pattern}[\r\n]*$")
-endforeach()
+    # The tools report the version they were built as.
+    string(REPLACE "." "\\." version_pattern ${wsf_VERSION})
+    foreach (tool wsfrip wsfplay)
+        add_test(NAME version_${tool} COMMAND ${tool} --version)
+        set_tests_properties(version_${tool} PROPERTIES PASS_REGULAR_EXPRESSION "^${tool} ${version_pattern}[\r\n]*$")
+    endforeach()
 
-# Load local_tests.cmake from each immediate subdirectory to register tests that use locally supplied files.
-xsflib_include_local_tests()
+    # Load local_tests.cmake from each immediate subdirectory to register tests that use locally supplied files.
+    xsflib_include_local_tests()
+endif()

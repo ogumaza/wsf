@@ -71,11 +71,6 @@ private:
         int32_t grad_factor = 0;
     };
 
-    // The flags in `active_` (AXFX_CHORUS_EXP's active). kOff: the effect is off. Init, Settings and Shutdown set the
-    // flag. A successful Init clears it. kSkip: the next Process leaves its frame unchanged and clears the flag.
-    static constexpr uint32_t kOff = 1;
-    static constexpr uint32_t kSkip = 2;
-
     // __InitParams (0x8010a6c4; October 2006, 0x80034818).
     bool InitParams();
 
@@ -95,7 +90,10 @@ private:
     Lfo lfo_;
     std::array<std::array<float, 4>, kChannelCount> history_{};
     uint32_t hist_index_ = 0;
-    uint32_t active_ = kOff;
+
+    // AXFX_CHORUS_EXP's `active` field (see kStopped). Init, Settings and Shutdown set kStopped. A successful Init
+    // clears it. A successful Settings sets kSkipFrame.
+    uint32_t active_ = kStopped;
 };
 
 // AXFX_CHORUS: ChorusExp with its parameters given as times in ms.

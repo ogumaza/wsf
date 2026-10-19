@@ -8,7 +8,8 @@
 //
 // The model also follows the build of October 2006 (Build::kOctober2006). WarioWare: Smooth Moves links it. That build
 // has 64 voices and a PB of another layout (see LoadPbOctober2006). The build counts other DSP cycles for each voice
-// and numbers the commands otherwise. Comments give the addresses of the build's functions with "October 2006".
+// and numbers the commands otherwise. A table in system.cpp (BuildTraits) holds what the two builds differ in. Comments
+// give the addresses of the build's functions with "October 2006".
 
 #pragma once
 
@@ -33,10 +34,10 @@ namespace layout
 {
 
 constexpr ntdlib::PAddr kCompressorTable = 0x003ab880; // 0xfc0 bytes
-constexpr ntdlib::PAddr kAuxBuffers = 0x0042b100;      // the rings of the aux buses A, B and C (see kAuxRingSize)
+constexpr ntdlib::PAddr kAuxBuffers = 0x0042b100;      // the rings of the aux buses A, B and C (see kAuxRings)
 constexpr ntdlib::PAddr kCommandLists = 0x0042e280;    // two lists of 0x80 bytes
 constexpr ntdlib::PAddr kRemoteBuffers = 0x0042e3c0;   // 4 rings of 180 samples
-constexpr ntdlib::PAddr kSurroundBuffer = 0x0042e960;  // 0x300 bytes
+constexpr ntdlib::PAddr kSurroundBuffer = 0x0042e960;  // kSurroundBufferSize bytes
 constexpr ntdlib::PAddr kOutputBuffers = 0x0042ec60;   // 3 frames of 96 stereo samples
 constexpr ntdlib::PAddr kStudio = 0x0042f180;          // 0x78 bytes
 constexpr ntdlib::PAddr kPbs = 0x0042f200;             // 96 PBs
@@ -45,6 +46,7 @@ constexpr ntdlib::PAddr kUpdateBuffers = 0x00438200;   // October 2006: 64 buffe
 
 constexpr uint32_t kCompressorTableSize = 0xfc0;
 constexpr uint32_t kCommandListSize = 0x80;
+constexpr uint32_t kSurroundBufferSize = 0x300;
 constexpr uint32_t kRemoteBufferSamples = kRemoteSamplesPerFrame * 10;
 constexpr uint32_t kOutputBufferSize = kSamplesPerFrame * 4;
 constexpr uint32_t kItdBufferSize = 0x40;
@@ -52,16 +54,16 @@ constexpr uint32_t kUpdateBufferSize = 0x100;
 
 // Each aux bus has a ring of three frames (__AXBufferAuxA, B and C). A frame holds the three channels of the stereo
 // mode, 96 32-bit samples each, in kAuxFrameSize bytes. A and B leave room for a fourth channel for surround.
+constexpr uint32_t kAuxRingFrames = 3;
 constexpr uint32_t kAuxChannelSize = kSamplesPerFrame * 4;
-constexpr uint32_t kAuxFrameSize = 3 * kAuxChannelSize;
-constexpr std::array<uint32_t, 3> kAuxFrameStride = {4 * kAuxChannelSize, 4 * kAuxChannelSize, kAuxFrameSize};
-constexpr std::array<ntdlib::PAddr, 3> kAuxRings = {kAuxBuffers, kAuxBuffers + 3 * kAuxFrameStride[0],
-                                                    kAuxBuffers + 3 * (kAuxFrameStride[0] + kAuxFrameStride[1])};
+constexpr uint32_t kAuxFrameSize = axfx::kChannelCount * kAuxChannelSize;
+constexpr std::array<uint32_t, kAuxBusCount> kAuxFrameStride = {4 * kAuxChannelSize, 4 * kAuxChannelSize,
+                                                                kAuxFrameSize};
+constexpr std::array<ntdlib::PAddr, kAuxBusCount> kAuxRings = {
+    kAuxBuffers, kAuxBuffers + kAuxRingFrames * kAuxFrameStride[0],
+    kAuxBuffers + kAuxRingFrames * (kAuxFrameStride[0] + kAuxFrameStride[1])};
 
 } // namespace layout
-
-// The aux buses: A, B and C.
-constexpr int kAuxBusCount = 3;
 
 // The input for one DSP frame: the command list to mail to the DSP, and the buffer that the list's OUTPUT command fills
 // with 96 stereo samples (16-bit, big-endian, right then left).
@@ -168,7 +170,6 @@ private:
     ntdlib::PAddr PbAddress(uint32_t index) const;
     void SetPbDefault(Voice* voice);
     void SyncPbs(uint32_t base_cycles);
-    uint32_t RunningCycles(const Pb& pb) const;
     void ServiceVpb(Voice* voice);
     void DumpVpb(Voice* voice);
     void DepopVoice(const Pb& pb);
@@ -181,8 +182,6 @@ private:
     void WriteCommand(uint16_t word);
     void WriteCommand32(uint32_t value);
     void NextFrame(ntdlib::PAddr surround, ntdlib::PAddr output, const std::array<ntdlib::PAddr, kRemoteCount>& remote);
-    void NextFrameOctober2006(ntdlib::PAddr surround, ntdlib::PAddr output,
-                              const std::array<ntdlib::PAddr, kRemoteCount>& remote);
 
     ntdlib::dsp::WiiMemory* memory_;
     Build build_ = Build::kDecember2006;
@@ -216,7 +215,7 @@ private:
     // in the rings where the DSP writes, where it reads back and where the callbacks process.
     std::array<AuxCallback, kAuxBusCount> aux_callbacks_;
     std::array<uint16_t, kAuxBusCount> aux_volume_{kMaxVolume, kMaxVolume, kMaxVolume};
-    std::array<std::array<bool, 3>, kAuxBusCount> aux_clear_{};
+    std::array<std::array<bool, layout::kAuxRingFrames>, kAuxBusCount> aux_clear_{};
     uint32_t aux_dsp_write_ = 0;
     uint32_t aux_dsp_read_ = 1;
     uint32_t aux_cpu_ = 2;

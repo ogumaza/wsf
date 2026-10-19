@@ -19,21 +19,27 @@
 #include "xsflib/psf/streaming.h"
 #include "xsflib/text.h"
 
+#include "ax/pb.h"
+
 namespace wsf
 {
 
 namespace
 {
 
-// Reads the effects and the sends from `data` at `pos` (see ArchiveDescriptor::Serialize). An effect of an unknown
-// type, or whose size doesn't fit its type, or a send or effect whose bus isn't A, B or C, is skipped. Returns false if
-// they run past the end of the data, or there are more of them than a descriptor can hold.
-bool ParseEffects(const std::vector<uint8_t>& data, std::size_t pos, std::vector<nw4r::EffectSetup>& out,
-                  std::vector<nw4r::SoundSend>& sends)
+// The most sounds in one of a descriptor's lists: an effect's sounds, the sends or the silenced tracks.
+constexpr uint32_t kMaxSounds = 0x10000;
+
+// Each of ReadEffectSetups, ReadSends and ReadTracks reads its part of the effects at `pos` (see
+// ArchiveDescriptor::Serialize) and moves `pos` past it. Data that ends before the part has none of it. Each returns
+// false if the part runs past the end of the data, or holds more than a descriptor can.
+
+// The effects. An effect of an unknown type, or whose size doesn't fit its type, and an effect whose bus isn't A, B or
+// C are skipped.
+bool ReadEffectSetups(const std::vector<uint8_t>& data, std::size_t& pos, std::vector<nw4r::EffectSetup>& out)
 {
     static constexpr uint32_t kMaxEffects = 16;
     static constexpr uint32_t kMaxPresets = 64;
-    static constexpr uint32_t kMaxSounds = 0x10000;
     if (pos + 4 > data.size())
     {
         return true;
@@ -98,12 +104,18 @@ bool ParseEffects(const std::vector<uint8_t>& data, std::size_t pos, std::vector
         }
 
         const int expected = nw4r::EffectParamWords(effect.type);
-        if (expected != 0 && words == static_cast<uint32_t>(expected) && effect.bus < 3)
+        if (expected != 0 && words == static_cast<uint32_t>(expected) && effect.bus < ax::kAuxBusCount)
         {
             out.push_back(std::move(effect));
         }
     }
 
+    return true;
+}
+
+// The sends that the game sets on sounds. A send whose bus isn't A, B or C is skipped.
+bool ReadSends(const std::vector<uint8_t>& data, std::size_t& pos, std::vector<nw4r::SoundSend>& sends)
+{
     if (pos + 4 > data.size())
     {
         return true;
@@ -119,7 +131,7 @@ bool ParseEffects(const std::vector<uint8_t>& data, std::size_t pos, std::vector
     for (uint32_t i = 0; i < send_count; i++, pos += 12)
     {
         const uint32_t bus = xsflib::LoadLe32(&data[pos + 4]);
-        if (bus < 3)
+        if (bus < ax::kAuxBusCount)
         {
             sends.push_back({xsflib::LoadLe32(&data[pos]), static_cast<int>(bus),
                              std::bit_cast<float>(xsflib::LoadLe32(&data[pos + 8]))});
@@ -127,6 +139,40 @@ bool ParseEffects(const std::vector<uint8_t>& data, std::size_t pos, std::vector
     }
 
     return true;
+}
+
+// The tracks that the game silences on sounds. Tracks beyond track 15 are skipped.
+bool ReadTracks(const std::vector<uint8_t>& data, std::size_t& pos, std::vector<nw4r::SoundTracks>& tracks)
+{
+    if (pos + 4 > data.size())
+    {
+        return true;
+    }
+
+    const uint32_t track_count = xsflib::LoadLe32(&data[pos]);
+    pos += 4;
+    if (track_count > kMaxSounds || pos + 8ull * track_count > data.size())
+    {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < track_count; i++, pos += 8)
+    {
+        const uint32_t played = xsflib::LoadLe32(&data[pos + 4]);
+        if (played <= nw4r::kAllTracks)
+        {
+            tracks.push_back({xsflib::LoadLe32(&data[pos]), static_cast<uint16_t>(played)});
+        }
+    }
+
+    return true;
+}
+
+// Reads the effects, the sends and the tracks from `data` at `pos`. Returns false if one of the parts is damaged.
+bool ParseEffects(const std::vector<uint8_t>& data, std::size_t pos, nw4r::ArchiveEffects& effects)
+{
+    return ReadEffectSetups(data, pos, effects.setups) && ReadSends(data, pos, effects.sends) &&
+           ReadTracks(data, pos, effects.tracks);
 }
 
 } // namespace
@@ -228,9 +274,10 @@ std::optional<float> ParseTempo(std::string_view text)
     return static_cast<float>(number->value);
 }
 
-nw4r::Arrangement ArrangementFromTags(const Tags& tags)
+nw4r::Arrangement ArrangementFromTags(const Tags& tags, uint16_t tracks)
 {
     nw4r::Arrangement arrangement;
+    arrangement.tracks = tracks;
     if (const auto it = tags.find(kTracksTag); it != tags.end())
     {
         arrangement.tracks = ParseTracks(it->second).value_or(arrangement.tracks);
@@ -304,11 +351,12 @@ std::vector<uint8_t> ArchiveDescriptor::Serialize() const
     xsflib::psf::Put32(v, snd_build);
 
     // The effects: their count, then each one's bus, type, size in words, number of presets and number of sounds, then
-    // its parameter words and its sounds. Then the sends: their count, then each one's sound, bus and send.
-    if (!effects.empty() || !sends.empty())
+    // its parameter words and its sounds. Then the sends: their count, then each one's sound, bus and send. Then the
+    // tracks: their count, then each sound and the tracks that it plays.
+    if (!effects.setups.empty() || !effects.sends.empty() || !effects.tracks.empty())
     {
-        xsflib::psf::Put32(v, static_cast<uint32_t>(effects.size()));
-        for (const nw4r::EffectSetup& effect : effects)
+        xsflib::psf::Put32(v, static_cast<uint32_t>(effects.setups.size()));
+        for (const nw4r::EffectSetup& effect : effects.setups)
         {
             const int words = nw4r::EffectParamWords(effect.type);
             v.push_back(static_cast<uint8_t>(effect.bus));
@@ -341,12 +389,22 @@ std::vector<uint8_t> ArchiveDescriptor::Serialize() const
             }
         }
 
-        xsflib::psf::Put32(v, static_cast<uint32_t>(sends.size()));
-        for (const nw4r::SoundSend& send : sends)
+        xsflib::psf::Put32(v, static_cast<uint32_t>(effects.sends.size()));
+        for (const nw4r::SoundSend& send : effects.sends)
         {
             xsflib::psf::Put32(v, send.sound);
             xsflib::psf::Put32(v, static_cast<uint32_t>(send.bus));
             xsflib::psf::Put32(v, std::bit_cast<uint32_t>(send.send));
+        }
+    }
+
+    if (!effects.tracks.empty())
+    {
+        xsflib::psf::Put32(v, static_cast<uint32_t>(effects.tracks.size()));
+        for (const nw4r::SoundTracks& played : effects.tracks)
+        {
+            xsflib::psf::Put32(v, played.sound);
+            xsflib::psf::Put32(v, played.tracks);
         }
     }
 
@@ -385,7 +443,7 @@ std::optional<ArchiveDescriptor> ArchiveDescriptor::Parse(const std::vector<uint
         pos += 4;
     }
 
-    if (!ParseEffects(data, pos, d.effects, d.sends))
+    if (!ParseEffects(data, pos, d.effects))
     {
         return std::nullopt;
     }

@@ -55,10 +55,11 @@ constexpr nw4r::SndBuild kBuildSeptember2009{20090924};
 constexpr nw4r::SndBuild kBuildOctober2006{0, true};
 
 // An archive whose sequence sound has the tracks in the mask `tracks` and plays track 0 from the start of `commands`.
-ntdlib::rsar::SoundArchive MakeArchive(const Bytes& commands, uint32_t tracks)
+// The archive's waves loop unless `loop` is false.
+ntdlib::rsar::SoundArchive MakeArchive(const Bytes& commands, uint32_t tracks, bool loop = true)
 {
     return ntdlib::rsar::SoundArchive::Load(
-        ntdlib::testing::rsar_files::MakeArchive(ntdlib::testing::rsar_files::MakeSequence(commands), 0, tracks),
+        ntdlib::testing::rsar_files::MakeArchive(ntdlib::testing::rsar_files::MakeSequence(commands), 0, tracks, loop),
         wsf::nw4r::kRsarOptions);
 }
 
@@ -91,6 +92,35 @@ struct Model
     ax::Pb FirstPb() const
     {
         return ax.ReadPb(ax.VoiceCount() - 1);
+    }
+
+    // Runs `frames` frames, then returns the first voice's PB as the microcode reads it in the next.
+    ax::Pb PbAfter(int frames)
+    {
+        for (int i = 0; i < frames; i++)
+        {
+            RunFrame();
+        }
+
+        ax.StartFrame();
+        const ax::Pb next = FirstPb();
+        ax.FinishFrame();
+        engine.FrameProcess();
+
+        return next;
+    }
+
+    // Runs frames until the sound ends, at most `frames` of them. Returns the number of frames run.
+    int RunUntilEnd(int frames)
+    {
+        int ran = 0;
+        while (engine.IsBusy() && ran < frames)
+        {
+            RunFrame();
+            ran++;
+        }
+
+        return ran;
     }
 
     ntdlib::dsp::WiiMemory memory;
@@ -132,10 +162,7 @@ void TestNote()
     model.engine.Voices().UpdateAllVoices();
 
     // AX's first voice is its last. It gets the note's parameters with the next frame.
-    model.ax.StartFrame();
-    const ax::Pb pb = model.FirstPb();
-    model.ax.FinishFrame();
-    model.engine.FrameProcess();
+    const ax::Pb pb = model.PbAfter(0);
 
     const auto kCenter = static_cast<uint16_t>(32768.0f * ntdlib::nwsnd::tables::kStereoPan[0][128]);
     const uint32_t ratio = ax::Join(pb.src.ratio_hi, pb.src.ratio_lo);
@@ -177,11 +204,7 @@ void TestRelease()
 
     // A slower release ramps the envelope down over each frame. The volume falls from where the last ramp ended.
     channel->Release(model.engine);
-    model.RunFrame();
-    model.ax.StartFrame();
-    const ax::Pb first = model.FirstPb();
-    model.ax.FinishFrame();
-    model.engine.FrameProcess();
+    const ax::Pb first = model.PbAfter(1);
     model.ax.StartFrame();
     const ax::Pb second = model.FirstPb();
 
@@ -193,6 +216,18 @@ void TestRelease()
           "a released voice drops to priority 1");
 }
 
+// An AX voice of priority 31 with MakeWave's wave, acquired after the first frame of `model`.
+nw4r::AxVoice& WaveVoice(Model& model)
+{
+    model.RunFrame();
+    const nw4r::WaveData wave = MakeWave(model.memory);
+    nw4r::AxVoice* voice = model.engine.AxVoices().AcquireAxVoice(31, nullptr);
+    voice->Setup(wave.channels[0].data, ax::SampleFormat::kPcm16, 32000);
+    voice->SetAddr(false, wave.channels[0].data, 0, wave.loop_end);
+
+    return *voice;
+}
+
 // The volume at which an AX voice starts a frame after its envelope lands at 74 and then aims for 0, under `build`. A
 // step towards 0 would take the volume below 0 in a frame. The step is therefore 0. A 2007 build then leaves the volume
 // where it was. A 2008 build lands it on the target (AxVoiceParamBlock::Sync). A released note's last frame does the
@@ -200,16 +235,12 @@ void TestRelease()
 uint16_t VolumeAfterLastStep(nw4r::SndBuild build)
 {
     Model model({0xff}, build);
-    model.RunFrame();
-    const nw4r::WaveData wave = MakeWave(model.memory);
-    nw4r::AxVoice* voice = model.engine.AxVoices().AcquireAxVoice(31, nullptr);
-    voice->Setup(wave.channels[0].data, ax::SampleFormat::kPcm16, 32000);
-    voice->SetAddr(false, wave.channels[0].data, 0, wave.loop_end);
+    nw4r::AxVoice& voice = WaveVoice(model);
 
-    voice->SetVe(74.5f / 32767.0f, 74.5f / 32767.0f);
-    voice->Sync();
-    voice->SetVe(0.0f, 0.0f);
-    voice->Sync();
+    voice.SetVe(74.5f / 32767.0f, 74.5f / 32767.0f);
+    voice.Sync();
+    voice.SetVe(0.0f, 0.0f);
+    voice.Sync();
     model.ax.StartFrame();
 
     return model.FirstPb().ve.current_volume;
@@ -281,11 +312,7 @@ void TestSequence()
         return;
     }
 
-    model.RunFrame();
-    model.ax.StartFrame();
-    const ax::Pb pb = model.FirstPb();
-    model.ax.FinishFrame();
-    model.engine.FrameProcess();
+    const ax::Pb pb = model.PbAfter(1);
 
     const uint16_t kExpectedVe = ExpectedVolume(100);
     Check(pb.state == 1 && pb.addr.format == 0 && pb.addr.loop_flag == 1, "the note plays its looping ADPCM wave");
@@ -294,12 +321,7 @@ void TestSequence()
                                                    std::to_string(kExpectedVe) + ")");
 
     // The sound ends when its note has been released and stopped, and its track has reached the end.
-    int frames = 2;
-    while (model.engine.IsBusy() && frames < 400)
-    {
-        model.RunFrame();
-        frames++;
-    }
+    const int frames = 2 + model.RunUntilEnd(398);
 
     Check(!model.engine.IsBusy() && frames >= 167 && frames <= 170,
           "the sequence ends after its note (" + std::to_string(frames) + " frames)");
@@ -349,14 +371,8 @@ void TestArrangement()
     {
         Model model({0xd3, 0x7f, 0x3c, 0x64, 0x30, 0xff}, kBuild2007);
         model.engine.StartSequence(0, {.tempo_ratio = ratio});
-        int ran = 0;
-        while (model.engine.IsBusy() && ran < 1000)
-        {
-            model.RunFrame();
-            ran++;
-        }
 
-        return ran;
+        return model.RunUntilEnd(1000);
     };
 
     const int normal = frames(1.0f);
@@ -373,11 +389,7 @@ void TestArrangement()
     const auto ratio = [](const xsflib::psf::Variables& variables, Model& model)
     {
         model.engine.StartSequence(0, {.variables = variables});
-        model.RunFrame();
-        model.ax.StartFrame();
-        const ax::Pb pb = model.FirstPb();
-        model.ax.FinishFrame();
-        model.engine.FrameProcess();
+        const ax::Pb pb = model.PbAfter(1);
 
         return ax::Join(pb.src.ratio_hi, pb.src.ratio_lo) / 65536.0;
     };
@@ -397,36 +409,7 @@ struct Started
     Started(const Bytes& commands, nw4r::SndBuild build) : model(commands, build)
     {
         player = model.engine.StartSequence(0);
-        pb = PbAfter(1);
-    }
-
-    // Runs `frames` frames, then returns the first voice's PB as the microcode reads it in the next.
-    ax::Pb PbAfter(int frames)
-    {
-        for (int i = 0; i < frames; i++)
-        {
-            model.RunFrame();
-        }
-
-        model.ax.StartFrame();
-        const ax::Pb next = model.FirstPb();
-        model.ax.FinishFrame();
-        model.engine.FrameProcess();
-
-        return next;
-    }
-
-    // Runs frames until the sound ends, at most `frames` of them. Returns the number of frames run.
-    int RunUntilEnd(int frames)
-    {
-        int ran = 0;
-        while (model.engine.IsBusy() && ran < frames)
-        {
-            model.RunFrame();
-            ran++;
-        }
-
-        return ran;
+        pb = model.PbAfter(1);
     }
 
     Model model;
@@ -458,8 +441,8 @@ void TestTempo()
     Started older(kCommands, kBuild2007);
     Started newer(kCommands, kBuildMarch2008);
 
-    const int older_frames = older.RunUntilEnd(300);
-    const int newer_frames = newer.RunUntilEnd(300);
+    const int older_frames = older.model.RunUntilEnd(300);
+    const int newer_frames = newer.model.RunUntilEnd(300);
 
     Check(older_frames < 10, "a 2007 build plays a tempo of -1 at full speed (" + std::to_string(older_frames) + ")");
     Check(newer_frames == 300 && newer.model.engine.Channels().ActiveCount() == 1,
@@ -510,8 +493,8 @@ void TestBiquad()
 
     const Started march(kCommands, kBuildMarch2008);
     Started june(kCommands, kBuildJune2008);
-    const ax::Pb at_0 = june.PbAfter(140);
-    const ax::Pb off = june.PbAfter(90);
+    const ax::Pb at_0 = june.model.PbAfter(140);
+    const ax::Pb off = june.model.PbAfter(90);
 
     Check(march.pb.biquad.on == 0, "a build of March 2008 ignores the biquad filter");
     Check(BiquadIs(june.pb, ntdlib::nwsnd::tables::kBiquadHpf[68]), "a build of June 2008 filters the note");
@@ -653,17 +636,13 @@ void TestLpfTable()
 std::array<ax::PbVe, 2> EnvelopeAtGain(float gain, nw4r::SndBuild build)
 {
     Model model({0xff}, build);
-    model.RunFrame();
-    const nw4r::WaveData wave = MakeWave(model.memory);
-    nw4r::AxVoice* voice = model.engine.AxVoices().AcquireAxVoice(31, nullptr);
-    voice->Setup(wave.channels[0].data, ax::SampleFormat::kPcm16, 32000);
-    voice->SetAddr(false, wave.channels[0].data, 0, wave.loop_end);
+    nw4r::AxVoice& voice = WaveVoice(model);
 
     std::array<ax::PbVe, 2> envelope;
     for (ax::PbVe& frame : envelope)
     {
-        voice->SetVe(gain, gain);
-        voice->Sync();
+        voice.SetVe(gain, gain);
+        voice.Sync();
         model.ax.StartFrame();
         frame = model.FirstPb().ve;
         model.ax.FinishFrame();
@@ -799,8 +778,8 @@ void TestHeldNotes()
     Started held({0x3c, 0x64, 0xce, 0x10, 0xff}, kBuild2007);
     Started long_note({0x3c, 0x64, 0xc6, 0x28, 0xff}, kBuild2007);
 
-    held.RunUntilEnd(10);
-    long_note.RunUntilEnd(10);
+    held.model.RunUntilEnd(10);
+    long_note.model.RunUntilEnd(10);
 
     // Track 0 plays a note of 10,000 ticks, or of 9,000, without waiting for it. The note decays at once to a full
     // sustain. The track then calls a subroutine. The subroutine bends the note up for 6 ticks and back for 6 ticks,
@@ -874,10 +853,7 @@ void TestWaveEndWithoutDsp()
 {
     // A note of 48 ticks (167 frames) on a wave that doesn't loop, played on the model without the DSP. Its channel
     // stops once the wave has played to its end, a frame or two in. The microcode would stop it at the same point.
-    const ntdlib::rsar::SoundArchive archive = ntdlib::rsar::SoundArchive::Load(
-        ntdlib::testing::rsar_files::MakeArchive(ntdlib::testing::rsar_files::MakeSequence({0x3c, 0x64, 0x30, 0xff}), 0,
-                                                 1, false),
-        wsf::nw4r::kRsarOptions);
+    const ntdlib::rsar::SoundArchive archive = MakeArchive({0x3c, 0x64, 0x30, 0xff}, 1, false);
     auto model = std::make_unique<nw4r::ArchiveModel>();
     model->StartWithoutDsp(archive);
 
@@ -984,7 +960,7 @@ std::vector<ax::PbVe> RampOf(const Bytes& commands, nw4r::SndBuild build, int fr
     std::vector<ax::PbVe> ramp = {started.pb.ve};
     for (int i = 1; i < frames; i++)
     {
-        ramp.push_back(started.PbAfter(0).ve);
+        ramp.push_back(started.model.PbAfter(0).ve);
     }
 
     return ramp;
@@ -1031,7 +1007,7 @@ bool MixRamps(const Bytes& commands, nw4r::SndBuild build)
     Started started(commands, build);
     for (int i = 0; i < 80; i++)
     {
-        if (started.PbAfter(0).MixerCtrl() & ax::mixer::kDelta)
+        if (started.model.PbAfter(0).MixerCtrl() & ax::mixer::kDelta)
         {
             return true;
         }

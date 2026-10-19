@@ -127,44 +127,62 @@ void System::Advance()
     UpdateInterrupt();
 }
 
-bool System::ReadIo(ntdlib::PAddr address, int size, uint32_t& value)
+System::IoBlock System::BlockOf(ntdlib::PAddr address)
 {
-    // The legacy blocks at 0x0C00xxxx, their 0x6000 block's mirror at 0x0D006000, and Hollywood's registers (also at
-    // 0x0D80xxxx). MachineBase handles the blocks that the Wii shares with the GameCube. The legacy disc interface's
-    // block only stores what's written to it.
     const uint32_t block = address & 0xffff0000;
     const uint32_t offset = address & 0xffff;
-    value = 0;
-    std::optional<bool> known;
-    if (block == 0x0c000000 || (block == 0x0d000000 && offset >= kDiscInterface && offset < 0x7000))
+    if (block == 0x0c000000 || (block == 0x0d000000 && offset >= kDiscInterface && offset < kAudioInterfaceEnd))
     {
-        known = ReadShared(offset, size, value);
-        if (!known && offset >= kDiscInterface && offset < kSerialInterface)
+        return IoBlock::kLegacy;
+    }
+
+    if ((block == 0x0d000000 || block == 0x0d800000) && offset < 0x400)
+    {
+        return offset < 0x40 ? IoBlock::kIpc : IoBlock::kHollywood;
+    }
+
+    return IoBlock::kNone;
+}
+
+bool System::ReadIo(ntdlib::PAddr address, int size, uint32_t& value)
+{
+    // MachineBase handles the legacy blocks that the Wii shares with the GameCube. The legacy disc interface's block
+    // and Hollywood's other registers only store what's written to them. An access that no model handles counts as
+    // unknown.
+    const uint32_t offset = address & 0xffff;
+    value = 0;
+    bool known = false;
+    switch (BlockOf(address))
+    {
+    case IoBlock::kLegacy:
+        if (const std::optional<bool> shared = ReadShared(offset, size, value))
+        {
+            known = *shared;
+        }
+        else if (offset >= kDiscInterface && offset < kSerialInterface)
         {
             value = di_.Read(offset & 0x3ff, size);
-            known = false;
-        }
-    }
-    else if ((block == 0x0d000000 || block == 0x0d800000) && offset < 0x400)
-    {
-        if (offset < 0x40)
-        {
-            value = ios_.Read(offset);
-            known = true;
         }
         else
         {
-            value = hollywood_.Read(offset, size);
-            known = false;
+            return false;
         }
-    }
+        break;
 
-    if (!known)
-    {
+    case IoBlock::kIpc:
+        value = ios_.Read(offset);
+        known = true;
+        break;
+
+    case IoBlock::kHollywood:
+        value = hollywood_.Read(offset, size);
+        break;
+
+    case IoBlock::kNone:
         return false;
     }
 
-    if (!*known)
+    if (!known)
     {
         ReportUnknown(address, size, false, 0);
     }
@@ -174,38 +192,39 @@ bool System::ReadIo(ntdlib::PAddr address, int size, uint32_t& value)
 
 bool System::WriteIo(ntdlib::PAddr address, int size, uint32_t value)
 {
-    const uint32_t block = address & 0xffff0000;
     const uint32_t offset = address & 0xffff;
-    std::optional<bool> known;
-    if (block == 0x0c000000 || (block == 0x0d000000 && offset >= kDiscInterface && offset < 0x7000))
+    bool known = false;
+    switch (BlockOf(address))
     {
-        known = WriteShared(offset, size, value);
-        if (!known && offset >= kDiscInterface && offset < kSerialInterface)
+    case IoBlock::kLegacy:
+        if (const std::optional<bool> shared = WriteShared(offset, size, value))
+        {
+            known = *shared;
+        }
+        else if (offset >= kDiscInterface && offset < kSerialInterface)
         {
             di_.Write(offset & 0x3ff, size, value);
-            known = false;
-        }
-    }
-    else if ((block == 0x0d000000 || block == 0x0d800000) && offset < 0x400)
-    {
-        if (offset < 0x40)
-        {
-            ios_.Write(offset, value);
-            known = true;
         }
         else
         {
-            hollywood_.Write(offset, size, value);
-            known = false;
+            return false;
         }
-    }
+        break;
 
-    if (!known)
-    {
+    case IoBlock::kIpc:
+        ios_.Write(offset, value);
+        known = true;
+        break;
+
+    case IoBlock::kHollywood:
+        hollywood_.Write(offset, size, value);
+        break;
+
+    case IoBlock::kNone:
         return false;
     }
 
-    FinishWrite(address, size, value, *known);
+    FinishWrite(address, size, value, known);
 
     return true;
 }

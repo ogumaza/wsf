@@ -33,12 +33,12 @@ void Voice::SetAddr(const PbAddr& address)
     {
     case SampleFormat::kPcm16:
         pb.adpcm = PbAdpcm{};
-        pb.adpcm.gain = 0x800;
+        pb.adpcm.gain = kPcm16Gain;
         break;
 
     case SampleFormat::kPcm8:
         pb.adpcm = PbAdpcm{};
-        pb.adpcm.gain = 0x100;
+        pb.adpcm.gain = kPcm8Gain;
         break;
 
     default:

@@ -2,7 +2,6 @@
 
 #include "axfx/reverb_hi.h"
 
-#include <algorithm>
 #include <cmath>
 
 #include "ntdlib/fused.h"
@@ -43,17 +42,6 @@ constexpr uint32_t kFilterSizes[kFusedModes + 1][8] = {
 // The longest pre-delay line that the model allocates. Three lines of this length would take 96 MB. The Wii has only
 // 88 MB of memory. The game's allocation fails long before this length.
 constexpr uint32_t kMaxPreDelayLength = 1u << 23;
-
-// What __BzeroDelayLines and __FreeDelayLine do to each line.
-void Clear(std::vector<float>& line)
-{
-    std::fill(line.begin(), line.end(), 0.0f);
-}
-
-void Release(std::vector<float>& line)
-{
-    line = {};
-}
 
 } // namespace
 
@@ -238,22 +226,13 @@ float ReverbHiExp::ProcessChannel(int channel, float input, float fused_gain, fl
     }
 
     // The two allpasses, the low-pass and the channel's last allpass.
-    const float allpass0 = Allpass(allpass_line_[channel][0][allpass_pos_[0]], combs);
-    const float allpass1 = Allpass(allpass_line_[channel][1][allpass_pos_[1]], allpass0);
+    const float allpass0 = Allpass(allpass_line_[channel][0][allpass_pos_[0]], combs, allpass_coef_);
+    const float allpass1 = Allpass(allpass_line_[channel][1][allpass_pos_[1]], allpass0, allpass_coef_);
     const float lowpass = lowpass_gain * allpass1 + lpf_coef_ * last_lpf_out_[channel];
     last_lpf_out_[channel] = lowpass;
-    const float output = Allpass(last_allpass_line_[channel][last_allpass_pos_[channel]], lowpass);
+    const float output = Allpass(last_allpass_line_[channel][last_allpass_pos_[channel]], lowpass, allpass_coef_);
 
     return output * fused_gain + early;
-}
-
-float ReverbHiExp::Allpass(float& delayed, float input) const
-{
-    const float output = delayed;
-    const float stored = input + output * allpass_coef_;
-    delayed = stored;
-
-    return output - stored * allpass_coef_;
 }
 
 void ReverbHiExp::AdvancePositions()
@@ -333,15 +312,9 @@ bool ReverbHiExp::InitParams()
         last_allpass_length_[channel] = sizes[kCombs + kAllpasses + channel];
     }
 
-    // The coloration is the allpasses' gain. The low-pass weighs its last output by 1 - damping. That weight is capped
-    // at 0.95.
+    // The coloration is the allpasses' gain. The damping sets the low-pass's weight.
     allpass_coef_ = p.coloration;
-    lpf_coef_ = 1.0f - p.damping;
-    if (lpf_coef_ > 0.95f)
-    {
-        lpf_coef_ = 0.95f;
-    }
-
+    lpf_coef_ = LowpassCoef(p.damping);
     last_lpf_out_.fill(0.0f);
 
     return true;
@@ -349,12 +322,12 @@ bool ReverbHiExp::InitParams()
 
 void ReverbHiExp::ClearDelayLines()
 {
-    ForEachLine(Clear);
+    ForEachLine(ClearLine);
 }
 
 void ReverbHiExp::FreeDelayLines()
 {
-    ForEachLine(Release);
+    ForEachLine(ReleaseLine);
 }
 
 void ReverbHiExp::ForEachLine(void (*function)(std::vector<float>& line))

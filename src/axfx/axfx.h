@@ -35,6 +35,12 @@ struct AuxFrame
     std::array<std::array<int32_t, kSamplesPerFrame>, kChannelCount> channels{};
 };
 
+// The bits of an effect's `active` field in the game. While the field isn't 0, the effect's callback leaves frames as
+// they are. kStopped: the effect is off. kSkipFrame: the next callback leaves its frame alone and clears the bit. The
+// comment on each class's `active_` lists the functions that set and clear the bits.
+constexpr uint32_t kStopped = 1;
+constexpr uint32_t kSkipFrame = 2;
+
 // The builds of the AXFX library that the models follow, by the games that link them: October 2006 (WarioWare: Smooth
 // Moves), December 2006 (Wii Sports and Wii Play) and September 2008 (Animal Crossing: City Folk).
 enum class Build

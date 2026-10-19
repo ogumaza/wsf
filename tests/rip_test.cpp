@@ -2,12 +2,13 @@
 
 // Tests the ripper's choice of music (rip::IsMusic) on an archive of sounds and players that
 // ntdlib/testing/rsar_files.h builds. Also tests the length analysis on sequences in which one track plays while
-// another polls or counts a variable or marks beats for the game, and on a sequence in an arrangement. TestLibraryNames
-// checks the names of libraries in a folder that holds earlier rips (rip::LibraryName). TestJac reads a Jac game's
-// bank file and sequence index, made up in the formats of Pikmin's files. It also checks a piece that plays in parts.
-// TestPikmin2Sounds lists Pikmin 2's sounds from files made up in the game's formats. TestKeepSequenceData cuts an
-// archive of several groups down to the data that its sequences play. TestProgramTooLarge checks the limit on the size
-// of a library's program.
+// another polls or counts a variable or marks beats for the game, on tracks that loop at lengths that don't divide each
+// other, on a track that another track opens again, on a counted loop that outlasts the limit, and on a sequence in an
+// arrangement. TestLibraryNames checks the names of libraries in a folder that holds earlier rips (rip::LibraryName).
+// TestJac reads a Jac game's bank file and sequence index, made up in the formats of Pikmin's files. It also checks a
+// piece that plays in parts. TestPikmin2Sounds lists Pikmin 2's sounds from files made up in the game's formats.
+// TestKeepSequenceData cuts an archive of several groups down to the data that its sequences play. TestProgramTooLarge
+// checks the limit on the size of a library's program.
 
 #include "rip/rip.h"
 
@@ -37,6 +38,7 @@
 #include "xsflib/testing/check.h"
 
 #include "nw4r/arrangement.h"
+#include "nw4r/effect_setup.h"
 #include "nw4r/rsar_options.h"
 #include "nw4r/util.h"
 
@@ -54,15 +56,16 @@ namespace fs = std::filesystem;
 namespace
 {
 
-// The length analysis of a sequence of `commands` in `arrangement`, with the tracks in the mask `tracks`, in an archive
-// that ntdlib/testing/rsar_files.h builds. The archive's waves loop unless `loop` is false, and play at `sample_rate`
-// Hz. The model can't drive an empty microcode. The analyzer then runs the model alone. A frame then has sound while
-// any note plays.
+// The length analysis of a sequence of `commands` in `arrangement`, with `effects`, with the tracks in the mask
+// `tracks`, in an archive that ntdlib/testing/rsar_files.h builds. The archive's waves loop unless `loop` is false, and
+// play at `sample_rate` Hz. The model can't drive an empty microcode. The analyzer then runs the model alone. A frame
+// then has sound while any note plays.
 std::optional<rip::Timing> Measure(const Bytes& commands, uint32_t tracks, bool loop = true,
-                                   uint16_t sample_rate = 32000, const nw4r::Arrangement& arrangement = {})
+                                   uint16_t sample_rate = 32000, const nw4r::Arrangement& arrangement = {},
+                                   const nw4r::ArchiveEffects& effects = {})
 {
     const rip::LengthAnalyzer analyzer(MakeArchive(MakeSequence(commands), 0, tracks, loop, sample_rate),
-                                       ntdlib::Microcode{}, nw4r::SndBuild{20070608}, arrangement);
+                                       ntdlib::Microcode{}, nw4r::SndBuild{20070608}, arrangement, effects);
     return analyzer.Analyze(0);
 }
 
@@ -299,6 +302,74 @@ void TestInnerLoops()
 
     // The jumps back of the count play no note. Each pass of the outer loop still plays one. Two loops of 24 ticks.
     CheckTiming("an inner loop doesn't hide the notes of the loop around it", counted, 490, 510, 10000);
+}
+
+// Tests the length analysis on a sequence whose tracks loop at lengths that don't divide each other.
+void TestOtherLoops()
+{
+    // Track 0 opens track 1 at 19, then plays a note of 24 ticks over and over (from 11). Track 1 plays a note of 60
+    // ticks over and over (from 25).
+    const Bytes kLoops = {0x88, 1,    0x00, 0x00, 19,   0xD1, 0x7F, 0xD2, 0x7F, 0xD3, 0x7F,
+                          60,   127,  24,   0x89, 0x00, 0x00, 11,   0xFF, 0xD1, 0x7F, 0xD2,
+                          0x7F, 0xD3, 0x7F, 62,   127,  60,   0x89, 0x00, 0x00, 25,   0xFF};
+    const auto both = Measure(kLoops, 3);
+
+    // The same in an arrangement of track 0 alone. Track 1 plays at a volume of 0. Then the same where the game plays
+    // track 0 of the sound alone, and in an arrangement of both tracks with that.
+    const auto alone = Measure(kLoops, 3, true, 32000, {.tracks = 0x0001});
+    const auto game_alone = Measure(kLoops, 3, true, 32000, {}, {.tracks = {{0, 0x0001}}});
+    const auto both_with_game = Measure(kLoops, 3, true, 32000, {.tracks = 0x0003}, {.tracks = {{0, 0x0001}}});
+    const auto other_sound = Measure(kLoops, 3, true, 32000, {}, {.tracks = {{1, 0x0001}}});
+
+    // Track 0's loops at 24 and 48 ticks count. The fade waits for track 1's second loop, at 120 ticks (1,250 ms).
+    CheckTiming("the fade waits for the second loop of a track that loops at another length", both, 1245, 1265, 10000);
+
+    // A silent track doesn't hold the fade back: two loops of 24 ticks.
+    CheckTiming("a silent track doesn't hold the fade back", alone, 490, 510, 10000);
+
+    // The tracks that the game plays of the sound narrow the arrangement's. Those of another sound change nothing.
+    CheckTiming("a track that the game silences doesn't hold the fade back", game_alone, 490, 510, 10000);
+    CheckTiming("the game's tracks narrow the arrangement's", both_with_game, 490, 510, 10000);
+    CheckTiming("another sound's tracks change nothing", other_sound, 1245, 1265, 10000);
+}
+
+// Tests the length analysis on sequences whose track 0 opens track 1 again in each of its loops. Track 1 never loops.
+void TestReopen()
+{
+    // Track 0 opens track 1 at 12, waits 48 ticks and jumps back to the open, over and over. Track 1 plays a note of 48
+    // ticks, waits 96 ticks and ends. In the second sequence, track 1's note lasts 24 ticks. Track 1 then still waits
+    // when track 0 opens it again.
+    const Bytes kNoteEnds = {0x88, 1,    0x00, 0x00, 12,   0x80, 48, 0x89, 0x00, 0x00, 0,  0xFF,
+                             0xD1, 0x7F, 0xD2, 0x7F, 0xD3, 0x7F, 60, 127,  48,   0x80, 96, 0xFF};
+    const Bytes kWaiting = {0x88, 1,    0x00, 0x00, 12,   0x80, 48, 0x89, 0x00, 0x00, 0,  0xFF,
+                            0xD1, 0x7F, 0xD2, 0x7F, 0xD3, 0x7F, 60, 127,  24,   0x80, 96, 0xFF};
+
+    const auto note_ends = Measure(kNoteEnds, 3);
+    const auto waiting = Measure(kWaiting, 3);
+
+    // Track 0's loops end at 48 and 96 ticks. Track 1's note ends at both, and track 1 starts its part again from the
+    // open (1,000 ms).
+    CheckTiming("a track opened again makes a pass as it starts again", note_ends, 990, 1010, 10000);
+
+    // The opens keep track 1's wait. Track 1 starts again at 120 ticks, where its wait runs out, and at 144 ticks,
+    // where its note ends as track 0 opens it again (1,500 ms).
+    CheckTiming("a track opened again during a wait makes a pass when the wait runs out", waiting, 1490, 1510, 10000);
+}
+
+// Tests the length analysis on a sequence whose second track repeats its part in a counted loop that outlasts the
+// limit.
+void TestLongCountedLoops()
+{
+    // Track 0 opens track 1 at 20, then plays a note of 480 ticks over and over (from 11). Track 1 plays a note of 480
+    // ticks in a loop of 127 passes (from 26) and then starts the loop again. The 127 passes take 635 s.
+    const auto counted = Measure({0x88, 1,    0x00, 0x00, 20,   0xD1, 0x7F, 0xD2, 0x7F, 0xD3, 0x7F, 60,   127,
+                                  0x83, 0x60, 0x89, 0x00, 0x00, 11,   0xFF, 0xD1, 0x7F, 0xD2, 0x7F, 0xD3, 0x7F,
+                                  0xD4, 127,  62,   127,  0x83, 0x60, 0xFC, 0x89, 0x00, 0x00, 26,   0xFF},
+                                 3);
+
+    // The analysis reaches its limit inside track 1's loop. It then takes that loop as endless. Track 1's passes then
+    // count, and the fade starts after two loops of 480 ticks (5 s each).
+    CheckTiming("a counted loop that outlasts the limit counts as endless", counted, 9990, 10010, 10000);
 }
 
 void TestArrangement()
@@ -645,16 +716,13 @@ GroupedArchive MakeGroupedArchive(const std::vector<std::pair<Bytes, Bytes>>& fi
                                   const std::vector<uint32_t>& sequences, const std::vector<uint32_t>& banks)
 {
     using ntdlib::testing::rsar_files::Grow;
+    using ntdlib::testing::rsar_files::Header;
+    using ntdlib::testing::rsar_files::InfoTable;
     using ntdlib::testing::rsar_files::PutRef;
 
     GroupedArchive archive;
     Bytes& file = archive.bytes;
-    file.resize(0x40, 0);
-    std::memcpy(file.data(), "RSAR", 4);
-    xsflib::StoreBe16(&file[4], 0xFEFF);
-    xsflib::StoreBe16(&file[6], 0x0104);
-    xsflib::StoreBe16(&file[0xC], 0x40);
-    xsflib::StoreBe16(&file[0xE], 2);
+    file = Header("RSAR", 0x0104, 2, 0x40);
     const auto put = [&file](std::size_t at, std::size_t value)
     {
         xsflib::StoreBe32(&file[at], static_cast<uint32_t>(value));
@@ -670,14 +738,6 @@ GroupedArchive MakeGroupedArchive(const std::vector<std::pair<Bytes, Bytes>>& fi
     std::memcpy(&file[info], "INFO", 4);
     const std::size_t base = file.size();
     const std::size_t tables = Grow(file, 0x30);
-    const auto table = [&](std::size_t ref, std::size_t count)
-    {
-        const std::size_t at = Grow(file, 4 + count * 8);
-        put(at, count);
-        PutRef(file, ref, 0, static_cast<uint32_t>(at - base));
-
-        return at + 4;
-    };
     const auto entry = [&](std::size_t refs, std::size_t i, std::size_t size)
     {
         const std::size_t at = Grow(file, size);
@@ -686,7 +746,7 @@ GroupedArchive MakeGroupedArchive(const std::vector<std::pair<Bytes, Bytes>>& fi
         return at;
     };
 
-    const std::size_t sound_refs = table(tables, sequences.size());
+    const std::size_t sound_refs = InfoTable(file, tables, base, sequences.size());
     for (std::size_t i = 0; i < sequences.size(); i++)
     {
         const std::size_t sound = entry(sound_refs, i, 0x2C);
@@ -697,19 +757,19 @@ GroupedArchive MakeGroupedArchive(const std::vector<std::pair<Bytes, Bytes>>& fi
         put(sequence + 4, i);
     }
 
-    const std::size_t bank_refs = table(tables + 8, banks.size());
+    const std::size_t bank_refs = InfoTable(file, tables + 8, base, banks.size());
     for (std::size_t i = 0; i < banks.size(); i++)
     {
         put(entry(bank_refs, i, 8) + 4, banks[i]);
     }
 
-    const std::size_t file_refs = table(tables + 0x18, files.size());
+    const std::size_t file_refs = InfoTable(file, tables + 0x18, base, files.size());
     for (std::size_t f = 0; f < files.size(); f++)
     {
         const std::size_t at = entry(file_refs, f, 0x1C);
         put(at, files[f].first.size());
         put(at + 4, files[f].second.size());
-        const std::size_t place_refs = table(at + 0x14, places[f].size());
+        const std::size_t place_refs = InfoTable(file, at + 0x14, base, places[f].size());
         for (std::size_t p = 0; p < places[f].size(); p++)
         {
             const std::size_t place = entry(place_refs, p, 8);
@@ -718,7 +778,7 @@ GroupedArchive MakeGroupedArchive(const std::vector<std::pair<Bytes, Bytes>>& fi
         }
     }
 
-    const std::size_t group_refs = table(tables + 0x20, groups.size());
+    const std::size_t group_refs = InfoTable(file, tables + 0x20, base, groups.size());
     for (std::size_t g = 0; g < groups.size(); g++)
     {
         archive.groups.push_back(entry(group_refs, g, 0x28));
@@ -729,7 +789,7 @@ GroupedArchive MakeGroupedArchive(const std::vector<std::pair<Bytes, Bytes>>& fi
             PutRef(file, archive.groups[g] + 8, 0, static_cast<uint32_t>(path - base));
         }
 
-        const std::size_t item_refs = table(archive.groups[g] + 0x20, groups[g].files.size());
+        const std::size_t item_refs = InfoTable(file, archive.groups[g] + 0x20, base, groups[g].files.size());
         std::vector<std::size_t>& items = archive.items.emplace_back();
         for (std::size_t i = 0; i < groups[g].files.size(); i++)
         {
@@ -939,6 +999,9 @@ int main()
         TestTracksThatWaitForEver();
         TestSwells();
         TestInnerLoops();
+        TestOtherLoops();
+        TestReopen();
+        TestLongCountedLoops();
         TestArrangement();
         TestIsMusic();
         TestLibraryNames();

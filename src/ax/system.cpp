@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -43,29 +44,12 @@ constexpr std::array<uint32_t, 32> kMixCyclesOctober2006 = {
     0, 760, 760, 1470, 0, 1265, 1265, 2470, 760,  1520, 1520, 2230, 760,  2025, 2025, 3230,
     0, 760, 760, 1470, 0, 1265, 1265, 2470, 1265, 2025, 2025, 2735, 1265, 2530, 2530, 3735};
 
-// The commands in the microcode's command list.
+// The commands in the microcode's command list that every build numbers alike. BuildTraits numbers the others.
 enum Command : uint16_t
 {
     kCommandSetup = 0,
     kCommandAddToLr = 1,
     kCommandProcess = 4,
-    kCommandMixAuxA = 5, // B and C follow
-    kCommandCompressor = 10,
-    kCommandOutput = 11,
-    kCommandWmOutput = 13,
-    kCommandEnd = 14,
-};
-
-// The commands of the build of October 2006. Command 5, which takes no arguments, always follows PROCESS. The commands
-// after it are numbered one higher, and OUTPUT takes no master volume.
-enum CommandOctober2006 : uint16_t
-{
-    kCommandAfterProcessOctober2006 = 5,
-    kCommandMixAuxAOctober2006 = 6, // B and C follow
-    kCommandCompressorOctober2006 = 11,
-    kCommandOutputOctober2006 = 12,
-    kCommandWmOutputOctober2006 = 14,
-    kCommandEndOctober2006 = 15,
 };
 
 // The compressor's threshold and release time, in frames.
@@ -102,6 +86,19 @@ constexpr uint32_t kStudioEntrySize = 6;
 // The samples in one Wii Remote ring buffer.
 constexpr int32_t kRemoteBufferLength = layout::kRemoteBufferSamples;
 
+// The addresses in the Wii Remotes' rings that a frame's command list gives the microcode: each ring at `position`, in
+// samples from its start.
+std::array<ntdlib::PAddr, kRemoteCount> RemoteBuffersAt(int32_t position)
+{
+    std::array<ntdlib::PAddr, kRemoteCount> remote;
+    for (int i = 0; i < kRemoteCount; i++)
+    {
+        remote[i] = layout::kRemoteBuffers + static_cast<ntdlib::PAddr>((i * kRemoteBufferLength + position) * 2);
+    }
+
+    return remote;
+}
+
 uint16_t Hi(uint32_t value)
 {
     return static_cast<uint16_t>(value >> 16);
@@ -116,16 +113,176 @@ uint16_t Lo(uint32_t value)
 uint32_t SrcCycles(const Pb& pb)
 {
     const uint32_t ratio = Join(pb.src.ratio_hi, pb.src.ratio_lo);
-    if (pb.src_select == 0)
+    if (pb.src_select == static_cast<uint16_t>(SrcMode::kFourTap))
     {
         return (ratio * 512 + 32768) / 65536 + 1561;
     }
-    if (pb.src_select == 1)
+    if (pb.src_select == static_cast<uint16_t>(SrcMode::kLinear))
     {
         return (ratio * 512 + 32768) / 65536 + 1466;
     }
 
     return 605;
+}
+
+// The DSP cycles that a running voice takes in the build of December 2006 (__AXSyncPBs, 0x80106d64).
+uint32_t RunningCyclesDecember2006(const Pb& pb)
+{
+    uint32_t cycles = 387;
+    if (pb.lpf.on != 0)
+    {
+        cycles += 309;
+    }
+
+    if (pb.biquad.on != 0)
+    {
+        cycles += 1024;
+    }
+
+    if (pb.itd.flag == 1)
+    {
+        cycles += 27;
+    }
+
+    const uint32_t ctrl = pb.MixerCtrl();
+    cycles += SrcCycles(pb);
+    cycles +=
+        kMixCycles[ctrl & 31] + kMixCycles[ctrl >> 16 & 31] + kMixCycles[ctrl >> 21 & 31] + kMixCycles[ctrl >> 26 & 31];
+
+    if (pb.remote == 1)
+    {
+        cycles += 613;
+        if (pb.rmt_iir.on == kLpfOn)
+        {
+            cycles += 118;
+        }
+        else if (pb.rmt_iir.on == kBiquadOn)
+        {
+            cycles += 834;
+        }
+
+        for (int shift = 0; shift < 16; shift += 2)
+        {
+            cycles += kRemoteMixCycles[pb.rmt_mixer_ctrl >> shift & 3];
+        }
+    }
+
+    return cycles;
+}
+
+// The same in the build of October 2006 (0x80030af0). Both sample rate converters take the same cycles, and no
+// conversion takes none. The low-pass filter and the second filter take 555 each. The model never turns the second
+// filter on.
+uint32_t RunningCyclesOctober2006(const Pb& pb)
+{
+    const uint32_t ctrl = pb.MixerCtrl();
+    uint32_t cycles = kMixCyclesOctober2006[ctrl & 31] + kMixCyclesOctober2006[ctrl >> 16 & 31] +
+                      kMixCyclesOctober2006[ctrl >> 21 & 31] + kMixCyclesOctober2006[ctrl >> 26 & 31] + 140;
+    if (pb.src_select != static_cast<uint16_t>(SrcMode::kNone))
+    {
+        const uint32_t ratio = Join(pb.src.ratio_hi, pb.src.ratio_lo);
+        cycles += ((ratio * 132 + 0x8000) / 65536 + 728) * 6;
+    }
+
+    if (pb.lpf.on != 0)
+    {
+        cycles += 555;
+    }
+
+    return cycles;
+}
+
+// What the builds of AX's CPU side differ in, apart from the PB's layout (see LoadPbOctober2006).
+struct BuildTraits
+{
+    uint32_t voice_count;
+
+    // The PB: its size, how it's read and written, and whether it has a buffer for the changes that the microcode
+    // makes within a frame. The model never queues such changes.
+    std::size_t pb_size;
+    Pb (*load_pb)(const uint8_t* bytes);
+    void (*store_pb)(const Pb& pb, uint8_t* bytes);
+    bool update_buffers;
+
+    // The DSP cycles: the headroom that __AXOutNewFrame passes to __AXSyncPBs, what __AXSyncPBs counts besides the
+    // command list and the voices, a voice's ITD, and a running voice.
+    uint32_t headroom;
+    uint32_t sync_cycles;
+    uint32_t itd_cycles;
+    uint32_t (*running_cycles)(const Pb& pb);
+
+    // Whether an aux bus whose callback goes marks the three frames of its ring to be cleared (__clearAuxA and so on).
+    bool clears_aux_rings;
+
+    // The command list (__AXNextFrame): the numbers of the commands after PROCESS, and AX's estimates of the cycles of
+    // SETUP, of each aux bus and of OUTPUT.
+    std::optional<uint16_t> after_process; // a command without arguments
+    uint16_t mix_aux_a;                    // B and C follow
+    uint16_t compressor;
+    uint16_t wm_output;
+    uint16_t output;
+    bool output_volume; // whether OUTPUT takes the master volume
+    uint16_t end;
+    uint32_t setup_cycles;
+    uint32_t aux_cycles;
+    uint32_t output_cycles;
+};
+
+// The build that Wii Sports links, and the later ones. In its default mode, AX passes 24,400 cycles of headroom
+// (__AXOutNewFrame, 0x80105c00).
+constexpr BuildTraits kDecember2006Traits = {
+    .voice_count = kVoiceCount,
+    .pb_size = kPbSize,
+    .load_pb = LoadPb,
+    .store_pb = StorePb,
+    .update_buffers = false,
+    .headroom = 24400,
+    .sync_cycles = 32 + kVoiceCount * 600,
+    .itd_cycles = 129,
+    .running_cycles = RunningCyclesDecember2006,
+    .clears_aux_rings = true,
+    .after_process = std::nullopt,
+    .mix_aux_a = 5,
+    .compressor = 10,
+    .wm_output = 13,
+    .output = 11,
+    .output_volume = true,
+    .end = 14,
+    .setup_cycles = 4126,
+    .aux_cycles = 2235,
+    .output_cycles = 1172,
+};
+
+// The build of October 2006. Its __AXOutNewFrame (0x8002fb70) passes 0 cycles of headroom when the DSP has finished the
+// last frame by the audio interface's interrupt. Otherwise it passes the time it waited for the DSP. Here the DSP is
+// always done in time. Its __AXSyncPBs counts no cycles for the ITD. Command 5 always follows PROCESS. The commands
+// after it are numbered one higher than in later builds.
+constexpr BuildTraits kOctober2006Traits = {
+    .voice_count = kVoiceCountOctober2006,
+    .pb_size = kPbSizeOctober2006,
+    .load_pb = LoadPbOctober2006,
+    .store_pb = StorePbOctober2006,
+    .update_buffers = true,
+    .headroom = 0,
+    .sync_cycles = 43536,
+    .itd_cycles = 0,
+    .running_cycles = RunningCyclesOctober2006,
+    .clears_aux_rings = false,
+    .after_process = 5,
+    .mix_aux_a = 6,
+    .compressor = 11,
+    .wm_output = 14,
+    .output = 12,
+    .output_volume = false,
+    .end = 15,
+    .setup_cycles = 4246,
+    .aux_cycles = 1249,
+    .output_cycles = 665,
+};
+
+const BuildTraits& TraitsOf(Build build)
+{
+    return build == Build::kOctober2006 ? kOctober2006Traits : kDecember2006Traits;
 }
 
 // Fills one entry of the depop block from its accumulator (__AXDepopFadeMain 0x801063f8, __AXDepopFadeRmt 0x80106464).
@@ -157,7 +314,8 @@ System::System(ntdlib::dsp::WiiMemory& memory) : memory_(&memory)
 void System::Init(Build build)
 {
     build_ = build;
-    voice_count_ = build == Build::kOctober2006 ? kVoiceCountOctober2006 : kVoiceCount;
+    const BuildTraits& traits = TraitsOf(build_);
+    voice_count_ = traits.voice_count;
 
     uint8_t* table = memory_->At(layout::kCompressorTable, layout::kCompressorTableSize);
     for (std::size_t i = 0; i < tables::kCompressor.size(); i++)
@@ -175,9 +333,9 @@ void System::Init(Build build)
     recorded_dsp_cycles_ = 0;
     std::memset(memory_->At(layout::kItdBuffers, voice_count_ * layout::kItdBufferSize), 0,
                 voice_count_ * layout::kItdBufferSize);
-    if (build_ == Build::kOctober2006)
+    std::memset(memory_->At(layout::kPbs, voice_count_ * traits.pb_size), 0, voice_count_ * traits.pb_size);
+    if (traits.update_buffers)
     {
-        std::memset(memory_->At(layout::kPbs, voice_count_ * kPbSizeOctober2006), 0, voice_count_ * kPbSizeOctober2006);
         std::memset(memory_->At(layout::kUpdateBuffers, voice_count_ * layout::kUpdateBufferSize), 0,
                     voice_count_ * layout::kUpdateBufferSize);
     }
@@ -203,7 +361,7 @@ void System::Init(Build build)
         voice.pb.itd.buffer_lo = dsp.itd.buffer_lo = Lo(itd);
         WritePb(i, dsp);
 
-        if (build_ == Build::kOctober2006)
+        if (traits.update_buffers)
         {
             // The update block's three counters stay 0. Its last two words give the buffer's address.
             const uint32_t updates = ntdlib::dsp::ToCached(layout::kUpdateBuffers + i * layout::kUpdateBufferSize);
@@ -230,40 +388,25 @@ void System::Init(Build build)
     // to the second one.
     output_frame_ = 0;
     std::memset(memory_->At(layout::kOutputBuffers, 3 * layout::kOutputBufferSize), 0, 3 * layout::kOutputBufferSize);
-    std::memset(memory_->At(layout::kSurroundBuffer, 0x300), 0, 0x300);
+    std::memset(memory_->At(layout::kSurroundBuffer, layout::kSurroundBufferSize), 0, layout::kSurroundBufferSize);
     std::memset(memory_->At(layout::kRemoteBuffers, kRemoteCount * kRemoteBufferLength * 2), 0,
                 kRemoteCount * kRemoteBufferLength * 2);
 
-    std::array<ntdlib::PAddr, kRemoteCount> remote;
-    for (int i = 0; i < kRemoteCount; i++)
-    {
-        remote[i] = layout::kRemoteBuffers + static_cast<ntdlib::PAddr>(i * kRemoteBufferLength * 2);
-    }
-
+    // The first command list writes the rings from their start.
     remote_position_ = kRemoteSamplesPerFrame;
-    NextFrame(layout::kSurroundBuffer, layout::kOutputBuffers + layout::kOutputBufferSize, remote);
+    NextFrame(layout::kSurroundBuffer, layout::kOutputBuffers + layout::kOutputBufferSize, RemoteBuffersAt(0));
 }
 
 Pb System::ReadPb(uint32_t index) const
 {
-    if (build_ == Build::kOctober2006)
-    {
-        return LoadPbOctober2006(memory_->At(PbAddress(index), kPbSizeOctober2006));
-    }
-
-    return LoadPb(memory_->At(PbAddress(index), kPbSize));
+    const BuildTraits& traits = TraitsOf(build_);
+    return traits.load_pb(memory_->At(PbAddress(index), traits.pb_size));
 }
 
 void System::WritePb(uint32_t index, const Pb& pb)
 {
-    if (build_ == Build::kOctober2006)
-    {
-        StorePbOctober2006(pb, memory_->At(PbAddress(index), kPbSizeOctober2006));
-
-        return;
-    }
-
-    StorePb(pb, memory_->At(PbAddress(index), kPbSize));
+    const BuildTraits& traits = TraitsOf(build_);
+    traits.store_pb(pb, memory_->At(PbAddress(index), traits.pb_size));
 }
 
 Voice* System::AcquireVoice(uint32_t priority, Voice::Callback callback)
@@ -323,10 +466,7 @@ void System::SetMasterVolume(uint16_t volume)
 
 Frame System::StartFrame()
 {
-    // In its default mode, AX passes 24,400 cycles of headroom (__AXOutNewFrame, 0x80105c00). The build of October 2006
-    // passes 0 when the DSP has finished the last frame by the audio interface's interrupt (0x8002fb70). Otherwise it
-    // passes the time it waited for the DSP. Here the DSP is always done in time.
-    SyncPbs(build_ == Build::kOctober2006 ? 0 : 24400);
+    SyncPbs(TraitsOf(build_).headroom);
     PrintStudio();
 
     const uint32_t list = CommandListAddress();
@@ -343,13 +483,7 @@ void System::FinishFrame()
     }
 
     // Advance the Wii Remote rings by one frame. Then build the next command list.
-    std::array<ntdlib::PAddr, kRemoteCount> remote;
-    for (int i = 0; i < kRemoteCount; i++)
-    {
-        remote[i] =
-            layout::kRemoteBuffers + static_cast<ntdlib::PAddr>((i * kRemoteBufferLength + remote_position_) * 2);
-    }
-
+    const std::array<ntdlib::PAddr, kRemoteCount> remote = RemoteBuffersAt(remote_position_);
     remote_position_ += kRemoteSamplesPerFrame;
     if (remote_position_ >= kRemoteBufferLength)
     {
@@ -362,10 +496,9 @@ void System::FinishFrame()
 
 void System::RegisterAuxCallback(int bus, AuxCallback callback)
 {
-    // The build of October 2006 marks nothing for clearing.
-    if (!callback && build_ != Build::kOctober2006)
+    if (!callback && TraitsOf(build_).clears_aux_rings)
     {
-        aux_clear_[bus] = {true, true, true};
+        aux_clear_[bus].fill(true);
     }
 
     aux_callbacks_[bus] = std::move(callback);
@@ -409,9 +542,9 @@ void System::ProcessAux()
         }
     }
 
-    aux_dsp_write_ = (aux_dsp_write_ + 1) % 3;
-    aux_dsp_read_ = (aux_dsp_read_ + 1) % 3;
-    aux_cpu_ = (aux_cpu_ + 1) % 3;
+    aux_dsp_write_ = (aux_dsp_write_ + 1) % layout::kAuxRingFrames;
+    aux_dsp_read_ = (aux_dsp_read_ + 1) % layout::kAuxRingFrames;
+    aux_cpu_ = (aux_cpu_ + 1) % layout::kAuxRingFrames;
 }
 
 ntdlib::PAddr System::AuxFrameAddress(int bus, uint32_t position) const
@@ -457,8 +590,7 @@ Voice* System::PopCallbackStack()
 
 ntdlib::PAddr System::PbAddress(uint32_t index) const
 {
-    const std::size_t size = build_ == Build::kOctober2006 ? kPbSizeOctober2006 : kPbSize;
-    return layout::kPbs + index * static_cast<ntdlib::PAddr>(size);
+    return layout::kPbs + index * static_cast<ntdlib::PAddr>(TraitsOf(build_).pb_size);
 }
 
 void System::SetPbDefault(Voice* voice)
@@ -484,17 +616,14 @@ void System::SyncPbs(uint32_t base_cycles)
         dsp_pbs_[i] = ReadPb(i);
     }
 
-    const bool october = build_ == Build::kOctober2006;
-    uint32_t cycles = october ? command_list_cycles_ + base_cycles + 43536
-                              : 32 + command_list_cycles_ + kVoiceCount * 600 + base_cycles;
+    const BuildTraits& traits = TraitsOf(build_);
+    uint32_t cycles = command_list_cycles_ + base_cycles + traits.sync_cycles;
     const auto sync_voice = [&](uint32_t index)
     {
         Voice* voice = &voices_[index];
-
-        // The build of October 2006 counts no cycles for the ITD.
-        if (!october && voice->pb.itd.flag == 1)
+        if (voice->pb.itd.flag == 1)
         {
-            cycles += 129;
+            cycles += traits.itd_cycles;
         }
 
         if (voice->depop)
@@ -504,7 +633,7 @@ void System::SyncPbs(uint32_t base_cycles)
 
         if (voice->IsRunning())
         {
-            cycles += RunningCycles(voice->pb);
+            cycles += traits.running_cycles(voice->pb);
             if (max_dsp_cycles_ > cycles)
             {
                 ServiceVpb(voice);
@@ -547,70 +676,6 @@ void System::SyncPbs(uint32_t base_cycles)
     {
         WritePb(i, dsp_pbs_[i]);
     }
-}
-
-uint32_t System::RunningCycles(const Pb& pb) const
-{
-    const uint32_t ctrl = pb.MixerCtrl();
-    if (build_ == Build::kOctober2006)
-    {
-        // Both sample rate converters take the same cycles, and no conversion takes none. The low-pass filter and the
-        // second filter take 555 each. The model never turns the second filter on.
-        uint32_t cycles = kMixCyclesOctober2006[ctrl & 31] + kMixCyclesOctober2006[ctrl >> 16 & 31] +
-                          kMixCyclesOctober2006[ctrl >> 21 & 31] + kMixCyclesOctober2006[ctrl >> 26 & 31] + 140;
-        if (pb.src_select != 2)
-        {
-            const uint32_t ratio = Join(pb.src.ratio_hi, pb.src.ratio_lo);
-            cycles += ((ratio * 132 + 0x8000) / 65536 + 728) * 6;
-        }
-
-        if (pb.lpf.on != 0)
-        {
-            cycles += 555;
-        }
-
-        return cycles;
-    }
-
-    uint32_t cycles = 387;
-    if (pb.lpf.on != 0)
-    {
-        cycles += 309;
-    }
-
-    if (pb.biquad.on != 0)
-    {
-        cycles += 1024;
-    }
-
-    if (pb.itd.flag == 1)
-    {
-        cycles += 27;
-    }
-
-    cycles += SrcCycles(pb);
-    cycles +=
-        kMixCycles[ctrl & 31] + kMixCycles[ctrl >> 16 & 31] + kMixCycles[ctrl >> 21 & 31] + kMixCycles[ctrl >> 26 & 31];
-
-    if (pb.remote == 1)
-    {
-        cycles += 613;
-        if (pb.rmt_iir.on == kLpfOn)
-        {
-            cycles += 118;
-        }
-        else if (pb.rmt_iir.on == kBiquadOn)
-        {
-            cycles += 834;
-        }
-
-        for (int shift = 0; shift < 16; shift += 2)
-        {
-            cycles += kRemoteMixCycles[pb.rmt_mixer_ctrl >> shift & 3];
-        }
-    }
-
-    return cycles;
 }
 
 void System::ServiceVpb(Voice* voice)
@@ -925,22 +990,15 @@ void System::WriteCommand32(uint32_t value)
 void System::NextFrame(ntdlib::PAddr surround, ntdlib::PAddr output,
                        const std::array<ntdlib::PAddr, kRemoteCount>& remote)
 {
-    // __AXNextFrame (0x801051ac) in stereo, with the compressor on. The cycle counts are AX's estimates. SyncPbs uses
-    // them.
+    // __AXNextFrame (0x801051ac; October 2006, 0x8002ef20) in stereo, with the compressor on. Both builds write the
+    // commands in the same order. The cycle counts are AX's estimates. SyncPbs uses them.
+    const BuildTraits& traits = TraitsOf(build_);
     list_output_[(command_list_write_ - layout::kCommandLists) / layout::kCommandListSize] = output;
-
-    if (build_ == Build::kOctober2006)
-    {
-        NextFrameOctober2006(surround, output, remote);
-
-        return;
-    }
-
     command_list_cycles_ = 7811;
 
     WriteCommand(kCommandSetup);
     WriteCommand32(ntdlib::dsp::ToCached(layout::kStudio));
-    command_list_cycles_ += 4126;
+    command_list_cycles_ += traits.setup_cycles;
 
     WriteCommand(kCommandAddToLr);
     WriteCommand32(ntdlib::dsp::ToCached(surround));
@@ -948,69 +1006,35 @@ void System::NextFrame(ntdlib::PAddr surround, ntdlib::PAddr output,
 
     WriteCommand(kCommandProcess);
     WriteCommand32(ntdlib::dsp::ToCached(layout::kPbs));
-    WriteAuxCommands(kCommandMixAuxA, 2235);
+    if (traits.after_process)
+    {
+        WriteCommand(*traits.after_process);
+    }
+    WriteAuxCommands(traits.mix_aux_a, traits.aux_cycles);
 
-    WriteCommand(kCommandCompressor);
+    WriteCommand(traits.compressor);
     WriteCommand(kCompressorThreshold);
     WriteCommand(kCompressorRelease);
     WriteCommand32(ntdlib::dsp::ToCached(layout::kCompressorTable));
     command_list_cycles_ += 1850;
 
-    WriteCommand(kCommandWmOutput);
+    WriteCommand(traits.wm_output);
     for (const ntdlib::PAddr buffer : remote)
     {
         WriteCommand32(ntdlib::dsp::ToCached(buffer));
     }
     command_list_cycles_ += 409;
 
-    WriteCommand(kCommandOutput);
-    WriteCommand(master_volume_);
-    WriteCommand32(ntdlib::dsp::ToCached(surround));
-    WriteCommand32(ntdlib::dsp::ToCached(output));
-    command_list_cycles_ += 1172;
-
-    WriteCommand(kCommandEnd);
-    command_list_cycles_ += 30;
-}
-
-void System::NextFrameOctober2006(ntdlib::PAddr surround, ntdlib::PAddr output,
-                                  const std::array<ntdlib::PAddr, kRemoteCount>& remote)
-{
-    // __AXNextFrame of October 2006 (0x8002ef20). It writes the commands in the same order as the later builds.
-    command_list_cycles_ = 7811;
-
-    WriteCommand(kCommandSetup);
-    WriteCommand32(ntdlib::dsp::ToCached(layout::kStudio));
-    command_list_cycles_ += 4246;
-
-    WriteCommand(kCommandAddToLr);
-    WriteCommand32(ntdlib::dsp::ToCached(surround));
-    command_list_cycles_ += 733;
-
-    WriteCommand(kCommandProcess);
-    WriteCommand32(ntdlib::dsp::ToCached(layout::kPbs));
-    WriteCommand(kCommandAfterProcessOctober2006);
-    WriteAuxCommands(kCommandMixAuxAOctober2006, 1249);
-
-    WriteCommand(kCommandCompressorOctober2006);
-    WriteCommand(kCompressorThreshold);
-    WriteCommand(kCompressorRelease);
-    WriteCommand32(ntdlib::dsp::ToCached(layout::kCompressorTable));
-    command_list_cycles_ += 1850;
-
-    WriteCommand(kCommandWmOutputOctober2006);
-    for (const ntdlib::PAddr buffer : remote)
+    WriteCommand(traits.output);
+    if (traits.output_volume)
     {
-        WriteCommand32(ntdlib::dsp::ToCached(buffer));
+        WriteCommand(master_volume_);
     }
-    command_list_cycles_ += 409;
-
-    WriteCommand(kCommandOutputOctober2006);
     WriteCommand32(ntdlib::dsp::ToCached(surround));
     WriteCommand32(ntdlib::dsp::ToCached(output));
-    command_list_cycles_ += 665;
+    command_list_cycles_ += traits.output_cycles;
 
-    WriteCommand(kCommandEndOctober2006);
+    WriteCommand(traits.end);
     command_list_cycles_ += 30;
 }
 

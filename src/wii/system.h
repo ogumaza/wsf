@@ -95,6 +95,17 @@ public:
 private:
     friend class ntdlib::flipper::MachineBase<System>;
 
+    // The registers that ReadIo and WriteIo reach at a physical address.
+    enum class IoBlock
+    {
+        kNone,
+        kLegacy,    // the blocks at 0x0C000000, and the mirror of their 0x6000 block at 0x0D006000
+        kIpc,       // Hollywood's IPC registers (see Ios), at 0x0D000000 and mirrored at 0x0D800000
+        kHollywood, // Hollywood's other registers, from 0x40 to 0x400 in the same two pages
+    };
+
+    static IoBlock BlockOf(ntdlib::PAddr address);
+
     void LoadLowMemory(uint32_t ios_version);
 
     // The interrupt causes of the processor interface (physical 0x0C003000).

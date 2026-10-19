@@ -133,14 +133,19 @@ A version 1 player rejects process descriptors with a different version or flags
              u32  the sound, by its index in the archive's sound table
              u32  the bus
              f32  the send
+      u32  the number of sounds whose tracks the game sets (see "Tracks that the game silences"), then each sound:
+             u32  the sound, by its index in the archive's sound table
+             u32  the tracks that play, bit N for track N
 ```
 
-A descriptor that ends after the paths gives a build of 0. The model then follows its base build (see "Archive mode").
-A descriptor that ends after the build has no effects and no sends. These blocks are little-endian, like the rest of the
-descriptor. The parameters are the words of the effect class's parameter structure: floats as their bits, and the
-integer modes of the reverbs of 2008 as integers. "Effects" says which sounds get an effect: the sounds that it lists
-pick its presets or, without presets, get the effect. A player skips an effect of a type that it doesn't know, and one
-whose number of words doesn't fit its type or whose bus isn't A, B or C. Players older than 1.4.0 ignore both blocks.
+A descriptor that ends after the paths gives a build of 0. The model then follows its base build (see "Archive mode"). A
+descriptor that ends after the build has no effects and no sends. One that ends after the sends plays every track of
+every sound. These blocks are little-endian, like the rest of the descriptor. The parameters are the words of the effect
+class's parameter structure: floats as their bits, and the integer modes of the reverbs of 2008 as integers. "Effects"
+says which sounds get an effect: the sounds that it lists pick its presets or, without presets, get the effect. A player
+skips an effect of a type that it doesn't know, and one whose number of words doesn't fit its type or whose bus isn't A,
+B or C. It skips a sound whose tracks have a bit above bit 15 set. Players older than 1.4.0 ignore the effects and the
+sends. Players of 1.4.1 and older ignore the tracks.
 
 The paths identify `FILE` chunks containing the sound archive (`.brsar`) and AX's microcode: the 4,096 big-endian 16-bit
 words that the game loads into the DSP's instruction memory. A version 1 player rejects archive descriptors with a
@@ -352,6 +357,22 @@ Twilight Princess therefore have the game's echo. As a scene starts, the game se
 configuration. Those two lines belong to the surround mix. In stereo, the game's echo is the same in every scene. Link's
 Crossbow Training sets up the lines in the same way. Game-mode rips of that game have its echo too.
 
+## Tracks that the game silences
+
+A game can play only some tracks of a sequence. As the sound starts, the game sets the volumes of the other tracks to 0
+through the sound's handle (`SeqSound::SetTrackVolume`). Those tracks still run and take voices. A sequence can then
+hold several arrangements of a piece, and the game picks one. An effect profile can give the tracks that a game plays
+of some sounds. The ripper writes them into the archive descriptor and into the driver's parameter block. In archive
+mode, a sound plays those tracks unless its `wsf_tracks` tag gives others (see "Tags"). Game mode's driver sets the
+other tracks' volumes to 0 as it starts the sound. The length analysis plays the same tracks.
+
+**Animal Crossing: City Folk** has such arrangements in its outdoor music (`BGM_OUTDOOR_00` to `23`), its town music
+(`BGM_TOWN_EARLY`, `_DAY`, `_NIGHT` and `_MIDNIGHT`) and its museum's music (`BGM_MUSEUM`). Each piece of outdoor and
+town music holds three arrangements, one for each kind of weather. A rip plays the one for the game's first three
+kinds of weather. The town music also silences track 15 in every weather. The museum's music has an arrangement for
+each room. A rip plays the one that the game picks by default as the music starts. With `--mode archive`, `--tracks`
+rips another arrangement of a piece.
+
 ## Driver (game mode)
 
 Game-mode rips contain WSF's driver, `driver/driver.c`. The driver is loaded at 0x81700000, and its entry point is at
@@ -387,15 +408,19 @@ the same address. The driver's parameter block is at **0x81700010**. The block's
 0x26C u32  for the player: the build of AXFX that the game links (0 October 2006, 1 December 2006, 2 September 2008)
 0x270 ...  for the player: 4 effects of 4 words, the effect class (its type in the archive descriptor) and the class's
            StartUp, Shutdown and UpdateBuffer
+0x2B0 u32  the offset of the SeqPlayer's 16 track pointers in nw4r::snd's SeqSound, for tracks that the game silences
+0x2B4 u32  the offset of the volume in SeqTrack
+0x2B8 u32  the tracks that the game silences on the sound, bit N for track N, or 0
 ```
 
 A `.miniwsf` patches only the sound, the group and the heap size (a 12-byte `MEM` chunk at 0x8170001C). It also patches
 the bank's group when the sound requires one (a 4-byte `MEM` chunk at 0x817000C4). For a sound whose variables pick the
 presets, or on which the game sets a send, it patches 0xE0 to 0xEB too (a 12-byte `MEM` chunk at 0x817000F0). The
-library sets up the effects of a sound that no effect lists (see "Effects"). A `.miniwsf` whose sound gets other
-effects patches the block from 0xDC to the end of 0x270's effects instead (a 468-byte `MEM` chunk at 0x817000EC). After
-applying all `MEM` chunks, a player checks the driver block. If the block has the expected magic, the player rejects a
-version that it doesn't support. WSF 1.1.0's players support version 1. Later players support versions 1 and 2.
+library sets up the effects of a sound that no effect lists (see "Effects"). A `.miniwsf` whose sound gets other effects
+patches the block from 0xDC to the end of 0x270's effects instead (a 468-byte `MEM` chunk at 0x817000EC). For a sound
+whose tracks the game silences, it patches 0x2B8 (a 4-byte `MEM` chunk at 0x817002C8). After applying all `MEM` chunks,
+a player checks the driver block. If the block has the expected magic, the player rejects a version that it doesn't
+support. WSF 1.1.0's players support version 1. Later players support versions 1 and 2.
 
 The driver starts the audio interface and AX, opens the archive on the disc and sets up the sound archive player. It
 loads the group (and the bank's group, if there is one) into a sound heap. Then it starts `nw4r::snd`'s sound system and
@@ -407,10 +432,12 @@ It sets the status to 2 when the sound's handle is free again.
 
 With effects, the driver makes the game's effect objects after it starts the sound system. Each object gets a work
 buffer for the largest of its presets. The driver then registers a frame callback with AX in place of the one that
-`nw4r::snd` registered. The driver's callback calls that one first. Next, with interrupts off, the driver starts the
-sound, sets the game's send on it and calls the update once. That update passes the send to the sound's player. In the
-next AX frame, the driver's callback appends the effects without presets. In every frame after that, the callback lets
-the sound's variables pick the presets. Archive mode does the same.
+`nw4r::snd` registered. The driver's callback calls that one first. With effects or tracks to silence, the driver turns
+interrupts off and starts the sound. It sets the volumes of the tracks that the game silences to 0, as
+`SeqSound::SetTrackVolume` does. With effects, it then sets the game's send on the sound and calls the update once. That
+update passes the send to the sound's player. The driver turns interrupts on again. In the next AX frame, the driver's
+callback appends the effects without presets. In every frame after that, the callback lets the sound's variables pick
+the presets. Archive mode does the same.
 
 The descriptor's status address points at the status word (0x81700018). A player uses it at both ends of the sound:
 
@@ -644,8 +671,9 @@ sequence and before the sequence's first tick. A player ignores a tag that's mal
 tags still apply. Game mode ignores all three.
 
 - `wsf_tracks` gives the tracks that play. A player sets the track volume of every other track to 0. Such a track still
-  runs. Its notes take voices, and its commands change the variables that other tracks read. The value is one or more
-  track numbers from 0 to 15 and ranges such as `8-14`, separated by commas or white space. Each number is decimal.
+  runs. Its notes take voices, and its commands change the variables that other tracks read. The tag replaces the tracks
+  that the archive descriptor gives the sound (see "Tracks that the game silences"). The value is one or more track
+  numbers from 0 to 15 and ranges such as `8-14`, separated by commas or white space. Each number is decimal.
 - `wsf_tempo` multiplies the sequence's tempo. The pitch stays the same. The value is a decimal number from 0.25 to 4,
   such as `1.1` or `0.9`. A player rounds it to single precision.
 - `wsf_var` sets sequence variables. Some sequences play nothing until the game sets one of their variables. The value
@@ -664,12 +692,12 @@ the fade.
 sound archive (`.brsar`). The image's game partition must be stored decrypted. NKit, RVZ and WIA images store it that
 way. An encrypted partition is rejected. `wsfrip --list` shows a game's sound archives. A game with a driver profile is
 ripped in game mode. Anything else is ripped in archive mode. `--mode` overrides the choice. A game with neither a sound
-archive of NW4R SND nor JAudio2's start-up archive holds nothing that WSF rips. `wsfrip` stops with an error for it. The
-rips go in a folder next to the input. The folder has the input's name with `_wsf` added. `-o` names another folder
-instead. Each of a game's sound archives gets a separate folder there. The folder has the archive's name. Where two of a
-game's archives have the same name, their folder names start with the names of their parent folders on the disc. As many
-parent folders are added as it takes to tell the archives apart: `Sound/BGM/sound.brsar` and `Sound/SE/sound.brsar` go
-in `BGM_sound` and `SE_sound`.
+archive of NW4R SND nor JAudio2's start-up archive holds nothing that WSF rips. `wsfrip` stops with an error for it.
+`wsfrip --list` says the same. The rips go in a folder next to the input. The folder has the input's name with `_wsf`
+added. `-o` names another folder instead. Each of a game's sound archives gets a separate folder there. The folder has
+the archive's name. Where two of a game's archives have the same name, their folder names start with the names of their
+parent folders on the disc. As many parent folders are added as it takes to tell the archives apart:
+`Sound/BGM/sound.brsar` and `Sound/SE/sound.brsar` go in `BGM_sound` and `SE_sound`.
 
 Some games keep a sound archive inside an archive of CRI Middleware's file system, a CPK (`.cpk`). The ripper also
 reads the sound archives in a game's CPK archives. A CPK may compress a file with CRILAYLA. The ripper decompresses
@@ -737,7 +765,16 @@ a held note, or waits for its notes to end while one of them never will: a note 
 count together only if they come from the same track and go back to the same command. A loop of another track, or one
 that goes back elsewhere, starts the count again. Loops that go round before the first sound don't count. A track may
 change a value over and over while a note fades in, or before another track starts. A loop that completed without a
-sound ends the sequence at its last sound instead.
+sound ends the sequence at its last sound instead. After the main track's second loop, the fade waits for the other
+tracks. Each other track still playing must have made two passes that changed the sound. A track whose last pass was
+idle, that waits forever or that plays at a volume of 0 doesn't hold the fade back. The fade starts where the last of
+them loops. A track that loops at another length than the main track then plays its second pass in full. A track can
+also repeat its part in a counted loop that lasts longer than the analysis's limit of 600 seconds, such as 127 passes
+of the whole piece. When the analysis reaches the limit with tracks in counted loops, it plays the sequence again with
+each such track's outermost counted loop endless. The passes of those loops then count as loops. A track can also play
+its part without a loop while another track opens it again in every loop. Each time such a track starts its part again
+after an open, it makes a pass that changed the sound. The first open isn't a pass. An open keeps the track's wait. The
+pass then comes when that wait runs out. Two opens during one wait make one pass.
 
 A track can't change the sound while its notes sound in four cases: when it waits for its notes of length 0 to end (on
 looping waves, they never do), when it waits out a held note, when it waits forever, and when it makes still passes
@@ -865,10 +902,11 @@ profile gives exact rips when the game itself is ripped. On a game with a profil
 
 `--tracks`, `--tempo` and `--var` rip the sequences in an arrangement (see "Tags"). `wsfrip` writes them as the tags
 `wsf_tracks`, `wsf_tempo` and `wsf_var`. `--var` can be given more than once. The length analysis plays the arrangement
-too. `--suffix` adds a text to each rip's title and file name. Rips of one sound in several arrangements can then share
-a folder and its `.wsflib`. In the file name, spaces and punctuation in the text become underscores. The same happens to
-a label's spaces and punctuation. The four options work in archive mode only. On a game with a driver profile, they
-require `--mode archive`.
+too. `--tracks` replaces the tracks that the game plays of a sound (see "Tracks that the game silences"). The tracks
+that the game plays go in the archive descriptor rather than a tag. `--suffix` adds a text to each rip's title and file
+name. Rips of one sound in several arrangements can then share a folder and its `.wsflib`. In the file name, spaces and
+punctuation in the text become underscores. The same happens to a label's spaces and punctuation. The four options work
+in archive mode only. On a game with a driver profile, they require `--mode archive`.
 
 Tags written by `wsfrip`: `title` (the sound's label, and `--suffix`'s text), `wsf_sound` (the sound's label), `game`,
 `length` and `fade`, `wsf_mode`, `wsfby`, `utf8=1`, and optionally `wsf_tracks`, `wsf_tempo`, `wsf_var`, `artist`,

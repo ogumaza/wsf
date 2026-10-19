@@ -12,6 +12,7 @@
 #include <variant>
 #include <vector>
 
+#include "ax/pb.h"
 #include "ax/system.h"
 #include "axfx/axfx.h"
 #include "axfx/chorus.h"

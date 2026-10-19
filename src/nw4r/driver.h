@@ -143,9 +143,9 @@ public:
     // without coefficients turns the filter off.
     void SetBiquad(int type, float value);
 
-    void SetPriority(uint32_t priority); // 0x8003307c
-    void SetVoiceType(uint16_t type);    // 0x80033090
-    void EnableRemote(bool enable);      // 0x800330f0
+    void SetPriority(uint32_t priority);   // 0x8003307c
+    void SetVoiceType(ax::VoiceType type); // 0x80033090
+    void EnableRemote(bool enable);        // 0x800330f0
 
     // AxVoiceParamBlock::Sync (0x800346b0): sets the volume envelope's ramp for the next frame and passes the frame's
     // changes to AX.
@@ -271,6 +271,10 @@ public:
 
     static constexpr int kPriorityMax = 255;
 
+    // The priority of a voice in its release. A channel gives its voice this priority when the note releases (ntdlib's
+    // channel template).
+    static constexpr int kPriorityRelease = 1;
+
     Voice(Engine& engine, VoiceId place) : engine_(&engine), place_(place)
     {
     }
@@ -368,6 +372,20 @@ public:
 private:
     friend class VoiceManager;
 
+    // Calls `step` on each of the voice's AX voices, in the order of the wave's channels. A channel without an AX voice
+    // is skipped. The game's functions loop over the channels in the same way.
+    template <typename Step>
+    void ForEachAxVoice(Step step)
+    {
+        for (int i = 0; i < channel_count_; i++)
+        {
+            if (ax_voices_[i] != nullptr)
+            {
+                step(*ax_voices_[i]);
+            }
+        }
+    }
+
     bool IsPlayFinished() const;
     void CalcAxSrc(bool initial);
 
@@ -389,30 +407,30 @@ private:
 
     Engine* engine_;
     VoiceId place_;
-    std::array<AxVoice*, 2> ax_voices_{}; // + 0xc, one for each channel
-    int channel_count_ = 0;               // + 0x9c
-    ChannelId owner_ = kNoChannel;        // + 0xa4, the callback
-    bool active_ = false;                 // + 0xac
-    bool starting_ = false;               // + 0xad
-    bool started_ = false;                // + 0xae
-    uint16_t sync_flag_ = 0;              // + 0xb1
-    int priority_ = 0;                    // + 0xb4
-    float pan_ = 0.0f;                    // + 0xb8
-    float surround_pan_ = 0.0f;           // + 0xbc
-    float lpf_freq_ = 1.0f;               // + 0xc0
-    float main_out_volume_ = 1.0f;        // + 0xc8
-    float main_send_ = 1.0f;              // + 0xcc
-    std::array<float, 3> fx_send_{};      // + 0xd0
-    float pitch_ = 1.0f;                  // + 0x10c
-    float volume_ = 1.0f;                 // + 0x110
-    float ve_init_volume_ = 0.0f;         // + 0x114
-    float ve_target_volume_ = 1.0f;       // + 0x118
-    PanMode pan_mode_ = PanMode::kDual;   // + 0x11c
-    uint8_t pan_curve_ = 0;               // + 0x120
-    uint8_t biquad_type_ = 0;             // builds from June 2008
-    float biquad_value_ = 0.0f;           // builds from June 2008
-    bool first_ve_update_ = true;         // the build of October 2006: whether CalcAxVe hasn't run yet
-    float prev_ve_volume_ = 1.0f;         // the build of October 2006: the volume that CalcAxVe last used
+    std::array<AxVoice*, 2> ax_voices_{};           // + 0xc, one for each channel
+    int channel_count_ = 0;                         // + 0x9c
+    ChannelId owner_ = kNoChannel;                  // + 0xa4, the callback
+    bool active_ = false;                           // + 0xac
+    bool starting_ = false;                         // + 0xad
+    bool started_ = false;                          // + 0xae
+    uint16_t sync_flag_ = 0;                        // + 0xb1
+    int priority_ = 0;                              // + 0xb4
+    float pan_ = 0.0f;                              // + 0xb8
+    float surround_pan_ = 0.0f;                     // + 0xbc
+    float lpf_freq_ = 1.0f;                         // + 0xc0
+    float main_out_volume_ = 1.0f;                  // + 0xc8
+    float main_send_ = 1.0f;                        // + 0xcc
+    std::array<float, ax::kAuxBusCount> fx_send_{}; // + 0xd0
+    float pitch_ = 1.0f;                            // + 0x10c
+    float volume_ = 1.0f;                           // + 0x110
+    float ve_init_volume_ = 0.0f;                   // + 0x114
+    float ve_target_volume_ = 1.0f;                 // + 0x118
+    PanMode pan_mode_ = PanMode::kDual;             // + 0x11c
+    uint8_t pan_curve_ = 0;                         // + 0x120
+    uint8_t biquad_type_ = 0;                       // builds from June 2008
+    float biquad_value_ = 0.0f;                     // builds from June 2008
+    bool first_ve_update_ = true;                   // the build of October 2006: whether CalcAxVe hasn't run yet
+    float prev_ve_volume_ = 1.0f;                   // the build of October 2006: the volume that CalcAxVe last used
 };
 
 // The voices in use, by priority (VoiceManager): 96, one for each AX voice.
@@ -499,7 +517,7 @@ struct ChannelPolicy : ntdlib::nwsnd::RevolutionPolicy
         float pan = 0.0f;
         float span = 0.0f;
         float main_send = 0.0f;
-        std::array<float, 3> fx_send{};
+        std::array<float, kFxSendCount> fx_send{};
     };
 
     template <typename Function, typename... Each>
