@@ -74,23 +74,13 @@ class Effects
 public:
     // Sets up an effect object for each of `setups`. The game does the same for the sound. The first AX frame after the
     // sound has started appends them (see OnAxFrame). With `follow_variables`, the sound's variables pick the presets
-    // of an effect with presets. Otherwise its bus stays without it. `sends` are the sends that the game sets on the
-    // sound, by bus (see Sends).
-    void Set(const std::vector<EffectSetup>& setups, axfx::Build build, bool follow_variables,
-             const std::array<float, ax::kAuxBusCount>& sends);
+    // of an effect with presets. Otherwise its bus stays without it.
+    void Set(const std::vector<EffectSetup>& setups, axfx::Build build, bool follow_variables);
 
     // Whether any effect is set up.
     bool Any() const
     {
         return !setups_.empty();
-    }
-
-    // The sends that the game sets on the sound through its handle, before the sound's first update
-    // (BasicSound::SetFxSend). BasicSound::Update passes them to the sound's player, and each track adds the player's
-    // sends to the track's sends (SeqTrack::UpdateChannelParam).
-    const std::array<float, ax::kAuxBusCount>& Sends() const
-    {
-        return sends_;
     }
 
     // The effects' part of AX's frame callback, after NW4R SND's. The game-mode driver does the same in its frame
@@ -119,7 +109,6 @@ private:
     std::vector<EffectSetup> setups_;
     std::vector<Effect> objects_; // one for each setup
     bool follow_variables_ = false;
-    std::array<float, ax::kAuxBusCount> sends_{};
     bool pending_ = false; // whether the next AX frame appends the effects
 
     // The preset that the variables picked last, 0 for none, and whether its bus has the effect (WarioWare: Smooth

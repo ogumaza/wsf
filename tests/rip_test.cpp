@@ -8,7 +8,8 @@
 // TestJac reads a Jac game's bank file and sequence index, made up in the formats of Pikmin's files. It also checks a
 // piece that plays in parts. TestPikmin2Sounds lists Pikmin 2's sounds from files made up in the game's formats.
 // TestKeepSequenceData cuts an archive of several groups down to the data that its sequences play. TestProgramTooLarge
-// checks the limit on the size of a library's program.
+// checks the limit on the size of a library's program. TestPieces finds the pieces whose channels are separate
+// sequences, gives a piece its timing and rips it.
 
 #include "rip/rip.h"
 
@@ -19,6 +20,7 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -36,11 +38,13 @@
 #include "xsflib/rip/file_names.h"
 #include "xsflib/rip/tool.h"
 #include "xsflib/testing/check.h"
+#include "xsflib/testing/sets.h"
 
 #include "nw4r/arrangement.h"
 #include "nw4r/effect_setup.h"
 #include "nw4r/rsar_options.h"
 #include "nw4r/util.h"
+#include "wsf/format.h"
 
 using xsflib::testing::Check;
 
@@ -426,6 +430,66 @@ void TestIsMusic()
     }
 
     Check(!rip::IsMusic(archive, static_cast<uint32_t>(sounds.size())), "a sound the archive doesn't have");
+}
+
+// Tests the pieces whose channels are separate sequences (rip::FindPieces), the timing of a piece (rip::TimingOfPiece),
+// and a rip of a piece: a mini that lists its sounds, from a library with version 2 of the archive descriptor.
+void TestPieces()
+{
+    // Two pieces, one of them with its sounds in another order, and labels that make no piece: a channel missing, a
+    // channel that isn't a sequence, and suffixes without a name.
+    const std::vector<TableSound> kSounds = {
+        {"SEQ_A_S1", 1, 0}, {"SEQ_A_S2", 1, 0}, {"SEQ_A_TR", 1, 0}, {"SEQ_A_NO", 1, 0}, {"SEQ_B_NO", 1, 0},
+        {"SEQ_B_TR", 1, 0}, {"SEQ_B_S2", 1, 0}, {"SEQ_B_S1", 1, 0}, {"SEQ_C_S1", 1, 0}, {"SEQ_C_S2", 1, 0},
+        {"SEQ_C_TR", 1, 0}, {"SEQ_D_S1", 1, 0}, {"SEQ_D_S2", 1, 0}, {"SEQ_D_TR", 3, 0}, {"SEQ_D_NO", 1, 0},
+        {"_S1", 1, 0},      {"_S2", 1, 0},      {"_TR", 1, 0},      {"_NO", 1, 0},      {"SEQ_A", 1, 0},
+    };
+    const Bytes bytes = MakeSoundTable(kSounds, {"PLAYER_BGM"});
+    const ntdlib::rsar::SoundArchive archive = ntdlib::rsar::SoundArchive::Load(bytes, wsf::nw4r::kRsarOptions);
+    const std::vector<rip::Piece> pieces = rip::FindPieces(archive);
+
+    Check(pieces.size() == 2, "two pieces (" + std::to_string(pieces.size()) + ")");
+    if (pieces.size() == 2)
+    {
+        Check(pieces[0].name == "SEQ_A" && pieces[0].sounds == std::vector<uint32_t>{0, 1, 2, 3},
+              "a piece's sounds: _S1, _S2, _TR and _NO");
+        Check(pieces[1].name == "SEQ_B" && pieces[1].sounds == std::vector<uint32_t>{7, 6, 5, 4},
+              "a piece's sounds go by their suffixes, not their places in the archive");
+    }
+
+    // The latest end, and the longest fade. A silent sequence doesn't count.
+    using rip::Timing;
+    const Timing kLoop{60000, 10000};
+    const Timing kEnd{30000, 0};
+    const Timing kSilent{500, 0, true};
+    const auto same = [](const std::optional<Timing>& a, const Timing& b)
+    {
+        return a && a->length_ms == b.length_ms && a->fade_ms == b.fade_ms && a->silent == b.silent;
+    };
+
+    Check(same(rip::TimingOfPiece({kLoop, kLoop}), kLoop), "sequences that loop together");
+    Check(same(rip::TimingOfPiece({kEnd, Timing{32000, 0}}), Timing{32000, 0}), "sequences that end: the latest end");
+    Check(same(rip::TimingOfPiece({kLoop, Timing{70000, 0}}), Timing{70000, 10000}),
+          "a sequence that ends after another's loops: its end, and the fade");
+    Check(same(rip::TimingOfPiece({kSilent, kEnd, kSilent}), kEnd), "a silent sequence doesn't count");
+    Check(same(rip::TimingOfPiece({kSilent, kSilent}), kSilent), "a piece of silent sequences is silent");
+    Check(!rip::TimingOfPiece({kLoop, std::nullopt}) && !rip::TimingOfPiece({}),
+          "no timing without the timing of each sequence");
+
+    // A mini of a piece lists its sounds in their order. A mini of one sound has the same bytes either way.
+    ntdlib::Microcode microcode;
+    microcode.words.assign(ntdlib::kMicrocodeWords, 0);
+    std::map<std::string, std::vector<uint8_t>> files;
+    files["a/v2.wsflib"] = rip::BuildArchiveLibrary("Sound/a.brsar", bytes, "ax_microcode.bin", microcode,
+                                                    nw4r::SndBuild{20080308}, {}, {}, ArchiveDescriptor::kListVersion);
+    const std::vector<uint32_t> kPiece = {7, 6, 5, 4};
+    files["a/piece.miniwsf"] = rip::BuildArchiveMini(kPiece, "v2.wsflib", {});
+    LoadedSet set;
+    Check(!LoadSet("a/piece.miniwsf", xsflib::testing::MapReader(files), set) && set.archive &&
+              set.archive->version == ArchiveDescriptor::kListVersion && SoundsToPlay(set) == kPiece,
+          "a mini of a piece plays its sounds, from a library of version 2");
+    Check(rip::BuildArchiveMini(19, "lib", {}) == rip::BuildArchiveMini(std::vector<uint32_t>{19}, "lib", {}),
+          "a mini of one sound is the same either way");
 }
 
 // The name that rip::LibraryName gives `library` in `folder`, from a registry that holds no names yet. Each run of the
@@ -1004,6 +1068,7 @@ int main()
         TestLongCountedLoops();
         TestArrangement();
         TestIsMusic();
+        TestPieces();
         TestLibraryNames();
         TestJac();
         TestPikmin2Sounds();

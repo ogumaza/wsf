@@ -2,8 +2,9 @@
 
 // NW4R SND model tests, on the AX model with no DSP: the parameter blocks a note's channel sets up, the ramps from
 // frame to frame, the release and the end of a channel, the voices NW4R SND drops by priority when all are in use, a
-// short sequence played from an archive, a sequence in an arrangement, what the builds of 2008 and 2009 do differently,
-// the loops the ripper's length analysis counts, snapshots of the model, and the end of a wave without the DSP.
+// short sequence played from an archive, a sequence in an arrangement, sequences that start together, what the builds
+// of 2008 and 2009 do differently, the loops the ripper's length analysis counts, snapshots of the model, and the end
+// of a wave without the DSP.
 
 #include <algorithm>
 #include <array>
@@ -31,6 +32,7 @@
 #include "ax/voice.h"
 #include "nw4r/arrangement.h"
 #include "nw4r/driver.h"
+#include "nw4r/effect_setup.h"
 #include "nw4r/engine.h"
 #include "nw4r/rsar_options.h"
 #include "nw4r/sequence.h"
@@ -401,6 +403,61 @@ void TestArrangement()
     Check(std::abs(high / low - std::pow(2.0, 4.0 / 12.0)) < 0.001, "the first tick reads the player's variable");
     Check(set.engine.GlobalVariables()[0] == 3 && set.engine.GlobalVariables()[15] == -7,
           "the global variables are set");
+}
+
+// Sequences that start together (docs/wsf.md, "Sounds that play together"): each player's notes get the sends that the
+// game sets on its sound, and a channel keeps them after its track has let it go.
+void TestSoundsTogether()
+{
+    // The aux A sends of the voices that play after the first frame.
+    const auto sends_after_start = [](int players, const std::vector<nw4r::SoundSend>& sends)
+    {
+        Model model({0xd3, 0x7f, 0x3c, 0x64, 0x30, 0xff}, kBuild2007);
+        model.engine.SetEffects({}, sends, 0);
+        for (int i = 0; i < players; i++)
+        {
+            model.engine.StartSequence(0);
+        }
+
+        model.RunFrame();
+        model.ax.StartFrame();
+        std::vector<uint16_t> found;
+        for (uint32_t i = 0; i < model.ax.VoiceCount(); i++)
+        {
+            const ax::Pb pb = model.ax.ReadPb(i);
+            if (pb.state == 1)
+            {
+                found.push_back(pb.mix.aux_a_l);
+            }
+        }
+
+        model.ax.FinishFrame();
+        model.engine.FrameProcess();
+
+        return found;
+    };
+
+    const std::vector<nw4r::SoundSend> kSendA = {{.sound = 0, .bus = 0, .send = 0.5f}};
+    const std::vector<uint16_t> alone = sends_after_start(1, kSendA);
+    const std::vector<uint16_t> together = sends_after_start(2, kSendA);
+    Check(alone.size() == 1 && alone[0] > 0, "the note of a sound with a send plays into aux A");
+    Check(together.size() == 2 && together[0] == alone[0] && together[1] == alone[0],
+          "each of two sequences that start together gets its sound's send");
+    Check(sends_after_start(2, {}) == std::vector<uint16_t>{0, 0}, "a sound without sends plays into no aux bus");
+
+    // A note of a tick with the slowest release. The track ends after it and lets the channel go while the note
+    // releases.
+    Model model({0xd3, 0x00, 0x3c, 0x64, 0x01, 0xff}, kBuild2007);
+    model.engine.SetEffects({}, kSendA, 0);
+    nw4r::SeqPlayer* player = model.engine.StartSequence(0);
+    const uint16_t first = model.PbAfter(1).mix.aux_a_l;
+    const uint16_t later = model.PbAfter(30).mix.aux_a_l;
+    Check(player != nullptr && !player->IsActive() && model.engine.IsBusy() && first == alone[0] && later == first,
+          "a channel that its track has let go keeps its sound's send (" + std::to_string(first) + ", then " +
+              std::to_string(later) + ")");
+    Check(model.engine.SoundSends(0)[0] == 0.5f && model.engine.SoundSends(1)[0] == 0.0f &&
+              model.engine.SoundSends(-1)[0] == 0.0f,
+          "a player that the engine doesn't have gets no sends");
 }
 
 // The voices' PBs after the first frame of a sequence of `commands` played under `build`, and the model to play on.
@@ -1038,6 +1095,7 @@ int main()
         TestDrop();
         TestSequence();
         TestArrangement();
+        TestSoundsTogether();
         TestSweepPitch();
         TestTempo();
         TestVelocityRange();

@@ -26,7 +26,7 @@ namespace wsf
 namespace
 {
 
-// WSF's steps of archive mode: the set's archive and AX's microcode, the model of NW4R SND and AX, and the sequence in
+// WSF's steps of archive mode: the set's archive and AX's microcode, the model of NW4R SND and AX, and each sequence in
 // the arrangement that the tags and the descriptor give.
 struct ArchiveTraits
 {
@@ -40,8 +40,8 @@ struct ArchiveTraits
         const ArchiveDescriptor* descriptor = nullptr;
         const std::vector<uint8_t>* archive = nullptr;
         ntdlib::Microcode microcode;
-        uint32_t sound = 0;
-        nw4r::Arrangement arrangement; // from the tags and the descriptor's tracks
+        std::vector<uint32_t> sounds;                // in the order in which they start
+        std::vector<nw4r::Arrangement> arrangements; // one for each sound, from the tags and the descriptor's tracks
     };
 
     static constexpr bool kKeepArchive = false;
@@ -67,14 +67,25 @@ struct ArchiveTraits
             return "AX's microcode (" + d.microcode_path + ") is missing";
         }
 
-        if (!set.sound)
+        prepared.sounds = SoundsToPlay(set);
+        if (prepared.sounds.empty())
         {
             return "no sequence selected";
         }
 
-        // The tracks that the game plays of the sound, unless the tags give others.
-        prepared.sound = *set.sound;
-        prepared.arrangement = ArrangementFromTags(set.tags, nw4r::TracksOf(d.effects.tracks, prepared.sound));
+        if (prepared.sounds.size() > kMaxSounds)
+        {
+            return std::to_string(prepared.sounds.size()) + " sounds selected; a set plays at most " +
+                   std::to_string(kMaxSounds) + " together";
+        }
+
+        // The tracks that the game plays of each sound, unless the tags give others. The tags apply to every sound.
+        prepared.arrangements.clear();
+        for (const uint32_t sound : prepared.sounds)
+        {
+            prepared.arrangements.push_back(ArrangementFromTags(set.tags, nw4r::TracksOf(d.effects.tracks, sound)));
+        }
+
         prepared.microcode.address = d.microcode_address;
         for (std::size_t i = 0; i < ntdlib::kMicrocodeWords; i++)
         {
@@ -111,13 +122,18 @@ struct ArchiveTraits
 
     static std::optional<std::string> StartSequence(Model& model, Set&, const Prepared& prepared)
     {
-        // The effects that the game puts on the aux buses for the sound, and the sends that it sets on the sound. The
-        // first AX frame after the sequence has started appends the effects.
+        // The effects that the game puts on the aux buses for the first sound, and the sends that it sets on each
+        // sound. The first AX frame after the sequences have started appends the effects. Every sequence starts before
+        // the first frame, in the list's order (docs/wsf.md, "Sounds that play together").
         const nw4r::ArchiveEffects& effects = prepared.descriptor->effects;
-        model.engine->SetEffects(effects.setups, effects.sends, prepared.sound);
-        if (!model.engine->StartSequence(prepared.sound, prepared.arrangement))
+        model.engine->SetEffects(effects.setups, effects.sends, prepared.sounds.front());
+        for (std::size_t i = 0; i < prepared.sounds.size(); i++)
         {
-            return "sound " + std::to_string(prepared.sound) + " isn't a sequence, or its data isn't in the archive";
+            if (!model.engine->StartSequence(prepared.sounds[i], prepared.arrangements[i]))
+            {
+                return "sound " + std::to_string(prepared.sounds[i]) +
+                       " isn't a sequence, or its data isn't in the archive";
+            }
         }
 
         return std::nullopt;

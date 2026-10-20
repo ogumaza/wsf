@@ -130,6 +130,7 @@ SeqPlayer* Engine::StartSequence(uint32_t index, const Arrangement& arrangement)
         std::make_unique<ntdlib::rsar::Sequence>(ntdlib::rsar::Sequence::Parse(file->file, wsf::nw4r::kRsarOptions)));
     players_.push_back(
         std::make_unique<SeqPlayer>(static_cast<int>(players_.size()), SequenceInfo(sound), sequences_.back()->data));
+    player_sends_.push_back(SendsOf(sends_, index));
     SeqPlayer* player = players_.back().get();
     player->SetBuild(build_);
     player->Start();

@@ -202,11 +202,9 @@ void Effect::UpdateBuffer(axfx::AuxFrame& frame)
     std::visit([&frame](auto& slot) { slot.fx.Process(frame); }, slot_);
 }
 
-void Effects::Set(const std::vector<EffectSetup>& setups, axfx::Build build, bool follow_variables,
-                  const std::array<float, ax::kAuxBusCount>& sends)
+void Effects::Set(const std::vector<EffectSetup>& setups, axfx::Build build, bool follow_variables)
 {
     setups_ = setups;
-    sends_ = sends;
     objects_.clear();
     for (const EffectSetup& setup : setups_)
     {

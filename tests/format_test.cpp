@@ -151,15 +151,25 @@ static void TestArchiveMode()
 
     XSFLIB_CHECK(without_build && without_build->microcode_path == d.microcode_path && without_build->snd_build == 0);
 
-    // A player only accepts version 1, with bit 0 of the flags set and no other, in stereo.
+    // A player only accepts versions 1 and 2, with bit 0 of the flags set and no other, in stereo.
     XSFLIB_CHECK(d.Check().has_value());
 
     ArchiveDescriptor v1 = d;
     v1.version = 1;
     v1.flags = kFlagDspRequired;
     v1.output_mode = kOutputStereo;
+    ArchiveDescriptor v2 = v1;
+    v2.version = ArchiveDescriptor::kListVersion;
 
-    XSFLIB_CHECK(!v1.Check());
+    XSFLIB_CHECK(!v1.Check() && !v2.Check());
+    for (const uint32_t version : {0u, 3u})
+    {
+        ArchiveDescriptor odd = v1;
+        odd.version = version;
+
+        XSFLIB_CHECK(odd.Check() == "archive descriptor version " + std::to_string(version) +
+                                        "; this player supports versions 1 and 2");
+    }
 
     for (const uint32_t flags : {0u, 3u, 0x80000001u})
     {
@@ -205,6 +215,66 @@ static void TestArchiveMode()
     XSFLIB_CHECK(set.descriptor.has_value() && !set.archive.has_value());
 
     XSFLIB_CHECK(LoadSet("a/z.miniwsf", reader, set).has_value()); // archive mode without a sound
+}
+
+static void TestSoundsThatPlayTogether()
+{
+    // A SND chunk with a list selects sounds that play together, in its order (docs/wsf.md, "Sounds that play
+    // together"). Version 2 of the archive descriptor plays them all. Version 1 plays the first alone.
+    ArchiveDescriptor v1;
+    v1.version = ArchiveDescriptor::kVersion;
+    v1.flags = kFlagDspRequired;
+    v1.output_mode = kOutputStereo;
+    v1.archive_path = "Sound/b.brsar";
+    v1.microcode_path = "ax_microcode.bin";
+    ArchiveDescriptor v2 = v1;
+    v2.version = ArchiveDescriptor::kListVersion;
+
+    ProgramBuilder lib;
+    lib.AddFile("Sound/b.brsar", {1, 2, 3});
+    lib.AddSound(5);
+    ProgramBuilder list;
+    const uint32_t kList[] = {9, 7, 8};
+    list.AddSounds(kList);
+    ProgramBuilder one;
+    one.AddSound(4);
+
+    std::map<std::string, std::vector<uint8_t>> fs;
+    fs["a/v1.wsflib"] = xsflib::psf::WritePsf(kPsfVersionWsf, v1.Serialize(), lib.Data(), {});
+    fs["a/v2.wsflib"] = xsflib::psf::WritePsf(kPsfVersionWsf, v2.Serialize(), lib.Data(), {});
+    fs["a/list1.miniwsf"] = xsflib::psf::WritePsf(kPsfVersionWsf, {}, list.Data(), {{"_lib", "v1.wsflib"}});
+    fs["a/list2.miniwsf"] = xsflib::psf::WritePsf(kPsfVersionWsf, {}, list.Data(), {{"_lib", "v2.wsflib"}});
+    fs["a/one2.miniwsf"] = xsflib::psf::WritePsf(kPsfVersionWsf, {}, one.Data(), {{"_lib", "v2.wsflib"}});
+    fs["a/lib2.miniwsf"] = xsflib::psf::WritePsf(kPsfVersionWsf, {}, {}, {{"_lib", "v2.wsflib"}});
+
+    // The list's sounds load after the library's. The last SND chunk gives every sound.
+    fs["a/later.miniwsf"] =
+        xsflib::psf::WritePsf(kPsfVersionWsf, {}, list.Data(), {{"_lib", "v2.wsflib"}, {"_lib2", "one.wsflib"}});
+    fs["a/one.wsflib"] = xsflib::psf::WritePsf(kPsfVersionWsf, {}, one.Data(), {});
+
+    const FileReader reader = xsflib::testing::MapReader(fs);
+    const std::vector<uint32_t> kAll = {9, 7, 8};
+    LoadedSet set;
+
+    XSFLIB_CHECK(!LoadSet("a/list2.miniwsf", reader, set));
+    XSFLIB_CHECK(set.sound == 9u && set.sounds == kAll && SoundsToPlay(set) == kAll);
+
+    XSFLIB_CHECK(!LoadSet("a/list1.miniwsf", reader, set));
+    XSFLIB_CHECK(set.sounds == kAll && SoundsToPlay(set) == std::vector<uint32_t>{9});
+
+    XSFLIB_CHECK(!LoadSet("a/one2.miniwsf", reader, set));
+    XSFLIB_CHECK(SoundsToPlay(set) == std::vector<uint32_t>{4});
+
+    XSFLIB_CHECK(!LoadSet("a/lib2.miniwsf", reader, set));
+    XSFLIB_CHECK(SoundsToPlay(set) == std::vector<uint32_t>{5});
+
+    XSFLIB_CHECK(!LoadSet("a/later.miniwsf", reader, set));
+    XSFLIB_CHECK(SoundsToPlay(set) == std::vector<uint32_t>{4});
+
+    // A set without an archive descriptor plays no sound of a list.
+    set.archive.reset();
+
+    XSFLIB_CHECK(SoundsToPlay(set).empty());
 }
 
 static void TestArrangementTags()
@@ -425,6 +495,7 @@ static void TestEffectsBySound()
 int main()
 {
     TestArchiveMode();
+    TestSoundsThatPlayTogether();
     TestEffects();
     TestEffectsBySound();
     TestTracks();

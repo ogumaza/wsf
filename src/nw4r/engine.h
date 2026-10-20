@@ -140,14 +140,14 @@ public:
         return global_variables_;
     }
 
-    // Sets up the effects that the game puts on the aux buses for `sound`, and the sends that it sets on the sound,
-    // from a set's `setups` and `sends` (see EffectsFor, FollowsVariables, SendsOf and Effects::Set). Where the sound's
-    // variables pick an effect's presets, the engine reads the variables of the sequence that starts first. Every
-    // sequence that the engine plays gets the effects and the sends.
+    // Sets up the effects that the game puts on the aux buses for `sound`, from a set's `setups` (see EffectsFor,
+    // FollowsVariables and Effects::Set). Where the sound's variables pick an effect's presets, the engine reads the
+    // variables of the sequence that starts first. Every sequence that the engine plays gets the effects. Each sequence
+    // that starts later gets the sends that `sends` gives its sound (see SendsOf and SoundSends).
     void SetEffects(const std::vector<EffectSetup>& setups, const std::vector<SoundSend>& sends, uint32_t sound)
     {
-        effects_.Set(EffectsFor(setups, sound), AxfxBuild(build_), FollowsVariables(setups, sound),
-                     SendsOf(sends, sound));
+        effects_.Set(EffectsFor(setups, sound), AxfxBuild(build_), FollowsVariables(setups, sound));
+        sends_ = sends;
     }
 
     // Whether any effect is set up.
@@ -156,10 +156,18 @@ public:
         return effects_.Any();
     }
 
-    // The sends that the game sets on the sound (see Effects::Sends).
-    const std::array<float, ax::kAuxBusCount>& SoundSends() const
+    // The sends that the game sets through a sound's handle before the sound's first update (BasicSound::SetFxSend),
+    // for the sequence of the player at `player` in the order of their starts. BasicSound::Update passes them to the
+    // sound's player, and each track adds the player's sends to the track's sends (SeqTrack::UpdateChannelParam). A
+    // player that the engine doesn't have gets none.
+    std::array<float, ax::kAuxBusCount> SoundSends(int player) const
     {
-        return effects_.Sends();
+        if (player < 0 || static_cast<std::size_t>(player) >= player_sends_.size())
+        {
+            return {};
+        }
+
+        return player_sends_[static_cast<std::size_t>(player)];
     }
 
     // Starts the sequence sound at `index` in the archive's sound table, from the next sound frame, in `arrangement`.
@@ -267,6 +275,10 @@ private:
 
     // The players, in the order they started. A channel's owner gives its player's place here.
     std::vector<std::unique_ptr<SeqPlayer>> players_;
+
+    // The sends that the game sets on sounds (see SetEffects), and those of each player's sound, by the player's place.
+    std::vector<SoundSend> sends_;
+    std::vector<std::array<float, ax::kAuxBusCount>> player_sends_;
 
     Effects effects_;
 

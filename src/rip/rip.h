@@ -378,14 +378,21 @@ std::optional<std::vector<JAudioSound>> ReadJAudioSounds(const ntdlib::disc::Gam
 ntdlib::jaudio::GameWatch WatchOf(const JAudioProfile& profile, uint32_t sound_id);
 
 // Archive mode: a .wsflib that holds the sound archive and AX's microcode as FILE chunks at the given paths. Its
-// archive descriptor names the game's build of NW4R SND, and gives the effects. The model follows that build.
+// archive descriptor names the game's build of NW4R SND, and gives the effects. The model follows that build. The
+// descriptor has version `version`: ArchiveDescriptor::kListVersion when a mini of the set plays several sounds.
 std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const std::vector<uint8_t>& archive,
                                          const std::string& microcode_path, const ntdlib::Microcode& microcode,
                                          nw4r::SndBuild build, const Tags& tags,
-                                         const nw4r::ArchiveEffects& effects = {});
+                                         const nw4r::ArchiveEffects& effects = {},
+                                         uint32_t version = ArchiveDescriptor::kVersion);
 
 // Archive mode: a .miniwsf that plays sequence `index` from `lib_name`.
 std::vector<uint8_t> BuildArchiveMini(uint32_t index, const std::string& lib_name, Tags tags);
+
+// Archive mode: a .miniwsf that plays the sequences at `indices` together from `lib_name`, started in that order
+// (docs/wsf.md, "Sounds that play together"). The library's descriptor must have ArchiveDescriptor::kListVersion when
+// `indices` holds more than one sound.
+std::vector<uint8_t> BuildArchiveMini(const std::vector<uint32_t>& indices, const std::string& lib_name, Tags tags);
 
 // Archive mode: a copy of the archive that holds only the data that the sequences at `indices` play. That data is each
 // sequence's file, and its bank's file and wave data, in the items where SoundArchive::File finds them. The header, the
@@ -411,6 +418,20 @@ std::string LibraryName(const std::filesystem::path& folder, xsflib::rip::FileNa
 // file, or cut off by truncation. Empty when nothing is missing.
 std::vector<std::string> MissingData(const ntdlib::rsar::SoundArchive& archive, uint32_t index);
 
+// A piece of music whose channels a game plays as separate sequences, started together (docs/wsf.md, "Sounds that
+// play together"): the piece's name, and the sequences in the order in which the game starts them.
+struct Piece
+{
+    std::string name;
+    std::vector<uint32_t> sounds;
+};
+
+// The pieces of `archive` whose channels are separate sequences. Mega Man 9 plays each piece of its music as four
+// sequences, one for each channel of the NES's sound chip. It starts them together: the two pulse channels, the
+// triangle and the noise. Their labels are the piece's name followed by _S1, _S2, _TR and _NO. A piece is four
+// sequences labelled with one name and those suffixes. The pieces come in the order of their first sounds.
+std::vector<Piece> FindPieces(const ntdlib::rsar::SoundArchive& archive);
+
 // Whether the sound at `index` is music, by the rule that `wsfrip --bgm` uses. Music is a sequence whose label contains
 // BGM, or one that plays on a music player. Games name their music players with BGM, MUSIC, SONG or FANFARE among the
 // words separated by underscores (PLAYER_BGM, SONG_PLAYER). They do this even where the music's labels don't mention
@@ -419,6 +440,11 @@ bool IsMusic(const ntdlib::rsar::SoundArchive& archive, uint32_t index);
 
 // A sequence's length and fade in milliseconds, and whether it never makes a sound.
 using Timing = xsflib::rip::Timing;
+
+// The timing of sequences that play together, from the timing that the length analysis gives each sequence alone: the
+// latest end, and the longest fade. Sequences that never make a sound don't count, unless all are silent. Without the
+// timing of one of the sequences, there is none.
+std::optional<Timing> TimingOfPiece(const std::vector<std::optional<Timing>>& timings);
 
 // Whether archive mode's model can drive `microcode`. The microcode must start and mix the model's first frame. Some
 // games have older AX microcodes that accept other command lists. The model doesn't make those lists.
@@ -442,8 +468,9 @@ public:
     // A looping sequence gets two loops and a 10 s fade. Any other sequence runs to its end or to where it falls silent
     // for good, for at most 600 s. A sequence that never makes a sound is marked silent and gets the 0.5 s that follows
     // a sequence's last sound. Returns nullopt when the length can't be worked out. No length tag is written then.
-    // Throws std::bad_alloc when memory runs out.
-    std::optional<Timing> Analyze(uint32_t sound_index) const;
+    // Throws std::bad_alloc when memory runs out. The effects are those of `effects_sound`, by default the sound
+    // itself. A sequence that plays together with others gets the effects of the first.
+    std::optional<Timing> Analyze(uint32_t sound_index, std::optional<uint32_t> effects_sound = std::nullopt) const;
 
 private:
     struct Impl;

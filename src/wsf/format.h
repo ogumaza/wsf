@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -94,6 +95,11 @@ struct ArchiveDescriptor
     static constexpr uint32_t kMagic = 0x41465357; // "WSFA"
     static constexpr uint32_t kVersion = 1;
 
+    // The version of a set whose rips select several sounds that play together (docs/wsf.md, "Sounds that play
+    // together"). Players of WSF 1.5.0 and older accept version 1 alone. They refuse such a set rather than play its
+    // first sound alone.
+    static constexpr uint32_t kListVersion = 2;
+
     static std::optional<ArchiveDescriptor> Parse(const std::vector<uint8_t>& data);
 
     // Returns an error message for an unsupported descriptor, or no value if it is supported.
@@ -173,5 +179,13 @@ struct SetFormat
 // JAudio drivers).
 using LoadedSet = xsflib::psf::LoadedSet<SetFormat>;
 using xsflib::psf::LoadSet;
+
+// The most sounds that an archive-mode set plays together.
+constexpr std::size_t kMaxSounds = 16;
+
+// The sounds that an archive-mode set plays, in the order in which they start (docs/wsf.md, "Sounds that play
+// together"): every sound that the set's last SND chunk lists with archive descriptor version 2, and the first alone
+// with version 1. Empty for a set without a SND chunk or an archive descriptor.
+std::vector<uint32_t> SoundsToPlay(const LoadedSet& set);
 
 } // namespace wsf

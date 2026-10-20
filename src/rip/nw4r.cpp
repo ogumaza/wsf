@@ -10,11 +10,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -449,9 +451,11 @@ std::vector<uint8_t> BuildMini(uint32_t index, const SoundData& data, const std:
 
 std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const std::vector<uint8_t>& archive,
                                          const std::string& microcode_path, const ntdlib::Microcode& microcode,
-                                         nw4r::SndBuild build, const Tags& tags, const nw4r::ArchiveEffects& effects)
+                                         nw4r::SndBuild build, const Tags& tags, const nw4r::ArchiveEffects& effects,
+                                         uint32_t version)
 {
     ArchiveDescriptor descriptor;
+    descriptor.version = version;
     descriptor.archive_path = archive_path;
     descriptor.microcode_path = microcode_path;
     descriptor.microcode_address = microcode.address;
@@ -477,8 +481,14 @@ std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const 
 
 std::vector<uint8_t> BuildArchiveMini(uint32_t index, const std::string& lib_name, Tags tags)
 {
+    return BuildArchiveMini(std::vector<uint32_t>{index}, lib_name, std::move(tags));
+}
+
+std::vector<uint8_t> BuildArchiveMini(const std::vector<uint32_t>& indices, const std::string& lib_name, Tags tags)
+{
+    // A list of one sound gives the same chunk as AddSound.
     ProgramBuilder program;
-    program.AddSound(index);
+    program.AddSounds(indices);
 
     tags["_lib"] = lib_name;
 
@@ -852,6 +862,80 @@ std::vector<std::string> MissingData(const ntdlib::rsar::SoundArchive& archive, 
     return missing;
 }
 
+std::vector<Piece> FindPieces(const ntdlib::rsar::SoundArchive& archive)
+{
+    static constexpr std::array<std::string_view, 4> kSuffixes = {"_S1", "_S2", "_TR", "_NO"};
+
+    const auto& sounds = archive.Sounds();
+    std::map<std::string, uint32_t, std::less<>> sequences;
+    for (std::size_t i = 0; i < sounds.size(); i++)
+    {
+        if (sounds[i].type == ntdlib::rsar::SoundType::kSequence)
+        {
+            sequences.emplace(sounds[i].name, static_cast<uint32_t>(i));
+        }
+    }
+
+    // Each piece starts at its first channel's sequence.
+    std::vector<Piece> pieces;
+    for (std::size_t i = 0; i < sounds.size(); i++)
+    {
+        const std::string& label = sounds[i].name;
+        if (sounds[i].type != ntdlib::rsar::SoundType::kSequence || label.size() <= kSuffixes[0].size() ||
+            !label.ends_with(kSuffixes[0]))
+        {
+            continue;
+        }
+
+        Piece piece{label.substr(0, label.size() - kSuffixes[0].size()), {}};
+        for (const std::string_view suffix : kSuffixes)
+        {
+            const auto found = sequences.find(piece.name + std::string(suffix));
+            if (found == sequences.end())
+            {
+                break;
+            }
+
+            piece.sounds.push_back(found->second);
+        }
+
+        if (piece.sounds.size() == kSuffixes.size() && piece.sounds.front() == i)
+        {
+            pieces.push_back(std::move(piece));
+        }
+    }
+
+    return pieces;
+}
+
+std::optional<Timing> TimingOfPiece(const std::vector<std::optional<Timing>>& timings)
+{
+    if (timings.empty() || std::any_of(timings.begin(), timings.end(), [](const auto& t) { return !t; }))
+    {
+        return std::nullopt;
+    }
+
+    std::optional<Timing> piece;
+    for (const std::optional<Timing>& timing : timings)
+    {
+        if (timing->silent)
+        {
+            continue;
+        }
+
+        if (!piece)
+        {
+            piece = timing;
+            continue;
+        }
+
+        piece->length_ms = std::max(piece->length_ms, timing->length_ms);
+        piece->fade_ms = std::max(piece->fade_ms, timing->fade_ms);
+    }
+
+    return piece ? piece : timings.front();
+}
+
 bool IsMusic(const ntdlib::rsar::SoundArchive& archive, uint32_t index)
 {
     if (index >= archive.Sounds().size() || archive.Sounds()[index].type != ntdlib::rsar::SoundType::kSequence)
@@ -1113,12 +1197,13 @@ std::set<std::pair<int, uint32_t>> OutermostCountedLoops(const nw4r::SeqPlayer& 
     return loops;
 }
 
-// Measures a sequence in `arrangement` on the model (xsflib::rip::MeasureLength). With `dsp` set, the microcode runs on
-// the DSP. Otherwise the model runs without the DSP. The counted loops in `endless_loops` loop for ever.
+// Measures a sequence in `arrangement` on the model (xsflib::rip::MeasureLength), with the effects of `effects_sound`.
+// With `dsp` set, the microcode runs on the DSP. Otherwise the model runs without the DSP. The counted loops in
+// `endless_loops` loop for ever.
 std::optional<Timing> MeasureSequence(const ntdlib::rsar::SoundArchive& archive, const ntdlib::Microcode& microcode,
-                                      nw4r::SndBuild build, uint32_t sound_index, const nw4r::Arrangement& arrangement,
-                                      const nw4r::ArchiveEffects& effects, bool dsp,
-                                      const std::set<std::pair<int, uint32_t>>& endless_loops = {})
+                                      nw4r::SndBuild build, uint32_t sound_index, uint32_t effects_sound,
+                                      const nw4r::Arrangement& arrangement, const nw4r::ArchiveEffects& effects,
+                                      bool dsp, const std::set<std::pair<int, uint32_t>>& endless_loops = {})
 {
     auto model = std::make_unique<nw4r::ArchiveModel>();
     model->build = build;
@@ -1130,7 +1215,7 @@ std::optional<Timing> MeasureSequence(const ntdlib::rsar::SoundArchive& archive,
         }
 
         // The effects process the microcode's mix of the aux buses. Without the DSP, nothing reaches them.
-        model->engine->SetEffects(effects.setups, effects.sends, sound_index);
+        model->engine->SetEffects(effects.setups, effects.sends, effects_sound);
     }
     else
     {
@@ -1156,7 +1241,8 @@ std::optional<Timing> MeasureSequence(const ntdlib::rsar::SoundArchive& archive,
     {
         if (const auto running = OutermostCountedLoops(*player); !running.empty())
         {
-            return MeasureSequence(archive, microcode, build, sound_index, arrangement, effects, dsp, running);
+            return MeasureSequence(archive, microcode, build, sound_index, effects_sound, arrangement, effects, dsp,
+                                   running);
         }
     }
 
@@ -1193,17 +1279,18 @@ LengthAnalyzer::LengthAnalyzer(const std::vector<uint8_t>& archive_bytes, const 
 
 LengthAnalyzer::~LengthAnalyzer() = default;
 
-std::optional<Timing> LengthAnalyzer::Analyze(uint32_t sound_index) const
+std::optional<Timing> LengthAnalyzer::Analyze(uint32_t sound_index, std::optional<uint32_t> effects_sound) const
 {
     // The tracks that the game plays of the sound narrow the arrangement's.
     nw4r::Arrangement arrangement = impl_->arrangement;
     arrangement.tracks = static_cast<uint16_t>(arrangement.tracks & nw4r::TracksOf(impl_->effects.tracks, sound_index));
 
     // A sequence that the model can't play, such as one with a damaged bank, gets no length (xsflib::rip::TryMeasure).
-    const auto measure = [this, sound_index, &arrangement]
+    const uint32_t effects_of = effects_sound.value_or(sound_index);
+    const auto measure = [this, sound_index, effects_of, &arrangement]
     {
-        return MeasureSequence(impl_->archive, impl_->microcode, impl_->build, sound_index, arrangement, impl_->effects,
-                               impl_->dsp);
+        return MeasureSequence(impl_->archive, impl_->microcode, impl_->build, sound_index, effects_of, arrangement,
+                               impl_->effects, impl_->dsp);
     };
     return xsflib::rip::TryMeasure(measure);
 }

@@ -453,9 +453,10 @@ std::optional<ArchiveDescriptor> ArchiveDescriptor::Parse(const std::vector<uint
 
 std::optional<std::string> ArchiveDescriptor::Check() const
 {
-    if (auto err = xsflib::psf::CheckDescriptorVersion("archive", version, kVersion))
+    // Version 2 has version 1's flags and output modes.
+    if (version != kVersion && version != kListVersion)
     {
-        return err;
+        return "archive descriptor version " + std::to_string(version) + "; this player supports versions 1 and 2";
     }
 
     if (auto err = xsflib::psf::CheckDescriptorFlags("archive", flags, kFlagDspRequired))
@@ -464,6 +465,21 @@ std::optional<std::string> ArchiveDescriptor::Check() const
     }
 
     return xsflib::psf::CheckDescriptorOutputMode("archive", output_mode);
+}
+
+std::vector<uint32_t> SoundsToPlay(const LoadedSet& set)
+{
+    if (!set.archive || set.sounds.empty())
+    {
+        return {};
+    }
+
+    if (set.archive->version == ArchiveDescriptor::kVersion)
+    {
+        return {set.sounds.front()};
+    }
+
+    return set.sounds;
 }
 
 } // namespace wsf

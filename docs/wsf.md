@@ -34,7 +34,7 @@ lost. AX loses them the same way when no effect is registered on a bus.
 | Extension | Contents |
 |---|---|
 | `.wsflib` | Shared data for one sound archive. Game mode: the game's code, the driver, the disc's header and the sound archive. Archive mode: the sound archive and AX's microcode. |
-| `.miniwsf` | One sound: a small chunk that selects the sound, plus tags. It references a `.wsflib` with `_lib`. |
+| `.miniwsf` | One sound, or sounds that play together: a small chunk that selects them, plus tags. It references a `.wsflib` with `_lib`. |
 
 Both use the PSF container. There is no standalone `.wsf` file: Windows treats `.wsf` as a Windows Script Host script.
 
@@ -76,7 +76,7 @@ u32  size of the payload in bytes (excluding padding)
 |---|---|---|
 | `MEM ` | `u32 address`, then data | Load the data into the Wii's memory at `address`. The address is a cached address in the game's view of memory: 0x80000000-0x817FFFFF for MEM1 and 0x90000000-0x93FFFFFF for MEM2. |
 | `FILE` | `u16 path length`, the UTF-8 path (no leading `/`, `/` separators), zeros to a multiple of 4, then the file data | A file on the game's disc (for example `Sound/sound.brsar`), or a file that the descriptor names. |
-| `SND ` | `u32 sound index` | Archive mode: the sound to play, as its index in the sound archive's sound table. The last one in loading order takes effect. |
+| `SND ` | one or more `u32 sound index` | Archive mode: the index of the sound to play in the sound archive's sound table. A list of several gives sounds that play together, in the order in which they start (see "Sounds that play together"). The last `SND ` chunk in loading order takes effect. |
 
 Unknown chunk types are skipped. Chunks are applied in order. For the same address or path, later data replaces earlier
 data. A player loads a decompressed program of at most 1 GiB.
@@ -111,7 +111,7 @@ A version 1 player rejects process descriptors with a different version or flags
 
 ```
 0x00  u32  magic "WSFA"
-0x04  u32  descriptor version (1)
+0x04  u32  descriptor version (1, or 2 for a set whose files select sounds that play together)
 0x08  u32  flags: bit 0 = the DSP is required; version 1 has no other flags
 0x0C  u32  output mode: 1 stereo (version 1 plays stereo only)
 0x10  u32  the address the game loads AX's microcode from (a cached address)
@@ -148,9 +148,14 @@ B or C. It skips a sound whose tracks have a bit above bit 15 set. Players older
 sends. Players of 1.4.1 and older ignore the tracks.
 
 The paths identify `FILE` chunks containing the sound archive (`.brsar`) and AX's microcode: the 4,096 big-endian 16-bit
-words that the game loads into the DSP's instruction memory. A version 1 player rejects archive descriptors with a
-different version, flags other than 1, or an output mode other than 1. Output modes 0 (mono) and 2 (surround) are
-reserved for a later version.
+words that the game loads into the DSP's instruction memory. A player rejects archive descriptors with flags other than
+1, or an output mode other than 1. Output modes 0 (mono) and 2 (surround) are reserved for a later version.
+
+Version 2 of the archive descriptor has the layout of version 1. It marks a set in which a `.miniwsf` selects several
+sounds that play together (see "Sounds that play together"). Players of WSF 1.5.0 and older accept version 1 only. They
+refuse a set of version 2 with the message "archive descriptor version 2; this player supports version 1". They would
+otherwise play the first sound of each list alone. Later players accept versions 1 and 2, and reject any other. With
+version 1, they play the first sound of a list alone. A set whose files each select one sound has version 1.
 
 ## The emulated system (game mode)
 
@@ -270,7 +275,8 @@ game has a driver profile, game mode is preferred.
 
 Version 1 plays sequence sounds only. A sound's data comes from the groups in the archive. The ripper skips sounds whose
 sequence or bank isn't in the archive. The output starts with the first frame after the sound starts. The sound has
-finished when the sequence has ended and no voice is sounding.
+finished when the sequence has ended and no voice is sounding. Some games start several sequences together as one
+piece. A rip can play them together (see "Sounds that play together").
 
 ## Effects
 
@@ -372,6 +378,31 @@ town music holds three arrangements, one for each kind of weather. A rip plays t
 kinds of weather. The town music also silences track 15 in every weather. The museum's music has an arrangement for
 each room. A rip plays the one that the game picks by default as the music starts. With `--mode archive`, `--tracks`
 rips another arrangement of a piece.
+
+## Sounds that play together
+
+A game can play a piece of music as several sequences that it starts together. **Mega Man 9** plays each piece of its
+music as four sequences, one for each channel of the NES's sound chip: the two pulse channels, the triangle and the
+noise. The game's table of its 33 pieces (0x802805c0) gives each piece's four sounds in that order. The function at
+0x800d5564 starts the four in that order, with one call for each. The four start in the same sound frame. While a sound
+effect holds one of the NES's channels, the game sets the music's sequence for that channel to a volume of 0
+(0x800d4ca8). A rip plays the music without sound effects.
+
+In archive mode, a `.miniwsf` for such a piece lists its sounds in its `SND ` chunk, in the order in which the game
+starts them. The set's archive descriptor has version 2 (see "Archive descriptor"). A player then plays the sounds
+together:
+
+- Every listed sound starts before the first AX frame, in the list's order. Each sound has a sequence player of its
+  own. In each frame, the players run in the order in which they started.
+- The effects that the archive descriptor gives the first sound go on the buses (see "Effects"). Where a sound's
+  variables pick an effect's presets, the first sound's variables pick them. Each sound gets the sends that the
+  descriptor gives it.
+- Each sound plays the tracks that the descriptor gives it, unless the `wsf_tracks` tag gives others. `wsf_tracks`,
+  `wsf_tempo` and `wsf_var` apply to every sound of the list (see "Tags").
+- The sounds have finished when every sequence has ended and no voice is sounding.
+- A list holds at most 16 sounds. A player refuses a longer one.
+
+The ripper finds such pieces by their labels (see "Archive mode" under "Ripping").
 
 ## Driver (game mode)
 
@@ -662,9 +693,11 @@ stand-ins, 5 the audio system, 6 the wave groups, 7 the start of the sound. Each
 
 The standard PSF tags apply: `title`, `artist`, `game`, `year`, `genre`, `comment`, `copyright`, `length`, `fade`,
 `volume`, `_lib`, `_libN`. `wsfby` credits the ripper. The ripper also writes `wsf_sound` with the sound's label from
-the sound archive. It writes `wsf_mode` (`game` or `archive`) so that players and listeners can tell the modes apart.
+the sound archive. For sounds that play together, the tag gives each sound's label, separated by commas. The ripper
+writes `wsf_mode` (`game` or `archive`) so that players and listeners can tell the modes apart.
 
-Three tags arrange a sequence in archive mode. A game can do the same through the sound's handle. A game may play one
+Three tags arrange a sequence in archive mode. A game can do the same through the sound's handle. For sounds that play
+together, each tag applies to every sound. A game may play one
 sequence in several arrangements: with some of its tracks, at another tempo, or with variables that change what it
 plays. Each arrangement then rips as a separate file. In archive mode, a player applies the tags after it sets up the
 sequence and before the sequence's first tick. A player ignores a tag that's malformed or out of range. The other two
@@ -877,7 +910,17 @@ to the limit.
 ### Archive mode
 
 The `.wsflib` holds the sound archive and AX's microcode as `FILE` chunks. It also holds an archive descriptor. Each
-`.miniwsf` selects one sequence with a `SND ` chunk. Lengths come from the same analysis as in game mode.
+`.miniwsf` selects one sequence with a `SND ` chunk, or the sequences of a piece that plays as several (see below).
+Lengths come from the same analysis as in game mode.
+
+A piece whose channels are four sequences with the labels of Mega Man 9's music rips as one `.miniwsf` (see "Sounds
+that play together"). The four labels are one name followed by `_S1`, `_S2`, `_TR` and `_NO`. The `.miniwsf` lists the
+four sounds in that order. Its title is the name, and its file has the number of the `_S1` sequence. `--only` picks such
+a piece by its name or by any of the four labels. `--bgm` picks it when any of the four is music. The length analysis
+measures each of the four alone, with the effects of the first. The piece gets the latest end of the four, and a fade
+when any of them loops. A sequence that never makes a sound doesn't count. A piece is skipped when none of its
+sequences makes a sound, or when the data of one isn't in the archive. A set with such a piece gets version 2 of the
+archive descriptor. Players of WSF 1.5.0 and older refuse it.
 
 The archive in the `.wsflib` holds only the data that the ripped sequences play: each sequence's file, and its bank's
 file and wave data. A game's archive can hold hundreds of megabytes of sound effects and voices that a rip of its music
@@ -908,9 +951,9 @@ name. Rips of one sound in several arrangements can then share a folder and its 
 punctuation in the text become underscores. The same happens to a label's spaces and punctuation. The four options work
 in archive mode only. On a game with a driver profile, they require `--mode archive`.
 
-Tags written by `wsfrip`: `title` (the sound's label, and `--suffix`'s text), `wsf_sound` (the sound's label), `game`,
-`length` and `fade`, `wsf_mode`, `wsfby`, `utf8=1`, and optionally `wsf_tracks`, `wsf_tempo`, `wsf_var`, `artist`,
-`year` and `copyright`.
+Tags written by `wsfrip`: `title` (the sound's label or the piece's name, and `--suffix`'s text), `wsf_sound` (the
+sound's label, or the piece's labels separated by commas), `game`, `length` and `fade`, `wsf_mode`, `wsfby`, `utf8=1`,
+and optionally `wsf_tracks`, `wsf_tempo`, `wsf_var`, `artist`, `year` and `copyright`.
 
 ### WiiWare titles
 

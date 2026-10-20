@@ -1189,8 +1189,10 @@ void Voice::SetParam(const ntdlib::nwsnd::RevolutionPolicy::ChannelVoiceParam& p
 
     // The game adds the sound's sends to the track's sends (SeqTrack::UpdateChannelParam; Animal Crossing: City Folk,
     // 0x802682b4). The channel then passes the sums on. The model adds them here instead. The sums don't change: each
-    // of the game's other terms is 0.
-    const std::array<float, ax::kAuxBusCount>& sends = engine_->SoundSends();
+    // of the game's other terms is 0. The sends are those of the sound whose sequence played the channel's note. A
+    // channel that its track has let go keeps them.
+    const int player = owner_ == kNoChannel ? -1 : engine_->Channels().At(owner_).source_player;
+    const std::array<float, ax::kAuxBusCount> sends = engine_->SoundSends(player);
     for (std::size_t bus = 0; bus < param.fx_send.size(); bus++)
     {
         SetFxSend(static_cast<int>(bus), param.fx_send[bus] + sends[bus]);

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-// Archive mode (docs/wsf.md): one sequence from a sound archive. WSF's model of the SDK's sound player (nw4r::snd and
-// AX's CPU side, src/nw4r and src/ax) plays it. The game's AX microcode runs on the emulated DSP. Used when a rip is
-// made from a sound archive rather than from the game's code.
+// Archive mode (docs/wsf.md): one sequence from a sound archive, or several that play together. WSF's model of the
+// SDK's sound player (nw4r::snd and AX's CPU side, src/nw4r and src/ax) plays them. The game's AX microcode runs on the
+// emulated DSP. Used when a rip is made from a sound archive rather than from the game's code.
 
 #pragma once
 
@@ -28,13 +28,13 @@ public:
     ~ArchivePlayer();
 
     // Loads the sound archive and the microcode named by the set's archive descriptor. Starts the DSP and the selected
-    // sound. Returns an error message on failure.
+    // sounds. Returns an error message on failure.
     std::optional<std::string> Start(const LoadedSet& set);
 
     // Runs one AX frame (96 output samples). Returns false if the microcode stopped responding.
     bool RunFrame();
 
-    // False once the sequence has ended and no voice is sounding.
+    // False once every sequence has ended and no voice is sounding.
     bool Busy() const;
 
     // Takes a snapshot after Start, and restores one. A snapshot shares its unchanged memory pages with `previous`.

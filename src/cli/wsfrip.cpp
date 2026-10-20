@@ -299,6 +299,16 @@ struct Job
     std::string label;
     std::optional<rip::Timing> timing;
     std::optional<rip::SoundData> data; // game mode: what the driver loads for the sound
+
+    // Archive mode: the sounds that the rip plays, in the order in which they start. A piece whose channels the game
+    // plays as separate sequences has all of them (see rip::FindPieces), the first at `index`. Empty in game mode.
+    std::vector<uint32_t> sounds;
+
+    // The sounds that the rip plays: `index` alone in game mode.
+    std::vector<uint32_t> Sounds() const
+    {
+        return sounds.empty() ? std::vector<uint32_t>{index} : sounds;
+    }
 };
 
 // A count and its noun: "1 sound", "2 sounds".
@@ -308,19 +318,52 @@ std::string Counted(std::size_t count, const std::string& noun)
 }
 
 // Length analysis runs every selected sequence through the model and AX's microcode on the DSP, in `arrangement`. The
-// sounds are independent. The analysis spreads them over several threads.
-void AnalyzeLengths(std::vector<Job>& jobs, const std::vector<uint8_t>& archive, const GameCode& code,
+// sounds are independent. The analysis spreads them over several threads. Each sequence of a piece is measured alone,
+// with the effects of the piece's first sound. The piece then gets the latest end (rip::TimingOfPiece).
+void AnalyzeLengths(std::vector<Job>& jobs, const ntdlib::rsar::SoundArchive& archive,
+                    const std::vector<uint8_t>& archive_bytes, const GameCode& code,
                     const nw4r::Arrangement& arrangement, const nw4r::ArchiveEffects& effects, unsigned threads)
 {
-    const rip::LengthAnalyzer analyzer(archive, code.microcode, code.build, arrangement, effects);
-    const auto analyze = [&analyzer](Job& job)
+    struct Measure
     {
-        job.timing = analyzer.Analyze(job.index);
+        uint32_t index;
+        uint32_t effects_sound;
+        std::string label; // for the warning of a failed analysis
+        std::optional<rip::Timing> timing;
+    };
+
+    std::vector<Measure> measures;
+    for (const Job& job : jobs)
+    {
+        const std::vector<uint32_t> sounds = job.Sounds();
+        for (const uint32_t sound : sounds)
+        {
+            const std::string& label = sounds.size() > 1 ? archive.Sounds()[sound].name : job.label;
+            measures.push_back({sound, sounds.front(), label, std::nullopt});
+        }
+    }
+
+    const rip::LengthAnalyzer analyzer(archive_bytes, code.microcode, code.build, arrangement, effects);
+    const auto analyze = [&analyzer](Measure& measure)
+    {
+        measure.timing = analyzer.Analyze(measure.index, measure.effects_sound);
 
         return true;
     };
-    xsflib::cli::AnalyzeLengths(jobs, threads, analyze,
+    xsflib::cli::AnalyzeLengths(measures, threads, analyze,
                                 {.out_of_memory = "out of memory during length analysis; try fewer --jobs"});
+
+    std::size_t next = 0;
+    for (Job& job : jobs)
+    {
+        std::vector<std::optional<rip::Timing>> timings;
+        for (std::size_t i = job.Sounds().size(); i > 0; i--)
+        {
+            timings.push_back(measures[next++].timing);
+        }
+
+        job.timing = rip::TimingOfPiece(timings);
+    }
 }
 
 // The sequences that --only and --bgm pick.
@@ -335,7 +378,53 @@ std::vector<Job> SelectSounds(const ntdlib::rsar::SoundArchive& archive, const O
         if (sounds[i].type == ntdlib::rsar::SoundType::kSequence && std::regex_search(sounds[i].name, o.only) &&
             (!o.bgm || rip::IsMusic(archive, index)))
         {
-            jobs.push_back({index, sounds[i].name, std::nullopt, std::nullopt});
+            jobs.push_back({index, sounds[i].name, std::nullopt, std::nullopt, {}});
+        }
+    }
+
+    return jobs;
+}
+
+// Archive mode: the sequences that --only and --bgm pick. A piece whose channels the game plays as separate sequences
+// makes one job (see rip::FindPieces). --only picks it by its name or by any of its sequences' labels, and --bgm by any
+// of its sequences.
+std::vector<Job> SelectArchiveSounds(const ntdlib::rsar::SoundArchive& archive, const Options& o)
+{
+    const auto& sounds = archive.Sounds();
+    const std::vector<rip::Piece> pieces = rip::FindPieces(archive);
+    std::vector<const rip::Piece*> piece_of(sounds.size(), nullptr);
+    for (const rip::Piece& piece : pieces)
+    {
+        for (const uint32_t sound : piece.sounds)
+        {
+            piece_of[sound] = &piece;
+        }
+    }
+
+    std::vector<Job> jobs;
+    for (std::size_t i = 0; i < sounds.size(); i++)
+    {
+        // Streams are out of scope, and wave sounds aren't ripped yet. A piece's job comes at its first sound.
+        const auto index = static_cast<uint32_t>(i);
+        const rip::Piece* piece = piece_of[i];
+        if (sounds[i].type != ntdlib::rsar::SoundType::kSequence || (piece && piece->sounds.front() != index))
+        {
+            continue;
+        }
+
+        const std::string label = piece ? piece->name : sounds[i].name;
+        const std::vector<uint32_t> members = piece ? piece->sounds : std::vector<uint32_t>{index};
+        bool matches = std::regex_search(label, o.only);
+        bool music = false;
+        for (const uint32_t sound : members)
+        {
+            matches = matches || std::regex_search(sounds[sound].name, o.only);
+            music = music || rip::IsMusic(archive, sound);
+        }
+
+        if (matches && (!o.bgm || music))
+        {
+            jobs.push_back({index, label, std::nullopt, std::nullopt, members});
         }
     }
 
@@ -357,13 +446,16 @@ int NoSoundMatches(const Options& o)
     return 1;
 }
 
-// Takes out the sequences whose volume in the archive is 0. They make no sound. The game's sound library multiplies
-// everything that a sound plays by its volume. Returns the number taken out.
+// Takes out the sequences whose volume in the archive is 0, and the pieces whose sequences all have a volume of 0. They
+// make no sound. The game's sound library multiplies everything that a sound plays by its volume. Returns the number
+// taken out.
 std::size_t SkipMuted(std::vector<Job>& jobs, const ntdlib::rsar::SoundArchive& archive)
 {
     const auto muted = [&archive](const Job& job)
     {
-        if (archive.Sounds()[job.index].volume != 0)
+        const std::vector<uint32_t> sounds = job.Sounds();
+        if (std::any_of(sounds.begin(), sounds.end(),
+                        [&archive](uint32_t sound) { return archive.Sounds()[sound].volume != 0; }))
         {
             return false;
         }
@@ -393,22 +485,38 @@ std::size_t SkipSilent(std::vector<J>& jobs)
     return std::erase_if(jobs, silent);
 }
 
-// Takes out the sequences whose data isn't all in the archive. They would play with missing instruments. Returns the
-// number taken out.
+// Takes out the sequences whose data isn't all in the archive, and the pieces with such a sequence. They would play
+// with missing instruments or channels. Returns the number taken out.
 std::size_t SkipIncomplete(std::vector<Job>& jobs, const ntdlib::rsar::SoundArchive& archive)
 {
     const auto incomplete = [&archive](const Job& job)
     {
-        const std::vector<std::string> missing = rip::MissingData(archive, job.index);
-        if (missing.empty())
+        const std::vector<uint32_t> sounds = job.Sounds();
+        std::string what;
+        for (const uint32_t sound : sounds)
         {
-            return false;
+            const std::vector<std::string> missing = rip::MissingData(archive, sound);
+            std::string list;
+            for (std::size_t i = 0; i < missing.size(); i++)
+            {
+                list += (i ? ", " : "") + missing[i];
+            }
+
+            // A piece names each sequence whose data is missing.
+            if (!list.empty() && sounds.size() > 1)
+            {
+                list = archive.Sounds()[sound].name + " (" + list + ")";
+            }
+
+            if (!list.empty())
+            {
+                what += (what.empty() ? "" : "; ") + list;
+            }
         }
 
-        std::string what;
-        for (std::size_t i = 0; i < missing.size(); i++)
+        if (what.empty())
         {
-            what += (i ? ", " : "") + missing[i];
+            return false;
         }
 
         std::fprintf(stderr, "skipped %s: not in this archive: %s\n", job.label.c_str(), what.c_str());
@@ -452,7 +560,7 @@ std::size_t MeasureSequences(std::vector<Job>& jobs, const ntdlib::rsar::SoundAr
     std::size_t silent = SkipMuted(jobs, archive);
     if (o.lengths && !jobs.empty())
     {
-        AnalyzeLengths(jobs, archive_bytes, code, arrangement, effects, o.jobs);
+        AnalyzeLengths(jobs, archive, archive_bytes, code, arrangement, effects, o.jobs);
         silent += SkipSilent(jobs);
     }
 
@@ -529,7 +637,7 @@ int RipArchive(const fs::path& out_dir, xsflib::rip::FileNames& names, const std
                      archive_path.c_str());
     }
 
-    std::vector<Job> jobs = SelectSounds(*archive, o);
+    std::vector<Job> jobs = SelectArchiveSounds(*archive, o);
     matched += jobs.size();
     if (jobs.empty())
     {
@@ -564,19 +672,26 @@ int RipArchive(const fs::path& out_dir, xsflib::rip::FileNames& names, const std
     }
 
     // The library keeps only the data that the ripped sequences play. A game's archive can hold hundreds of megabytes
-    // of sound effects and voices that a rip of its music doesn't play.
+    // of sound effects and voices that a rip of its music doesn't play. A set whose minis play several sounds gets
+    // version 2 of the archive descriptor. Players of WSF 1.5.0 and older refuse it.
     std::vector<uint32_t> indices;
+    uint32_t version = ArchiveDescriptor::kVersion;
     for (const Job& job : jobs)
     {
-        indices.push_back(job.index);
+        indices.insert(indices.end(), job.sounds.begin(), job.sounds.end());
+        if (job.sounds.size() > 1)
+        {
+            version = ArchiveDescriptor::kListVersion;
+        }
     }
 
     const Tags common = xsflib::cli::RipTags(o, game_name, "wsf", "archive");
     const auto lib = rip::BuildArchiveLibrary(archive_path, rip::KeepSequenceData(*archive, indices), kMicrocodeName,
-                                              code.microcode, code.build, common, effects);
+                                              code.microcode, code.build, common, effects, version);
 
     // The arrangement's tags go in the minis. The library then stays the same for every arrangement of its sounds.
-    // --suffix goes in each mini's title and file name. The wsf_sound tag keeps the sound's label.
+    // --suffix goes in each mini's title and file name. The wsf_sound tag keeps the sound's label, or the labels of a
+    // piece's sequences.
     Tags mini_tags = common;
     o.AddArrangementTags(mini_tags);
     for (Job& job : jobs)
@@ -586,8 +701,14 @@ int RipArchive(const fs::path& out_dir, xsflib::rip::FileNames& names, const std
 
     const auto build_mini = [&archive](const std::string& lib_name, const Job& job, Tags tags)
     {
-        tags["wsf_sound"] = archive->Sounds()[job.index].name;
-        return rip::BuildArchiveMini(job.index, lib_name, std::move(tags));
+        std::string labels;
+        for (const uint32_t sound : job.sounds)
+        {
+            labels += (labels.empty() ? "" : ", ") + archive->Sounds()[sound].name;
+        }
+
+        tags["wsf_sound"] = labels;
+        return rip::BuildArchiveMini(job.sounds, lib_name, std::move(tags));
     };
     return WriteSet(out_dir, names, lib_base, lib, jobs, mini_tags, build_mini, archive_path, skipped_text);
 }
