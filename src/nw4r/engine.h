@@ -20,6 +20,7 @@
 
 #include "ntdlib/dsp/dsp.h"
 #include "ntdlib/dsp/memory.h"
+#include "ntdlib/nwsnd/console.h"
 #include "ntdlib/nwsnd/length_hooks.h"
 #include "ntdlib/rsar/formats.h"
 #include "ntdlib/sound_build.h"

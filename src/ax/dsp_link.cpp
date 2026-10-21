@@ -12,6 +12,9 @@ namespace wsf::ax
 namespace
 {
 
+// The address in IRAM where AX starts its microcode as a DSP task: the task's init vector (__AXOutInitDSP).
+constexpr uint16_t kInitVector = 0x0010;
+
 // The mails between AX and its microcode (DSPUCode in the SDK's DSP library).
 constexpr uint32_t kDspInit = 0xdcd10000;
 constexpr uint32_t kDspYield = 0xdcd10002;
@@ -50,7 +53,7 @@ bool RunUntil(ntdlib::dsp::Dsp<ntdlib::dsp::WiiMemory>& dsp, Done done)
 
 bool DspLink::Start(std::span<const uint16_t> microcode, uint32_t address)
 {
-    dsp_->StartMicrocode(microcode, address, 0x0010);
+    dsp_->StartMicrocode(microcode, address, kInitVector);
 
     uint32_t mail = 0;
     return WaitForMail(mail) && mail == kDspInit;

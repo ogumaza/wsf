@@ -13,10 +13,10 @@
 #include <vector>
 
 #include "ntdlib/disc/header.h"
-#include "ntdlib/flipper/file_disc.h"
 #include "ntdlib/flipper/game_source.h"
 #include "ntdlib/ppc/cpu.h"
 #include "xsflib/player/modes.h"
+#include "xsflib/player/player.h"
 
 #include "wii/system.h"
 #include "wsf/archive_player.h"
@@ -62,12 +62,12 @@ uint32_t Player::DriverStatus() const
 {
     if (archive_)
     {
-        return archive_->Busy() ? 1 : 2;
+        return archive_->Busy() ? xsflib::player::kDriverPlaying : xsflib::player::kDriverFinished;
     }
 
     if (!system_)
     {
-        return 1;
+        return xsflib::player::kDriverPlaying;
     }
 
     return ntdlib::flipper::DriverStatus(system_->Memory(), set_.descriptor ? set_.descriptor->status_address : 0);
@@ -120,6 +120,7 @@ bool Player::StartSource()
     {
         native_effects_ = NativeEffects::Attach(*system_);
     }
+
     system_output_.clear();
     system_->DspRegisters().on_audio = [this](std::span<const uint8_t, 32> block)
     {
@@ -167,7 +168,7 @@ bool Player::RunStep()
 
 bool Player::Finished() const
 {
-    return DriverStatus() == 2;
+    return DriverStatus() == xsflib::player::kDriverFinished;
 }
 
 std::shared_ptr<const Player::SourceSnapshot> Player::SaveSource(const SourceSnapshot* previous)

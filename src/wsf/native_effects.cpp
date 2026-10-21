@@ -221,7 +221,6 @@ bool NativeEffects::OnStop()
 
             return true;
         }
-
         break;
     }
 

@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "ntdlib/dsp/memory.h"
+#include "ntdlib/flipper/machine.h"
 #include "ntdlib/types.h"
 #include "xsflib/bytes.h"
 
@@ -23,8 +24,8 @@ namespace wsf::ax
 namespace
 {
 
-// The Wii's bus clock. The OS stores it at 0x800000f8. AX allows the microcode 1/667 of the bus clock per frame.
-constexpr uint32_t kBusClock = 243000000;
+// AX allows the microcode 1/667 of the bus clock per frame.
+constexpr uint32_t kMaxDspCycles = ntdlib::flipper::kWiiBusClockHz / 667;
 
 // The parts of a voice's PB that __AXSetPBDefault (0x8010707c) marks as changed.
 constexpr uint32_t kDefaultSync =
@@ -329,7 +330,7 @@ void System::Init(Build build)
 
     // __AXVPBInitCommon (0x801070ec): frees every voice and links every PB to the next one in the microcode's list. The
     // build of October 2006 (__AXVPBInit, 0x80030de4) also gives each PB the address of a buffer for its updates.
-    max_dsp_cycles_ = kBusClock / 667;
+    max_dsp_cycles_ = kMaxDspCycles;
     recorded_dsp_cycles_ = 0;
     std::memset(memory_->At(layout::kItdBuffers, voice_count_ * layout::kItdBufferSize), 0,
                 voice_count_ * layout::kItdBufferSize);
@@ -1010,6 +1011,7 @@ void System::NextFrame(ntdlib::PAddr surround, ntdlib::PAddr output,
     {
         WriteCommand(*traits.after_process);
     }
+
     WriteAuxCommands(traits.mix_aux_a, traits.aux_cycles);
 
     WriteCommand(traits.compressor);

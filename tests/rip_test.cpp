@@ -4,9 +4,11 @@
 // ntdlib/testing/rsar_files.h builds. Also tests the length analysis on sequences in which one track plays while
 // another polls or counts a variable or marks beats for the game, on tracks that loop at lengths that don't divide each
 // other, on a track that another track opens again, on a counted loop that outlasts the limit, and on a sequence in an
-// arrangement. TestLibraryNames checks the names of libraries in a folder that holds earlier rips (rip::LibraryName).
-// TestJac reads a Jac game's bank file and sequence index, made up in the formats of Pikmin's files. It also checks a
-// piece that plays in parts. TestPikmin2Sounds lists Pikmin 2's sounds from files made up in the game's formats.
+// arrangement. TestSilence, TestTracksThatWaitForEver, TestSwells and TestInnerLoops cover sequences that sound late or
+// never, a track 0 that never continues, a track that only swells a note of length 0 and a loop that holds an inner
+// loop. TestLibraryNames checks the names of libraries in a folder that holds earlier rips (rip::LibraryName). TestJac
+// reads a Jac game's bank file and sequence index, made up in the formats of Pikmin's files. It also checks a piece
+// that plays in parts. TestPikmin2Sounds lists Pikmin 2's sounds from files made up in the game's formats.
 // TestKeepSequenceData cuts an archive of several groups down to the data that its sequences play. TestProgramTooLarge
 // checks the limit on the size of a library's program. TestPieces finds the pieces whose channels are separate
 // sequences, gives a piece its timing and rips it.
@@ -14,16 +16,13 @@
 #include "rip/rip.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <exception>
 #include <filesystem>
 #include <map>
 #include <optional>
 #include <string>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -39,6 +38,7 @@
 #include "xsflib/rip/tool.h"
 #include "xsflib/testing/check.h"
 #include "xsflib/testing/sets.h"
+#include "xsflib/testing/temp_folder.h"
 
 #include "nw4r/arrangement.h"
 #include "nw4r/effect_setup.h"
@@ -48,7 +48,6 @@
 
 using xsflib::testing::Check;
 
-using namespace wsf;
 using ntdlib::testing::rsar_files::Bytes;
 using ntdlib::testing::rsar_files::MakeArchive;
 using ntdlib::testing::rsar_files::MakeSequence;
@@ -59,6 +58,8 @@ namespace fs = std::filesystem;
 
 namespace
 {
+
+using namespace wsf;
 
 // The length analysis of a sequence of `commands` in `arrangement`, with `effects`, with the tracks in the mask
 // `tracks`, in an archive that ntdlib/testing/rsar_files.h builds. The archive's waves loop unless `loop` is false, and
@@ -503,9 +504,8 @@ std::string NameInFolder(const fs::path& folder, const std::string& base, const 
 // Tests the names of libraries in a folder that holds earlier rips (rip::LibraryName).
 void TestLibraryNames()
 {
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const fs::path folder = fs::temp_directory_path() / ("wsf_rip_test_" + std::to_string(stamp));
-    fs::create_directories(folder);
+    const xsflib::testing::TempFolder temp("wsf_rip_test");
+    const fs::path& folder = temp.Path();
 
     // The earlier rips: two libraries of 3 bytes, one of over 1 MiB and a folder with a library's name. FileHolds
     // compares the large one in blocks.
@@ -534,9 +534,6 @@ void TestLibraryNames()
     Check(large_same == "Large.wsflib", "a file over 1 MiB with the same bytes is replaced");
     Check(large_other == "Large_2.wsflib", "a file over 1 MiB that differs in its last byte is passed over");
     Check(over_folder == "Folder_2.wsflib", "a folder with the name is passed over");
-
-    std::error_code ec;
-    fs::remove_all(folder, ec);
 }
 
 // Appends `value` to `data`, big-endian.
@@ -612,6 +609,7 @@ void TestJac()
         xsflib::StoreBe32(&entry[0x1c], size);
         section.insert(section.end(), entry.begin(), entry.end());
     };
+
     const std::string header = "BARC----";
     section.insert(section.end(), header.begin(), header.end());
     Put32(section, 0);
@@ -689,14 +687,54 @@ void TestPikmin2Sounds()
     const std::vector<uint8_t> aaf = files::AafFile({{16, 127, 0}, {16, 127, 1}, {0}, {0}, {6}}, {"wScene_0.aw"});
 
     const char* const kPieces[] = {
-        "2pbattle",      "a_iron",      "a_zawinul01", "battle_t",        "book",         "caveboss",
-        "caveconc",      "caveglass",   "cavekeyget",  "cavemetal",       "caverelax",    "cavesoil",
-        "cavetile",      "cavetsumiki", "comp_result", "c_menu",          "c_result",     "ff_annihi",
-        "ff_doped",      "ff_doping",   "ff_keyget",   "ff_playerdown",   "ff_treasureget", "forest",
-        "f_result",      "hiscore",     "id_test",     "kuro_post",       "kuro_pre",     "last",
-        "l_boss",        "m_boss",      "new_00",      "new_01",          "new_02",       "new_03",
-        "new_04",        "new_05",      "new_06",      "new_07",          "new_08",       "n_tutorial",
-        "n_tutorial_1stday", "result",  "u_result",    "worldmap",        "worldmap_intro", "yakushima",
+        "2pbattle",
+        "a_iron",
+        "a_zawinul01",
+        "battle_t",
+        "book",
+        "caveboss",
+        "caveconc",
+        "caveglass",
+        "cavekeyget",
+        "cavemetal",
+        "caverelax",
+        "cavesoil",
+        "cavetile",
+        "cavetsumiki",
+        "comp_result",
+        "c_menu",
+        "c_result",
+        "ff_annihi",
+        "ff_doped",
+        "ff_doping",
+        "ff_keyget",
+        "ff_playerdown",
+        "ff_treasureget",
+        "forest",
+        "f_result",
+        "hiscore",
+        "id_test",
+        "kuro_post",
+        "kuro_pre",
+        "last",
+        "l_boss",
+        "m_boss",
+        "new_00",
+        "new_01",
+        "new_02",
+        "new_03",
+        "new_04",
+        "new_05",
+        "new_06",
+        "new_07",
+        "new_08",
+        "n_tutorial",
+        "n_tutorial_1stday",
+        "result",
+        "u_result",
+        "worldmap",
+        "worldmap_intro",
+        "yakushima",
     };
     std::vector<files::RarcFileSpec> archive_files = {{0, "se.bms", {0xc1}}};
     for (const char* piece : kPieces)
@@ -714,12 +752,13 @@ void TestPikmin2Sounds()
         xsflib::StoreBe32(&record[0x1c], id);
         names.insert(names.end(), record.begin(), record.end());
     };
+
     add_name("PSSQ_TEST", 0x80010001);
     add_name("PSSE_SECOND", 0x0001);
     add_name("HOMESE_TEST", 0x6800);
 
-    const std::vector<rip::JAudioSound> sounds = rip::ReadPikmin2Sounds(aaf, files::RarcFile(archive_files), names,
-                                                                        *profile);
+    const std::vector<rip::JAudioSound> sounds =
+        rip::ReadPikmin2Sounds(aaf, files::RarcFile(archive_files), names, *profile);
     if (!Check(sounds.size() == 48 + 3, "the pieces come first, then the effects, without the table's sequences"))
     {
         return;
@@ -791,6 +830,7 @@ GroupedArchive MakeGroupedArchive(const std::vector<std::pair<Bytes, Bytes>>& fi
     {
         xsflib::StoreBe32(&file[at], static_cast<uint32_t>(value));
     };
+
     const auto pad = [](Bytes& data)
     {
         data.resize((data.size() + 0x1F) & ~std::size_t{0x1F}, 0);
@@ -802,6 +842,7 @@ GroupedArchive MakeGroupedArchive(const std::vector<std::pair<Bytes, Bytes>>& fi
     std::memcpy(&file[info], "INFO", 4);
     const std::size_t base = file.size();
     const std::size_t tables = Grow(file, 0x30);
+
     const auto entry = [&](std::size_t refs, std::size_t i, std::size_t size)
     {
         const std::size_t at = Grow(file, size);
@@ -978,6 +1019,7 @@ void TestKeepSequenceData()
     {
         std::fill_n(may_differ.begin() + static_cast<std::ptrdiff_t>(at), size, true);
     };
+
     field(8, 4);
     field(0x24, 4);
     field(grouped.file_block + 4, 4);
@@ -1056,7 +1098,7 @@ void TestProgramTooLarge()
 
 int main()
 {
-    try
+    const auto tests = []
     {
         TestLengths();
         TestSilence();
@@ -1074,11 +1116,6 @@ int main()
         TestPikmin2Sounds();
         TestKeepSequenceData();
         TestProgramTooLarge();
-    }
-    catch (const std::exception& e)
-    {
-        Check(false, std::string("unexpected error: ") + e.what());
-    }
-
-    return xsflib::testing::Summary("rip");
+    };
+    return xsflib::testing::RunTest("rip", tests);
 }

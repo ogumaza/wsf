@@ -24,14 +24,19 @@ enum class EffectType : uint8_t
 {
     // FxReverbHi of 2006 and 2007: preDelayTime, fusedTime, coloration, damping, crossTalk, outGain.
     kReverbHi = 1,
+
     // FxReverbHi of 2008: those six, then earlyMode, preDelayTimeMax, fusedMode, earlyGain, fusedGain.
     kReverbHi2008 = 2,
+
     // FxChorus: delayTime (ms), depth, rate (Hz).
     kChorus = 3,
+
     // FxDelay: delay (ms), feedback, outGain.
     kDelay = 4,
+
     // WarioWare: Smooth Moves' standard reverb: preDelay, time, coloration, damping, mix.
     kReverbStd = 5,
+
     // FxReverbStd of 2008 (Mario Kart Wii and Wii Music): preDelayTime, fusedTime, coloration, damping, outGain,
     // earlyMode, preDelayTimeMax, fusedMode, earlyGain, fusedGain.
     kReverbStd2008 = 6,
@@ -115,7 +120,6 @@ inline bool FollowsVariables(const std::vector<EffectSetup>& setups, uint32_t so
     {
         return !setup.presets.empty() && ListsSound(setup, sound);
     };
-
     return std::any_of(setups.begin(), setups.end(), picks_presets);
 }
 
@@ -139,7 +143,6 @@ inline bool SetUpFor(const std::vector<EffectSetup>& setups, std::size_t index, 
     {
         return other.presets.empty() && other.bus == setup.bus && ListsSound(other, sound);
     };
-
     return std::none_of(setups.begin(), setups.end(), takes_sound);
 }
 

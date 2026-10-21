@@ -14,11 +14,11 @@
 
 #include "ntdlib/disc/game.h"
 #include "ntdlib/dol.h"
+#include "ntdlib/flipper/machine.h"
 #include "ntdlib/rsar/formats.h"
 
 #include "axfx/axfx.h"
 #include "nw4r/effect_setup.h"
-#include "rip/rip.h"
 #include "wsf/format.h"
 
 namespace wsf::rip
@@ -29,7 +29,7 @@ namespace wsf::rip
 // The ticks of the time base in a frame of the video, a 60th of a second. The time base runs at a quarter of the
 // 243 MHz bus clock. NW4R SND's driver calls SoundArchivePlayer::Update once a frame. The JAudio drivers take the same
 // time for a frame.
-inline constexpr uint32_t kFrameTicks = 243'000'000 / 4 / 60;
+inline constexpr uint32_t kFrameTicks = ntdlib::flipper::kWiiBusClockHz / 4 / 60;
 
 // What differs between the two kinds of game-mode library, for the NW4R driver (BuildLibrary) and for JAudio's drivers
 // (BuildJAudioLibrary). The driver's image has its parameters filled in. It loads at `base`, and the game's `main`
@@ -78,8 +78,10 @@ struct EffectClass
 struct EffectProfile
 {
     const char* dol_sha1;
+
     // The effects for the sounds of the archive whose file name, in lower case, is `name`.
     nw4r::ArchiveEffects (*effects)(const std::string& name, const ntdlib::rsar::SoundArchive& archive);
+
     axfx::Build axfx_build; // the build of AXFX that the game links, for the player's models of the effects
     uint32_t ax_register_callback, ax_manager, append_effect, clear_effect;
     uint32_t seq_handle_ctor = 0, seq_handle_dtor = 0, read_variable = 0;

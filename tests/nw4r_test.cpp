@@ -3,15 +3,13 @@
 // NW4R SND model tests, on the AX model with no DSP: the parameter blocks a note's channel sets up, the ramps from
 // frame to frame, the release and the end of a channel, the voices NW4R SND drops by priority when all are in use, a
 // short sequence played from an archive, a sequence in an arrangement, sequences that start together, what the builds
-// of 2008 and 2009 do differently, the loops the ripper's length analysis counts, snapshots of the model, and the end
-// of a wave without the DSP.
+// of October 2006, 2008 and 2009 do differently, the loops the ripper's length analysis counts, snapshots of the model,
+// and the end of a wave without the DSP.
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
-#include <exception>
 #include <list>
 #include <memory>
 #include <optional>
@@ -388,11 +386,11 @@ void TestArrangement()
     // key 60.
     const Bytes kBranch = {0xf0, 0x90, 0x00, 0x00, 0x01, 0xa2, 0x89, 0x00, 0x00, 0x10, 0xd3,
                            0x7f, 0x3c, 0x64, 0x30, 0xff, 0xd3, 0x7f, 0x40, 0x64, 0x30, 0xff};
+
     const auto ratio = [](const xsflib::psf::Variables& variables, Model& model)
     {
         model.engine.StartSequence(0, {.variables = variables});
         const ax::Pb pb = model.PbAfter(1);
-
         return ax::Join(pb.src.ratio_hi, pb.src.ratio_lo) / 65536.0;
     };
 
@@ -1087,7 +1085,7 @@ void TestMixOctober2006()
 
 int main()
 {
-    try
+    const auto tests = []
     {
         TestNote();
         TestRelease();
@@ -1114,13 +1112,6 @@ int main()
         TestReleaseStopOctober2006();
         TestRampOctober2006();
         TestMixOctober2006();
-    }
-    catch (const std::exception& e)
-    {
-        std::fprintf(stderr, "exception: %s\n", e.what());
-
-        return 1;
-    }
-
-    return xsflib::testing::Summary("nw4r");
+    };
+    return xsflib::testing::RunTest("nw4r", tests);
 }

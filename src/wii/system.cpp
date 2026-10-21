@@ -3,7 +3,6 @@
 #include "wii/system.h"
 
 #include <algorithm>
-#include <array>
 #include <cstdint>
 #include <optional>
 

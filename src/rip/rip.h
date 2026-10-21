@@ -113,8 +113,9 @@ nw4r::ArchiveEffects FindEffects(const std::string& dol_sha1, const std::string&
 // Game mode: builds the .wsflib for the sound archive at `archive_path` on the disc (no leading '/'). The library holds
 // the game's code with main patched to branch to the driver, the driver, the partition's header and the archive. The
 // driver sets up the effects of `effects` that a sound gets when no effect lists it, with the game's functions. Returns
-// nullopt and sets `error` if main.dol isn't a DOL, the archive's path is longer than the driver supports, the driver
-// can't set up all of the effects, the archive can't be read, or the library is larger than a player loads.
+// nullopt and sets `error` if main.dol isn't a DOL, the archive's path is longer than the driver supports, the driver's
+// block doesn't have the layout that the ripper expects, the driver can't set up all of the effects or silence the
+// game's tracks, the archive can't be read, or the library is larger than a player loads.
 std::optional<std::vector<uint8_t>> BuildLibrary(const ntdlib::disc::GameFiles& game, const GameProfile& profile,
                                                  const std::string& archive_path,
                                                  const ntdlib::rsar::SoundArchive& archive, const Tags& tags,
@@ -162,11 +163,13 @@ enum class JAudioLibrary : uint8_t
     // JAudio2. The ripper finds the start-up archive (BAA) by its header. The archive's sound table lists the sounds.
     // The archive also holds the wave systems. The RARC archives beside it hold the sequences.
     kJAudio2,
+
     // An early JAudio1. The game calls it through C functions (Jac, Jaf, Jaq and Jam). Pikmin is one such game. The
     // profile gives the paths of the sound files (`sound_archive` and `sequence_archive`). The bank file holds the
     // instrument banks and the wave systems. main.dol holds the sequence index, at `sequence_index`. ReadJacSounds
     // lists the pieces of music.
     kJac,
+
     // A later JAudio1, with a start-up archive (AAF) that holds the sound table, the instrument banks and the wave
     // systems. New Play Control! Pikmin 2 is one such game. As for kJac, the profile gives the paths of the start-up
     // archive (`sound_archive`) and the sequence archive (`sequence_archive`), and FindJAudio1Files finds them. The
@@ -181,18 +184,23 @@ enum class JAudioDriver : uint8_t
     // driver/jaudio.c: ntdlib's start-up for Z2, the sound layer that Twilight Princess puts on JAudio2. The profile's
     // `z2` and its Wii fields fill in the driver's block.
     kZ2,
+
     // driver/jungle_beat.c: New Play Control! Donkey Kong Jungle Beat's start-up of JAudio2, with the game's BGM
     // player. The profile's `params` fill in the driver's block.
     kJungleBeat,
+
     // driver/pikmin.c: the start-up of the JAudio1 in New Play Control! Pikmin. The driver calls the game's C functions
     // (kJac) and takes its parameters from `params`.
     kPikmin,
+
     // driver/pikmin2.c: New Play Control! Pikmin 2's sound layer on JAudio1. The profile's `params` fill in the
     // driver's block. They end with the driver's table of the game's pieces of music.
     kPikmin2,
+
     // driver/galaxy.c: the start-up of Super Mario Galaxy, whose audio system sits on JAudio2. The profile's `params`
     // fill in the driver's block.
     kGalaxy,
+
     // driver/galaxy2.c: the start-up of Super Mario Galaxy 2, through the game's file loader and audio wrapper. The
     // profile's `params` fill in the driver's block.
     kGalaxy2,
@@ -215,19 +223,23 @@ struct JAudioProfile
     std::string name;
     std::string game_id;
     std::string dol_sha1;
+
     // The sound library. A JAudio1 profile also gives the paths of the game's sound files on the disc and the address
     // of the sequence index in main.dol (see JAudioLibrary).
     JAudioLibrary library = JAudioLibrary::kJAudio2;
     std::string sound_archive = {};
     std::string sequence_archive = {};
     uint32_t sequence_index = 0;
+
     // A Jac game's piece in parts (0 for none), and the parts that the game plays. The sound library plays that piece
     // from its start-up. The game plays a part by writing the part's number to a port of the piece's root track. The
     // game loads the part's wave group first. ReadJacSounds lists the parts in place of the piece.
     uint32_t parted_piece = 0;
     std::vector<JacPart> parts = {};
+
     // The path of the name table (.asn) of an AAF game's sounds on the disc, or empty for none.
     std::string sound_names = {};
+
     uint32_t main;                        // patched to branch to the driver
     ntdlib::flipper::z2::Profile z2 = {}; // the start-up's sizes and the game's functions
     uint32_t sleep = 0;                   // the game's sleep of the calling thread for an OSTime, or 0
@@ -238,10 +250,13 @@ struct JAudioProfile
     uint32_t ios_version;                 // the IOS that the game's TMD requests
     ntdlib::jaudio::GameWatch watch;      // what the length analysis and the wave discovery watch
     std::vector<uint32_t> static_waves;   // the groups that the audio set-up loads itself: (system << 16) | group
+
     // The driver that the game's rips hold. driver/jaudio.c (kZ2) takes `z2` and the Wii's fields above.
     JAudioDriver driver = JAudioDriver::kZ2;
+
     // Another driver takes these words as its parameters, in the order of its block after the wave list.
     std::vector<uint32_t> params = {};
+
     // The sound files that the driver loads besides the start-up archive and the wave archives, by their paths on the
     // disc. A rip's library holds them. With none listed, it holds the archives that FindJAudioFiles finds.
     std::vector<std::string> files = {};

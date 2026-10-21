@@ -14,6 +14,7 @@
 
 #include "ntdlib/dsp/dsp.h"
 #include "ntdlib/dsp/memory.h"
+#include "ntdlib/flipper/audio_interface.h"
 #include "ntdlib/flipper/dsp_interface.h"
 #include "ntdlib/flipper/exi.h"
 #include "ntdlib/flipper/machine.h"
@@ -59,7 +60,7 @@ public:
 
     // The CPU's clock, and the bus clock that times the hardware.
     static constexpr uint32_t kCpuClock = 729'000'000;
-    static constexpr uint32_t kBusClock = 243'000'000;
+    static constexpr uint32_t kBusClock = ntdlib::flipper::kWiiBusClockHz;
 
     explicit System(Disc& disc);
 

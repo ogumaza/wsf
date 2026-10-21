@@ -15,11 +15,13 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "ntdlib/disc/game.h"
 #include "ntdlib/dol.h"
 #include "ntdlib/nwsnd/sequence.h"
 #include "ntdlib/rsar/formats.h"
@@ -34,10 +36,12 @@
 
 #include "ax/pb.h"
 #include "ax/system.h"
+#include "nw4r/arrangement.h"
 #include "nw4r/effect_setup.h"
 #include "nw4r/engine.h"
 #include "nw4r/rsar_options.h"
 #include "nw4r/sequence.h"
+#include "nw4r/util.h"
 #include "rip/driver_blob.h"
 #include "rip/rip.h"
 #include "rip/sound_libraries.h"
@@ -58,6 +62,7 @@ constexpr uint32_t kParamsPathSize = 64;
 constexpr uint32_t kParamsProfileOffset = 0x68;
 constexpr uint32_t kParamsBankGroupOffset = 0xb4; // the group with the sound's bank, when it isn't the sound's group
 constexpr uint32_t kParamsInitFlagOffset = 0xb8;  // the sound system's flag, for a 2008 build's Setup
+
 // The effects (see EffectProfile): the functions and the offset of a sound's sends, the number of effects, what a
 // .miniwsf patches for its sound (whether the variables pick the presets, the send's bus and the send), the effects and
 // their parameter words. The block ends with the build of AXFX and the effects' classes for the player. A .miniwsf
@@ -72,6 +77,7 @@ constexpr uint32_t kParamsEffectsEnd = DriverBlock::kNativeOffset + DriverBlock:
 static_assert(kParamsEffectsOffset + DriverBlock::kMaxEffects * DriverBlock::kEffectSize == kParamsEffectWordsOffset &&
               kParamsEffectWordsOffset + kDriverEffectWords * 4 == DriverBlock::kAxfxBuildOffset);
 constexpr uint32_t kNoBus = 0xffffffff;
+
 // The tracks that the game silences on the sound (see EffectProfile): the offsets of the SeqPlayer's track pointers
 // in SeqSound and of the volume in SeqTrack, then the tracks, which a .miniwsf patches.
 constexpr uint32_t kParamsSeqTracksOffset = kParamsEffectsEnd;
@@ -192,6 +198,7 @@ std::optional<std::array<uint8_t, kParamsEffectsEnd>> EffectsBlock(const std::st
     static_assert(kParamsEffectFunctionsOffset + std::size(function_words) * 4 == kParamsEffectCountOffset);
     put(kParamsEffectCountOffset, static_cast<uint32_t>(setups.size()));
     put(DriverBlock::kAxfxBuildOffset, static_cast<uint32_t>(profile->axfx_build));
+
     uint32_t first = 0;
     for (std::size_t i = 0; i < setups.size(); i++)
     {
@@ -270,8 +277,8 @@ bool GetsOtherEffects(const std::vector<nw4r::EffectSetup>& setups, uint32_t sou
 }
 
 // Fills in driver/driver.c's parameters in the driver's block at `params`: the settings, the archive at `archive_path`,
-// the game's profile, the effects and the silenced tracks. Returns why the driver can't set up the game's effects or
-// silence its tracks, or nothing.
+// the game's profile, the effects and the silenced tracks. Returns nothing, or the error: the driver's block doesn't
+// have the layout that the ripper expects, or the driver can't set up the game's effects or silence its tracks.
 std::optional<std::string> PutDriverParams(uint8_t* params, const GameProfile& profile, const std::string& archive_path,
                                            const ntdlib::rsar::SoundArchive& archive, const std::string& dol_sha1,
                                            const nw4r::ArchiveEffects& effects)
@@ -314,6 +321,7 @@ std::optional<std::string> PutDriverParams(uint8_t* params, const GameProfile& p
     {
         put(kParamsProfileOffset + static_cast<uint32_t>(i * 4), functions[i]);
     }
+
     static_assert(kParamsProfileOffset + std::size(functions) * 4 == kParamsBankGroupOffset);
     put(kParamsInitFlagOffset, profile.init_flag);
 
@@ -652,6 +660,7 @@ std::vector<std::vector<bool>> ItemsRead(const ntdlib::rsar::SoundArchive& archi
     {
         return static_cast<uint64_t>(data.data() - start);
     };
+
     for (const uint32_t file_id : files)
     {
         const std::optional<ntdlib::rsar::FileData> file = archive.File(file_id);

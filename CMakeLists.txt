@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for wsfrip, wsfplay, the foobar2000 component, Windows file properties and macOS bundles
 # (xsflib_add_version below). For a release, update it here and add notes in docs/release-notes/.
-project(wsf VERSION 1.6.0 LANGUAGES C CXX)
+project(wsf VERSION 1.6.1 LANGUAGES C CXX)
 
 # xsflib: the code that WSF shares with the other PSF players and with the converters, as a submodule. Its
 # XsflibProject.cmake sets what the projects built on it start with: C++20, a release build by default, the static C
@@ -62,7 +62,7 @@ add_library(wsf_ax STATIC
     src/ax/voice.cpp
     src/ax/voice.h
 )
-target_link_libraries(wsf_ax PUBLIC wsf_common ntdlib::ax ntdlib::dsp)
+target_link_libraries(wsf_ax PUBLIC wsf_common ntdlib::ax ntdlib::dsp PRIVATE ntdlib::flipper)
 target_compile_options(wsf_ax PRIVATE ${WSF_WARNINGS})
 
 # The Wii for game mode: Broadway, memory, the DSP and Hollywood's hardware.
@@ -85,6 +85,7 @@ target_compile_options(wsf_format PRIVATE ${WSF_WARNINGS})
 
 # NW4R SND model: the sequence player, channels, envelopes and the voice layer above AX.
 add_library(wsf_nw4r STATIC
+    src/nw4r/arrangement.h
     src/nw4r/driver.cpp
     src/nw4r/driver.h
     src/nw4r/effect_setup.h
@@ -92,9 +93,9 @@ add_library(wsf_nw4r STATIC
     src/nw4r/effects.h
     src/nw4r/engine.cpp
     src/nw4r/engine.h
+    src/nw4r/rsar_options.h
     src/nw4r/sequence.cpp
     src/nw4r/sequence.h
-    src/nw4r/rsar_options.h
     src/nw4r/util.h
 )
 target_link_libraries(wsf_nw4r PUBLIC wsf_ax wsf_axfx ntdlib::nwsnd ntdlib::rsar)

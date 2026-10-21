@@ -2,11 +2,10 @@
 
 // AX model tests: the first command lists and where they point, the PBs' links in main memory, the order in which AX
 // hands out voices and steals them by priority, the copy of a voice's changes into its PB, and the voices that a frame
-// drops when they would push it over its DSP cycles.
+// drops when they would push it over its DSP cycles. The tests of the build of October 2006 check its command list, its
+// PBs of 0x120 bytes, its 64 voices and the cycles that it counts.
 
 #include <cstdint>
-#include <cstdio>
-#include <exception>
 #include <vector>
 
 #include "ntdlib/dsp/memory.h"
@@ -310,7 +309,7 @@ void TestOctober2006Cycles()
 
 int main()
 {
-    try
+    const auto tests = []
     {
         TestInit();
         TestAllocation();
@@ -319,13 +318,6 @@ int main()
         TestOctober2006Layout();
         TestOctober2006Voices();
         TestOctober2006Cycles();
-    }
-    catch (const std::exception& e)
-    {
-        std::fprintf(stderr, "exception: %s\n", e.what());
-
-        return 1;
-    }
-
-    return xsflib::testing::Summary("ax");
+    };
+    return xsflib::testing::RunTest("ax", tests);
 }

@@ -94,7 +94,7 @@ private:
 
     bool RunStep();
 
-    // Whether the sound has finished: the driver reports status 2.
+    // Whether the sound has finished: the driver reports kDriverFinished.
     bool Finished() const;
 
     std::vector<int16_t>& Output();

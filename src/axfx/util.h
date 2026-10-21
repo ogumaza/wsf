@@ -45,7 +45,6 @@ inline bool OutOfRange(float value)
 inline float CombCoef(uint32_t length, float time)
 {
     const float exponent = -3.0f * static_cast<float>(length) / (kSampleRate * time);
-
     return static_cast<float>(std::pow(10.0, static_cast<double>(exponent)));
 }
 

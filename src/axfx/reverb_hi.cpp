@@ -2,15 +2,12 @@
 
 #include "axfx/reverb_hi.h"
 
-#include <cmath>
-
 #include "ntdlib/fused.h"
 
 #include "axfx/util.h"
 
 namespace wsf::axfx
 {
-
 namespace
 {
 
@@ -231,7 +228,6 @@ float ReverbHiExp::ProcessChannel(int channel, float input, float fused_gain, fl
     const float lowpass = lowpass_gain * allpass1 + lpf_coef_ * last_lpf_out_[channel];
     last_lpf_out_[channel] = lowpass;
     const float output = Allpass(last_allpass_line_[channel][last_allpass_pos_[channel]], lowpass, allpass_coef_);
-
     return output * fused_gain + early;
 }
 

@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "xsflib/bytes.h"
@@ -23,12 +24,11 @@
 
 namespace wsf
 {
-
 namespace
 {
 
 // The most sounds in one of a descriptor's lists: an effect's sounds, the sends or the silenced tracks.
-constexpr uint32_t kMaxSounds = 0x10000;
+constexpr uint32_t kMaxListSounds = 0x10000;
 
 // Each of ReadEffectSetups, ReadSends and ReadTracks reads its part of the effects at `pos` (see
 // ArchiveDescriptor::Serialize) and moves `pos` past it. Data that ends before the part has none of it. Each returns
@@ -66,7 +66,7 @@ bool ReadEffectSetups(const std::vector<uint8_t>& data, std::size_t& pos, std::v
         const uint32_t presets = xsflib::LoadLe32(&data[pos + 4]);
         const uint32_t sounds = xsflib::LoadLe32(&data[pos + 8]);
         pos += 12;
-        if (presets > kMaxPresets || sounds > kMaxSounds ||
+        if (presets > kMaxPresets || sounds > kMaxListSounds ||
             pos + 4ull * words * std::max(presets, 1u) + 4ull * sounds > data.size())
         {
             return false;
@@ -123,7 +123,7 @@ bool ReadSends(const std::vector<uint8_t>& data, std::size_t& pos, std::vector<n
 
     const uint32_t send_count = xsflib::LoadLe32(&data[pos]);
     pos += 4;
-    if (send_count > kMaxSounds || pos + 12ull * send_count > data.size())
+    if (send_count > kMaxListSounds || pos + 12ull * send_count > data.size())
     {
         return false;
     }
@@ -151,7 +151,7 @@ bool ReadTracks(const std::vector<uint8_t>& data, std::size_t& pos, std::vector<
 
     const uint32_t track_count = xsflib::LoadLe32(&data[pos]);
     pos += 4;
-    if (track_count > kMaxSounds || pos + 8ull * track_count > data.size())
+    if (track_count > kMaxListSounds || pos + 8ull * track_count > data.size())
     {
         return false;
     }
@@ -221,6 +221,7 @@ std::string FormatTracks(uint16_t tracks)
     {
         text += (text.empty() ? "" : ", ") + part;
     };
+
     int track = 0;
     while (track < 16)
     {
@@ -365,6 +366,7 @@ std::vector<uint8_t> ArchiveDescriptor::Serialize() const
             v.push_back(0);
             xsflib::psf::Put32(v, static_cast<uint32_t>(effect.presets.size()));
             xsflib::psf::Put32(v, static_cast<uint32_t>(effect.sounds.size()));
+
             const auto put_params = [&](const nw4r::EffectParams& params)
             {
                 for (int i = 0; i < words; i++)

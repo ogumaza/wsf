@@ -16,6 +16,7 @@
 #include <string_view>
 #include <vector>
 
+#include "ntdlib/disc/game.h"
 #include "ntdlib/dol.h"
 #include "ntdlib/rsar/formats.h"
 #include "xsflib/ascii.h"
@@ -607,7 +608,6 @@ std::vector<uint32_t> SoundsNamed(const ntdlib::rsar::SoundArchive& archive,
     {
         return std::find(names.begin(), names.end(), sound) != names.end();
     };
-
     return SoundsWhere(archive, is_named);
 }
 
@@ -701,6 +701,7 @@ nw4r::ArchiveEffects CityFolkEffects(const std::string& name, const ntdlib::rsar
     if (name == "rv_forest.brsar")
     {
         found.setups = {ReverbHi2008(0.01f, 0.5f, 0.6f, 0.4f, 0.1f, 1.0f, {4, 0.05f, 2, 0.3f, 0.3f})};
+
         const auto send = [&found, &archive](uint32_t first, uint32_t last, float value)
         {
             for (uint32_t i = first; i <= last && i < archive.Sounds().size(); i++)
@@ -708,6 +709,7 @@ nw4r::ArchiveEffects CityFolkEffects(const std::string& name, const ntdlib::rsar
                 found.sends.push_back({i, 0, value});
             }
         };
+
         send(0x1a11, 0x1a28, 0.25f); // BGM_OUTDOOR_00 to 23
         send(0x1aa3, 0x1aa6, 0.25f); // BGM_TOWN_*
         send(0x1a29, 0x1a77, 0.28f); // BGM_KK00 to 78
@@ -722,6 +724,7 @@ nw4r::ArchiveEffects CityFolkEffects(const std::string& name, const ntdlib::rsar
                                                 0x447f, 0x009f, 0x04ff, 0x13ff, 0x00ff, 0x00ff, 0x03ff, 0x007f,
                                                 0x07ff, 0x02ff, 0x077f, 0x01ff, 0x007f, 0x1f7f, 0x19ff, 0x003f};
         static constexpr uint16_t kTown[] = {0x99ff, 0x07ff, 0x01ff, 0x003f};
+
         const auto play = [&found, &archive](uint32_t sound, uint16_t tracks)
         {
             if (sound < archive.Sounds().size())
@@ -729,6 +732,7 @@ nw4r::ArchiveEffects CityFolkEffects(const std::string& name, const ntdlib::rsar
                 found.tracks.push_back({sound, tracks});
             }
         };
+
         for (uint32_t i = 0; i < std::size(kOutdoor); i++)
         {
             play(0x1a11 + i, kOutdoor[i]); // BGM_OUTDOOR_00 to 23
@@ -908,7 +912,6 @@ const std::vector<EffectProfile>& KnownEffectProfiles()
                 },
         },
     };
-
     return kProfiles;
 }
 

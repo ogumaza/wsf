@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/nwsnd/util.h"
+
 #include "ax/pb.h"
 #include "ax/system.h"
 #include "ax/voice.h"
@@ -829,6 +831,7 @@ bool Voice::Acquire(int channels, int priority, ChannelId owner)
     {
         OnAxVoiceDropped(dropped);
     };
+
     // Whether dropping the voices of no higher priority would free `needed` AX voices.
     const auto can_drop = [this, priority](int needed)
     {
@@ -849,6 +852,7 @@ bool Voice::Acquire(int channels, int priority, ChannelId owner)
 
         return needed <= 0;
     };
+
     for (int i = 0; i < channels; i++)
     {
         AxVoice* voice = manager.AcquireAxVoice(ax_priority, on_drop);

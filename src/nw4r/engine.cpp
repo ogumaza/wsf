@@ -165,7 +165,7 @@ Channel* Engine::NoteOn(const std::vector<uint32_t>& banks, int slot, const Note
     // BankFileReader::ReadInstInfo and ReadWaveParam, then a channel for the wave's channels at the note's priority.
     const LoadedBank& bank = *found;
     const ntdlib::rsar::Region* region = bank.bank.Find(static_cast<int>(info.prg_no), info.key, info.velocity);
-    if (region == nullptr || static_cast<size_t>(region->wave_index) >= bank.bank.Waves().size())
+    if (region == nullptr || static_cast<std::size_t>(region->wave_index) >= bank.bank.Waves().size())
     {
         return nullptr;
     }
@@ -326,7 +326,7 @@ WaveData Engine::ReadWaveParam(const LoadedBank& bank, const ntdlib::rsar::Wave&
     data.sample_rate = wave.sample_rate;
     data.loop_start = AxVoice::SampleByDspAddress(wave.loop_start_address, format);
     data.loop_end = AxVoice::SampleByDspAddress(wave.loop_end_address, format) + 1;
-    for (size_t i = 0; i < std::min<size_t>(wave.channels.size(), data.channels.size()); i++)
+    for (std::size_t i = 0; i < std::min<std::size_t>(wave.channels.size(), data.channels.size()); i++)
     {
         const ntdlib::rsar::WaveChannel& channel = wave.channels[i];
         data.channels[i].data =

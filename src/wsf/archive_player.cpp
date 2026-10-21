@@ -20,6 +20,7 @@
 #include "nw4r/effect_setup.h"
 #include "nw4r/engine.h"
 #include "nw4r/rsar_options.h"
+#include "nw4r/util.h"
 
 namespace wsf
 {

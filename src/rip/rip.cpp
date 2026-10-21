@@ -11,6 +11,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <optional>
 #include <span>
 #include <string>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "ntdlib/disc/containers.h"
+#include "ntdlib/disc/image.h"
 #include "ntdlib/dol.h"
 #include "xsflib/bytes.h"
 #include "xsflib/files.h"

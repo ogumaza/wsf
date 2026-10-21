@@ -16,9 +16,11 @@
 #include "ntdlib/dsp/memory.h"
 #include "ntdlib/flipper/z2_params.h"
 #include "ntdlib/jaudio/game_lengths.h"
+#include "ntdlib/ppc/cpu.h"
 #include "xsflib/bytes.h"
 
 #include "wii/system.h"
+#include "wsf/format.h"
 #include "wsf/player.h"
 
 namespace wsf::rip

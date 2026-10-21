@@ -25,9 +25,12 @@
 
 using xsflib::testing::LoadError;
 
+namespace
+{
+
 using namespace wsf;
 
-static void TestVersionByte()
+void TestVersionByte()
 {
     // A file that WSF writes has version byte 0x27 (docs/wsf.md, "Version byte"). xsflib's psf_test checks the PSF
     // container with another version byte.
@@ -36,7 +39,7 @@ static void TestVersionByte()
     XSFLIB_CHECK(file.size() >= 16 && std::memcmp(file.data(), "PSF", 3) == 0 && file[3] == 0x27);
 }
 
-static void TestDescriptor()
+void TestDescriptor()
 {
     ProcessDescriptor d;
     d.version = 2;
@@ -59,7 +62,7 @@ static void TestDescriptor()
     XSFLIB_CHECK(!ProcessDescriptor::Parse(std::vector<uint8_t>(8, 0)).has_value());
 }
 
-static void TestLoadSet()
+void TestLoadSet()
 {
     std::map<std::string, std::vector<uint8_t>> fs;
     const FileReader reader = xsflib::testing::MapReader(fs);
@@ -125,7 +128,7 @@ static void TestLoadSet()
                  refused->find("driver block version 3; this player supports versions 1 to 2") != std::string::npos);
 }
 
-static void TestArchiveMode()
+void TestArchiveMode()
 {
     ArchiveDescriptor d;
     d.version = 2;
@@ -217,7 +220,7 @@ static void TestArchiveMode()
     XSFLIB_CHECK(LoadSet("a/z.miniwsf", reader, set).has_value()); // archive mode without a sound
 }
 
-static void TestSoundsThatPlayTogether()
+void TestSoundsThatPlayTogether()
 {
     // A SND chunk with a list selects sounds that play together, in its order (docs/wsf.md, "Sounds that play
     // together"). Version 2 of the archive descriptor plays them all. Version 1 plays the first alone.
@@ -277,7 +280,7 @@ static void TestSoundsThatPlayTogether()
     XSFLIB_CHECK(SoundsToPlay(set).empty());
 }
 
-static void TestArrangementTags()
+void TestArrangementTags()
 {
     // wsf_tracks: track numbers and ranges, separated by commas or white space, in any order.
     XSFLIB_CHECK(ParseTracks("2, 8-14") == uint16_t{0x7f04});
@@ -328,7 +331,7 @@ static void TestArrangementTags()
     XSFLIB_CHECK(arrangement.tracks == 0xffff && arrangement.tempo_ratio == 0.5f);
 }
 
-static void TestEffects()
+void TestEffects()
 {
     // The effects block follows the build (docs/wsf.md, "Archive descriptor").
     ArchiveDescriptor d;
@@ -395,7 +398,7 @@ static void TestEffects()
     XSFLIB_CHECK(!ArchiveDescriptor::Parse(std::vector<uint8_t>(raw.begin(), raw.end() - 30)).has_value());
 }
 
-static void TestTracks()
+void TestTracks()
 {
     // The tracks that the game plays of some sounds follow the sends (docs/wsf.md, "Archive descriptor").
     ArchiveDescriptor d;
@@ -447,7 +450,7 @@ static void TestTracks()
     XSFLIB_CHECK(ArrangementFromTags({{"wsf_tracks", "16"}}, 0x07ff).tracks == 0x07ff);
 }
 
-static void TestEffectsBySound()
+void TestEffectsBySound()
 {
     // Bus A: a reverb for the sounds that no other effect on bus A lists, and one for sounds 5 and 6. Bus B: a chorus
     // for sound 6 alone. Bus C: a delay whose presets sound 7 picks. Each effect shows as its type and first word.
@@ -491,6 +494,8 @@ static void TestEffectsBySound()
     XSFLIB_CHECK((six == Types{{kReverb, 1}, {kChorus, 0}, {kDelay, 0}}));
     XSFLIB_CHECK(seven == unlisted && nw4r::FollowsVariables(setups, 7) && !nw4r::FollowsVariables(setups, 5));
 }
+
+} // namespace
 
 int main()
 {

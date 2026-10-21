@@ -18,11 +18,15 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/disc/game.h"
 #include "ntdlib/dol.h"
 #include "ntdlib/flipper/wave_list.h"
+#include "ntdlib/flipper/z2_params.h"
 #include "ntdlib/jaudio/aaf.h"
 #include "ntdlib/jaudio/archive.h"
+#include "ntdlib/jaudio/game_lengths.h"
 #include "ntdlib/jaudio/rarc.h"
+#include "ntdlib/jaudio/wave_system.h"
 #include "xsflib/ascii.h"
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
@@ -55,6 +59,7 @@ constexpr uint32_t kJAudioResetDataOffset = kJAudioWiiOffset + 8;
 constexpr uint32_t kJAudioResetFlagOffset = kJAudioWiiOffset + 12;
 constexpr uint32_t kJAudioAlarmOffset = kJAudioWiiOffset + 16;
 constexpr uint32_t kJAudioWaveArcsOffset = kJAudioAlarmOffset + 20;
+
 // The driver's replacements for a game that lacks the functions: the sleep, then the functions for one wave group.
 constexpr uint32_t kJAudioDriverSleepOffset = kJAudioWaveArcsOffset + 20;
 constexpr uint32_t kJAudioDriverLoadSeWaveOffset = kJAudioDriverSleepOffset + 4;
@@ -124,6 +129,7 @@ void PutZ2DriverParams(uint8_t* params, const JAudioProfile& profile)
     {
         xsflib::StoreBe32(params + offset, value);
     };
+
     const auto word = [params](uint32_t offset)
     {
         return xsflib::LoadBe32(params + offset);
@@ -550,6 +556,7 @@ std::optional<JAudioFiles> FindJAudio1Files(const ntdlib::disc::GameFiles& game,
         return std::any_of(game.files.begin(), game.files.end(),
                            [&path](const ntdlib::disc::GameFile& file) { return file.path == path; });
     };
+
     if (!on_disc(profile.sound_archive) || !on_disc(profile.sequence_archive))
     {
         return std::nullopt;
@@ -753,6 +760,7 @@ std::optional<std::vector<JAudioSound>> ReadJAudioSounds(const ntdlib::disc::Gam
     // Pikmin 2's sequence archive, and its name table.
     std::vector<uint8_t> sequences;
     std::vector<uint8_t> name_table;
+
     const auto read = [&game, error](const std::string& path, std::vector<uint8_t>& data)
     {
         if (game.read_file && game.read_file(path, data))
@@ -767,6 +775,7 @@ std::optional<std::vector<JAudioSound>> ReadJAudioSounds(const ntdlib::disc::Gam
 
         return false;
     };
+
     if (!read(files.archives.front(), sequences) ||
         (!profile->sound_names.empty() && !read(profile->sound_names, name_table)))
     {
