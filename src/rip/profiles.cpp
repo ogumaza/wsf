@@ -1134,8 +1134,9 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
         // into its game heap. It mounts the sequence archive and the chord archive in its audio heap, and loads the
         // chord database there. Its 65 wave banks hold one group each. The sound library loads bank 2 with the
         // start-up archive, and the game loads the others per stage. The game's BGM player starts the music. It sets
-        // each track of a BGM by tables in the game's code, and the driver starts music the same way. The parameters
-        // follow driver/jungle_beat.c's Params from frame_ticks.
+        // each track of a BGM by tables in the game's code, and the driver starts music the same way. A chord effect
+        // takes its keys from the chords of the music that plays. Its rip plays it over a stage's music with the
+        // music's tracks off. The parameters follow driver/jungle_beat.c's Params from frame_ticks.
         {
             .name = "New Play Control! Donkey Kong Jungle Beat (USA)",
             .game_id = "R49E01",
@@ -1199,7 +1200,25 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                     0x803ab6b0,           // music_tables: each BGM's tables of track states
                     0x803acc44,           // music_states: the second table's states
                     0x80279b20,           // set_music_state: the BGM player's function for a state of the second table
+                    0xd10,                // chord_offset: the audio system's chord effects
+                    164,                  // chord_records: the database's count says 218
+                    0x8027c050,           // start_chord_effect
+                    0xd14,                // stage_offset: the audio system's stage object
+                    0x80277590,           // start_stage_music
+                    0x80279270,           // set_track_states: the BGM player's function for a code for each track
+                    0x818,                // rhythm_offset: the audio system's rhythm
+                    0x80270260,           // rhythm_frame: the rhythm's frame process
+                    0x50042,              // swapped_effect: JA_SE_IST_AUTO_COMP_ALTO_SAX
+                    0x50063,              // swaps: JA_SE_IST_AUTO_COMP_E_PIANO_T
+                    0x2c,                 // at stage 0x2c (TropicalCoast)
+                    0x50062,              // JA_SE_IST_AUTO_COMP_E_PIANO
+                    0x35,                 // at stage 0x35 (SwimRace)
+                    0x70,                 // combo_effect: JA_SE_EAT_BIND_COMBO
+                    0x802678b0,           // start_with_count: the audio system's start of a sound with a count
+                    0,                    // music: written by the driver
                 },
+            .background_sound = 50, // the driver's `music`
+            .track_parent_offset = 0x12c,
             .files = {"AudioRes/Seqs/JaiSeq.arc", "AudioRes/Info/JaiChord.arc", "AudioRes/Info/ChordSeDataBase.csd"},
         },
         // New Play Control! Pikmin (USA). The game's sound library is the early JAudio1 of the GameCube release. The

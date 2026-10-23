@@ -404,6 +404,116 @@ together:
 
 The ripper finds such pieces by their labels (see "Archive mode" under "Ripping").
 
+## Chord effects
+
+New Play Control! Donkey Kong Jungle Beat plays many of its instruments' effects (`JA_SE_IST_*`) in the chords of the
+music. The sequence of such an effect reads its keys from ports 0xb to 0xf of its tracks. While port 0xb holds 0, the
+sequence plays nothing. The game's chord code works out the keys and writes the ports as it starts the sound. The disc
+holds the chord system's two files. A record of the chord database (`ChordSeDataBase.csd`) starts an effect. The chord
+archive (`JaiChord.arc`) holds a chord file for each stage's music. The addresses below are in the USA release's
+main.dol (`R49E01`).
+
+- `startChordSe` (0x80273870) starts a record. The game calls it through 0x8027c050 (record, object) at full volume.
+  It refuses a record until the music's chords are in. Some states of the game make it refuse records too.
+- `startChordSe` swaps two effects by stage. The stage object, at +0xd14 of the audio system, holds the stage's number
+  at +4. At stage 0x2c, a record of `JA_SE_IST_AUTO_COMP_ALTO_SAX` (0x50042) or `JA_SE_IST_AUTO_COMP_TRUMPET`
+  (0x50045) plays `JA_SE_IST_AUTO_COMP_E_PIANO_T` (0x50063) in its place. At stages 0x35 and 0x41, such a record plays
+  `JA_SE_IST_AUTO_COMP_E_PIANO` (0x50062).
+- 0x80273620 takes one of the chord system's 64 players. 0x80274a10 sets the player up. A step that waits for a beat
+  goes into the queue of beats at +0xcc4 of the audio system. Any other step plays at once.
+- 0x80274c50 plays a step. It starts the step's sound and works out a key for each voice (0x802751f0). 0x8026e2b0
+  writes the keys to ports 0xb and up with `JASTrack::writePort` (0x802cd650). The last key goes into the key memory.
+  The chord system's object (+0xd10 of the audio system) points to the key memory at +0x14. The first byte of a
+  record's last word picks the record's byte there. Each byte holds 60 after the game's start-up.
+- The rhythm, at +0x818 of the audio system, follows the music's beats. Its frame process (0x80270260) runs from an
+  object of the game's scenes. The audio frame process doesn't call it. The beat handlers (0x80271730 and 0x80271880)
+  play a waiting step. They then move the effect on to its next step (0x80274e50).
+- The chord manager, at +0xcc8 of the audio system, reads the index of the current chord from port 0xE of the music.
+- `JA_SE_EAT_BIND_COMBO` (0x70) plays one tone of the chord for a count of the combo. 0x802678b0 (system, sound ID,
+  count) starts it. The count picks a tone of the chord's scale (0x802730b0).
+
+**The state of a rip.** The game plays a chord effect only over a stage's music. Its keys depend on the stage, on the
+chord of the moment and on earlier keys. A rip plays one state: the state that the game plays first or most, by its
+code. WSF offers no variants. The rips of Animal Crossing: City Folk's arrangements follow the same rule (see "Tracks
+that the game silences"). The driver starts the music of stage 0, the first row of the stage table: `JA_BGM_MAIN_01`.
+The game plays stage 0 for any scene that the table leaves out. The driver then turns each of the music's tracks off
+at once with code 2 of the BGM player's track states. The tracks still run and give the effect its chords and beats.
+The driver starts each effect through 0x8027c050 with the lowest-numbered record that names it. The key memory and the
+random state (0x8050311c) are those of the game after its start-up. `JA_SE_IST_AUTO_COMP_E_PIANO_T` plays at stage
+0x2c and `JA_SE_IST_AUTO_COMP_E_PIANO` at stage 0x35. Both play the first record of `JA_SE_IST_AUTO_COMP_ALTO_SAX`.
+`JA_SE_EAT_BIND_COMBO` plays for a count of 0. A step that waits for a beat waits for the music's first beat of its
+kind.
+
+**The end of an effect.** A player stays busy (its byte at +0x18) after its last step until the game stops it. Later
+in a combo, the game moves some effects on by more steps. A rip plays the steps that start by themselves: the first
+step and the steps that wait for a beat. The effect ends when no step sounds and no step waits for a beat (the player's
+byte at +0x19). The driver writes the music's JAISound to its block (see "Donkey Kong Jungle Beat's driver"). The
+length analysis leaves out the commands of that sound's tracks.
+
+**The steps.** A record names an entry of the database. The entry's steps start with a byte that counts them. Two bytes
+follow for each step. Two more bytes end the list. The low three bits of a step's first byte give its timing. Values 0
+to 3 wait for one of the rhythm's four kinds of beat (0x80271490, 0x80271400, 0x80271370 and 0x80271520). A 4 plays the
+step at once. The high nibble names the next step. A 0 there names the step that follows. A 5 in the last pair's low
+bits ends the effect. Where the last pair names an earlier step instead, the effect repeats until the game stops it. Its
+rip plays to the ripper's limit of 600 seconds.
+
+**The keys.** An entry holds the effect's steps and a list of notes for each voice. A voice plays its list's notes in
+turn. It plays one note for each step. The first byte of a note gives the rule for its key:
+
+| Byte 0 | Key |
+|---|---|
+| 0 | the voice's last key |
+| 1 | the key of the voice that byte 1 names |
+| 2 | a tone of the current chord, picked by the eight masks of degrees from +0xd (0x80275650) |
+| 3, 4 | a tone of the current chord, by other rules (0x80275cb0 and 0x80275e30) |
+| 5 | none: the voice plays nothing |
+| 6 | byte 1 |
+| 7 | the record's byte of the key memory, or 60 for a player without one |
+
+For rules 2 to 4, 0x802764f0 raises the tone by octaves to the voice's lowest key. Byte 1 then adds octaves. A byte 1
+of 0x7f gives the highest octave within the voice's range instead. With bit 7 of byte 2 set, 0x80275f60 moves the key
+to a tone of the chord: the nearest one for a low nibble of 3, the one below for 2, and the one above otherwise. For
+`JA_SE_IST_AUTO_COMP_ALTO_SAX` and `JA_SE_IST_AUTO_COMP_TRUMPET` (0x50045), 0x80272720 then moves a key that isn't a
+tone of the chord to one. A key below the record's byte of the key memory moves down to the next tone. Any other key
+moves up. A key above the voice's range drops by octaves into it. Where byte 9 isn't 0x7f, the voice moves on to the
+note that byte 9 names instead. Byte 0xa does the same for a key below the range. Byte 0xc names the voice's next
+note: 0xfe the next note of the list (none after the last), 0xff none and 0xfd the previous note. Other values give
+the note's index.
+
+**The chord file.** The parser is at 0x80272c90. The file's words are big-endian:
+
+```
+0x0  "CITL" or "CITS"
+0x4  u32  not read
+0x8  u16  the number of progressions
+0xA  u16  the number of chords
+0xC  u32  the offset of each progression, then the offset of each chord
+```
+
+A progression holds its length in a byte, then the index of each of its chords. 0x80272dc0 (file, progression,
+position) gives a chord's index. A chord takes 16 bytes. Byte 0 holds a pitch class. The word at +0xc points to the
+chord's scale. In a CITS file, the parser turns that word from an offset into a pointer. A scale holds a byte for each
+of the 7 degrees. 0x80272e00 gives a degree's pitch class. It starts from the major scale (0, 2, 4, 5, 7, 9, 11, at
+0x80272eb0). A byte of 1 raises the class by 1. A 2 lowers it by 1, a 3 raises it by 2 and a 4 lowers it by 2. A
+degree of 0x7f isn't in the chord's scale. This document doesn't cover bytes 1 to 11 of a chord.
+
+**The chord database.** The relocation is at 0x802734b0. The database's words are big-endian:
+
+```
+0x00  u32  not read
+0x04  "CDSE"
+0x08  u32  the number of entries
+0x0C  u32  the offset of the table of records
+0x10  u32  the offset of each entry
+```
+
+An entry holds the number of its voices (u16), a range of keys (the lowest and the highest key, a byte each), the
+offset of its steps (u32) and the offset of each voice's list of notes. A list holds the number of its notes in byte 0
+and a range of keys in bytes 2 and 3. The offset of each note follows from +4. A voice's range is the overlap of the
+two ranges (0x80276460). Where one of them is 0 to 0, the voice's range is the other. The table of records holds a
+count, then 16 bytes for each record: the entry, the sound ID and two more words. The table's count can be larger than
+the file holds. The driver reads only the records that the file holds (see "Donkey Kong Jungle Beat's driver").
+
 ## Driver (game mode)
 
 Game-mode rips contain WSF's driver, `driver/driver.c`. The driver is loaded at 0x81700000, and its entry point is at
@@ -558,7 +668,8 @@ patches them in the same way. The profile follows:
 ```
 0x118  u32  time-base ticks in one frame of the game (1,012,500: 60 Hz)
 0x11C  ...  the sizes that the game's start-up gives, and the addresses and offsets of the game's functions, variables
-            and tables (34 words, in the order of driver/jungle_beat.c's Params)
+            and tables (49 words, in the order of driver/jungle_beat.c's Params)
+0x1E0  u32  written by the driver: the JAISound of the music that a chord effect plays over, or 0
 ```
 
 The driver repeats the game's start-up for sound with the game's functions: the root heap, the game's heaps, the ARAM
@@ -566,10 +677,12 @@ manager (the game keeps its "ARAM" in MEM2) and the sound files. The game's audi
 the Wii Remote speaker's manager out of it. That manager sends the speaker's sounds to the Wii Remotes. The player has
 no Wii Remotes. Then the driver loads the wave groups and starts the sound. The game's BGM player starts music. It sets
 each track of a piece to the piece's first state from tables in the game's code. A piece whose first state turns every
-track off gets its next state at once. Other sounds start in the game's sound manager. The driver calls the audio frame
-process once a frame and sleeps for a frame between calls. On an error, the low byte of the status gives the step: 1 the
-block's header, 2 the game's heaps, 4 the sound files, 5 the audio system, 6 the wave groups, 7 the start of the sound.
-Step 6 gives up after 600 frames.
+track off gets its next state at once. A chord effect starts through the game's chord code over a stage's music. The
+music's tracks are off (see "Chord effects"). The profile gives the number of records in the chord database. Other
+sounds start in the game's sound manager. The driver calls the audio frame process once a frame and sleeps for a frame
+between calls. While a chord effect plays, the rhythm's frame process runs after each audio frame. On an error, the
+low byte of the status gives the step: 1 the block's header, 2 the game's heaps, 4 the sound files, 5 the audio system,
+6 the wave groups, 7 the start of the sound. Step 6 gives up after 600 frames.
 
 ### New Play Control! Pikmin's driver (version 2)
 
@@ -746,8 +859,8 @@ folder or delete the earlier rips first.
 
 `wsfrip` refuses to write a `.wsflib` whose program would be over 1 GiB. The message gives the program's size. In
 archive mode and in game mode for JAudio, a rip of fewer sounds, such as with `--bgm` or `--only`, makes a smaller
-library. A game-mode library for NW4R SND holds the whole sound archive. For an archive over 1 GiB, `--mode archive`
-rips only the data that the sequences play.
+library. A game-mode library for NW4R SND keeps the sound archive's size (see "Game mode"). For an archive over 1 GiB,
+`--mode archive` rips only the data that the sequences play.
 
 `--only` selects the sequences whose labels match a regular expression. `--bgm` selects the music. The music is the
 sequences whose labels contain BGM, in any case, and those that play on a music player. A music player has BGM, MUSIC,
@@ -770,6 +883,16 @@ The `.wsflib` contains:
 - the driver and its parameter block with the game profile and the archive's path;
 - the disc's header (`sys/boot.bin`) and the sound archive, as `FILE` chunks;
 - a process descriptor.
+
+In the archive that the `.wsflib` holds, the `FILE` block keeps only the data that the driver loads for the ripped
+sequences. The driver reads the archive's header and its `INFO` block. For each sequence, the driver then loads the
+groups that hold the sequence and its bank: their files and their wave data. The sound library rounds the last read of
+a group's data up to a multiple of 32 bytes. The archive keeps those bytes too. The rest of the `FILE` block is zeros.
+The archive keeps its size and its layout. The game reads the same bytes in the same places as from the whole archive.
+The zeros compress well. The `.wsflib` file therefore shrinks. Its program keeps the archive's size. A group of no bytes
+would make the sound library read on to the archive's end. If the driver loads one, the archive stays whole. The format
+doesn't change. Players that play earlier game-mode rips play these too. Rips made with 1.6.1 and older hold the whole
+archive.
 
 Each `.miniwsf` selects one sequence. The sequence's length comes from playing it on WSF's model of the sound player
 (see "Archive mode") with the game's effects. A looping sequence gets two loops plus a 10-second fade. A sequence that

@@ -567,12 +567,13 @@ std::size_t MeasureSequences(std::vector<Job>& jobs, const ntdlib::rsar::SoundAr
     return silent;
 }
 
-// Writes a rip's library `lib` into `out_dir`, with the name that LibraryName gives it from `base`. Returns the name.
-// For a library that can't be written, prints the error and returns nothing.
+// Writes a rip's library `lib` into `out_dir`, with the name that `names` gives it from `base`. An earlier rip's
+// library there stays (see xsflib::rip::FileNames::LibraryIn). Returns the name. For a library that can't be written,
+// prints the error and returns nothing.
 std::optional<std::string> WriteLibrary(const fs::path& out_dir, xsflib::rip::FileNames& names, const std::string& base,
                                         const std::vector<uint8_t>& lib)
 {
-    const std::string lib_name = rip::LibraryName(out_dir, names, base, lib);
+    const std::string lib_name = names.LibraryIn(out_dir, base, lib);
     fs::create_directories(out_dir);
     if (!xsflib::rip::WriteFile(out_dir / xsflib::PathFromUtf8(lib_name), lib))
     {
@@ -739,9 +740,16 @@ int RipArchiveInGameMode(const fs::path& out_dir, xsflib::rip::FileNames& names,
         return 0;
     }
 
+    // The library holds the data of the groups that the driver loads for the sounds.
+    std::vector<uint32_t> indices;
+    for (const Job& job : jobs)
+    {
+        indices.push_back(job.index);
+    }
+
     const Tags common = xsflib::cli::RipTags(o, game_name, "wsf", "game");
     std::string error;
-    const auto lib = rip::BuildLibrary(game, profile, archive_path, archive, common, &error, effects);
+    const auto lib = rip::BuildLibrary(game, profile, archive_path, archive, indices, common, &error, effects);
     if (!lib)
     {
         std::fprintf(stderr, "error: %s\n", error.c_str());

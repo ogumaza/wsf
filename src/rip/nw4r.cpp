@@ -366,7 +366,8 @@ std::optional<std::string> PutDriverParams(uint8_t* params, const GameProfile& p
 
 std::optional<std::vector<uint8_t>> BuildLibrary(const ntdlib::disc::GameFiles& game, const GameProfile& profile,
                                                  const std::string& archive_path,
-                                                 const ntdlib::rsar::SoundArchive& archive, const Tags& tags,
+                                                 const ntdlib::rsar::SoundArchive& archive,
+                                                 const std::vector<uint32_t>& indices, const Tags& tags,
                                                  std::string* error, const nw4r::ArchiveEffects& effects)
 {
     const std::optional<ntdlib::Dol> dol = ntdlib::Dol::Parse(game.dol);
@@ -379,15 +380,16 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const ntdlib::disc::GameFiles& 
         return LibraryError(error, "the sound archive's path is longer than the driver supports");
     }
 
-    // The driver, with its parameters. A .miniwsf fills in the sound.
+    // The driver, with its parameters. A .miniwsf fills in the sound. In the archive, only the groups that the driver
+    // loads keep their data.
     GameLibrary library{.driver = {std::begin(kDriverBlob), std::end(kDriverBlob)},
                         .base = kDriverBase,
                         .entry = kDriverEntry,
                         .main = profile.main,
                         .ios_version = profile.ios_version,
-                        .paths = {archive_path},
+                        .files = {{archive_path, KeepLoadedGroups(archive, indices)}},
                         .too_large_advice =
-                            "A game-mode library holds the whole sound archive. Add --mode archive "
+                            "A game-mode library keeps the whole sound archive's size. Add --mode archive "
                             "to rip only the data that the sequences play."};
     if (const std::optional<std::string> problem =
             PutDriverParams(library.driver.data() + (kDriverParams - kDriverBase), profile, archive_path, archive,
@@ -512,18 +514,24 @@ constexpr std::size_t kFileAlignment = 0x20;
 // The largest archive whose offsets fit RSAR's 32-bit fields.
 constexpr std::size_t kMaxArchiveSize = 0xFFFFFFFF;
 
+// The bytes at the archive's start that DvdSoundArchive::LoadFileHeader reads: the header's 0x28 bytes, rounded up to a
+// multiple of 32.
+constexpr uint64_t kHeaderRead = 0x40;
+
 // Pads `data` with zeros to a multiple of kFileAlignment.
 void PadToFileAlignment(std::vector<uint8_t>& data)
 {
     data.resize((data.size() + kFileAlignment - 1) / kFileAlignment * kFileAlignment, 0);
 }
 
-// The fields of an RSAR that KeepSequenceData reads and rewrites, by their offsets.
+// The fields of an RSAR that KeepSequenceData and KeepLoadedGroups read, by their offsets. KeepSequenceData rewrites
+// some of them.
 struct RsarLayout
 {
-    // The header: the archive's size, the INFO block's offset, and the FILE block's offset and size.
+    // The header: the archive's size, the INFO block's offset and size, and the FILE block's offset and size.
     static constexpr std::size_t kArchiveSize = 0x08;
     static constexpr std::size_t kInfoBlock = 0x18;
+    static constexpr std::size_t kInfoBlockSize = 0x1c;
     static constexpr std::size_t kFileBlock = 0x20;
     static constexpr std::size_t kFileBlockSize = 0x24;
 
@@ -840,6 +848,75 @@ std::vector<uint8_t> KeepSequenceData(const ntdlib::rsar::SoundArchive& archive,
             throw xsflib::FormatError("the files that the sequences play can't be cut out of the archive");
         }
     }
+
+    return copy;
+}
+
+std::vector<uint8_t> KeepLoadedGroups(const ntdlib::rsar::SoundArchive& archive, const std::vector<uint32_t>& indices)
+{
+    // The groups that the driver loads for the sequences.
+    const std::vector<ntdlib::rsar::SoundArchive::Group>& groups = archive.Groups();
+    std::vector<bool> loaded(groups.size());
+    for (const uint32_t index : indices)
+    {
+        if (const std::optional<SoundData> data = FindSoundData(archive, index))
+        {
+            loaded[data->group] = true;
+            loaded[data->bank_group.value_or(data->group)] = true;
+        }
+    }
+
+    // The ranges that the driver reads: the header's first bytes, the INFO block, then each loaded group's files and
+    // wave data. The loader skips wave data of no bytes.
+    const std::span<const uint8_t> all = archive.Bytes();
+    const xsflib::Reader r(all, true);
+    const uint64_t info = r.U32(RsarLayout::kInfoBlock);
+    std::vector<std::pair<uint64_t, uint64_t>> read = {{0, kHeaderRead},
+                                                       {info, info + r.U32(RsarLayout::kInfoBlockSize)}};
+    for (std::size_t g = 0; g < groups.size(); g++)
+    {
+        if (!loaded[g])
+        {
+            continue;
+        }
+
+        // A stream of a group of no bytes reads on to the archive's end (DvdSoundArchive's DvdFileStream). The copy
+        // then keeps the whole archive.
+        if (groups[g].size == 0)
+        {
+            return {all.begin(), all.end()};
+        }
+
+        read.emplace_back(groups[g].offset, uint64_t{groups[g].offset} + groups[g].size);
+        if (groups[g].wave_data_size != 0)
+        {
+            read.emplace_back(groups[g].wave_data_offset,
+                              uint64_t{groups[g].wave_data_offset} + groups[g].wave_data_size);
+        }
+    }
+
+    // The copy keeps those ranges, rounded out to multiples of 32 bytes. The FILE block's other data becomes zeros.
+    std::vector<uint8_t> copy(all.begin(), all.end());
+    const uint64_t file_block = r.U32(RsarLayout::kFileBlock);
+    const uint64_t end = std::min<uint64_t>(file_block + r.U32(RsarLayout::kFileBlockSize), copy.size());
+    uint64_t at = file_block + RsarLayout::kBlockHeader;
+    const auto zero_until = [&copy, &at, end](uint64_t stop)
+    {
+        if (at < std::min(stop, end))
+        {
+            std::fill(copy.begin() + static_cast<std::ptrdiff_t>(at),
+                      copy.begin() + static_cast<std::ptrdiff_t>(std::min(stop, end)), uint8_t{0});
+        }
+    };
+
+    std::sort(read.begin(), read.end());
+    for (const auto& [start, stop] : read)
+    {
+        zero_until(start / kFileAlignment * kFileAlignment);
+        at = std::max(at, (stop + kFileAlignment - 1) / kFileAlignment * kFileAlignment);
+    }
+
+    zero_until(end);
 
     return copy;
 }

@@ -6,12 +6,12 @@
 // other, on a track that another track opens again, on a counted loop that outlasts the limit, and on a sequence in an
 // arrangement. TestSilence, TestTracksThatWaitForEver, TestSwells and TestInnerLoops cover sequences that sound late or
 // never, a track 0 that never continues, a track that only swells a note of length 0 and a loop that holds an inner
-// loop. TestLibraryNames checks the names of libraries in a folder that holds earlier rips (rip::LibraryName). TestJac
-// reads a Jac game's bank file and sequence index, made up in the formats of Pikmin's files. It also checks a piece
-// that plays in parts. TestPikmin2Sounds lists Pikmin 2's sounds from files made up in the game's formats.
-// TestKeepSequenceData cuts an archive of several groups down to the data that its sequences play. TestProgramTooLarge
-// checks the limit on the size of a library's program. TestPieces finds the pieces whose channels are separate
-// sequences, gives a piece its timing and rips it.
+// loop. TestJac reads a Jac game's bank file and sequence index, made up in the formats of Pikmin's files. It also
+// checks a piece that plays in parts. TestPikmin2Sounds lists Pikmin 2's sounds from files made up in the game's
+// formats. TestKeepSequenceData cuts an archive of several groups down to the data that its sequences play.
+// TestKeepLoadedGroups zeros the groups that game mode's driver doesn't load. TestProgramTooLarge checks the limit on
+// the size of a library's program. TestPieces finds the pieces whose channels are separate sequences, gives a piece its
+// timing and rips it.
 
 #include "rip/rip.h"
 
@@ -19,7 +19,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <filesystem>
 #include <map>
 #include <optional>
 #include <string>
@@ -34,11 +33,8 @@
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
 #include "xsflib/psf/psf.h"
-#include "xsflib/rip/file_names.h"
-#include "xsflib/rip/tool.h"
 #include "xsflib/testing/check.h"
 #include "xsflib/testing/sets.h"
-#include "xsflib/testing/temp_folder.h"
 
 #include "nw4r/arrangement.h"
 #include "nw4r/effect_setup.h"
@@ -53,8 +49,6 @@ using ntdlib::testing::rsar_files::MakeArchive;
 using ntdlib::testing::rsar_files::MakeSequence;
 using ntdlib::testing::rsar_files::MakeSoundTable;
 using ntdlib::testing::rsar_files::TableSound;
-
-namespace fs = std::filesystem;
 
 namespace
 {
@@ -491,49 +485,6 @@ void TestPieces()
           "a mini of a piece plays its sounds, from a library of version 2");
     Check(rip::BuildArchiveMini(19, "lib", {}) == rip::BuildArchiveMini(std::vector<uint32_t>{19}, "lib", {}),
           "a mini of one sound is the same either way");
-}
-
-// The name that rip::LibraryName gives `library` in `folder`, from a registry that holds no names yet. Each run of the
-// ripper starts with such a registry.
-std::string NameInFolder(const fs::path& folder, const std::string& base, const std::vector<uint8_t>& library)
-{
-    xsflib::rip::FileNames names(".wsflib", ".miniwsf");
-    return rip::LibraryName(folder, names, base, library);
-}
-
-// Tests the names of libraries in a folder that holds earlier rips (rip::LibraryName).
-void TestLibraryNames()
-{
-    const xsflib::testing::TempFolder temp("wsf_rip_test");
-    const fs::path& folder = temp.Path();
-
-    // The earlier rips: two libraries of 3 bytes, one of over 1 MiB and a folder with a library's name. FileHolds
-    // compares the large one in blocks.
-    std::vector<uint8_t> large((std::size_t{1} << 20) + 1, 7);
-    const bool written = xsflib::rip::WriteFile(folder / "Game.wsflib", {1, 2, 3}) &&
-                         xsflib::rip::WriteFile(folder / "Game_2.wsflib", {1, 2, 4}) &&
-                         xsflib::rip::WriteFile(folder / "Large.wsflib", large);
-    fs::create_directories(folder / "Folder.wsflib");
-
-    const std::string free_name = NameInFolder(folder, "New", {1});
-    const std::string same = NameInFolder(folder, "Game", {1, 2, 3});
-    const std::string same_as_second = NameInFolder(folder, "Game", {1, 2, 4});
-    const std::string other = NameInFolder(folder, "Game", {1, 2, 5});
-    const std::string shorter = NameInFolder(folder, "Game", {1, 2});
-    const std::string large_same = NameInFolder(folder, "Large", large);
-    large.back() = 8;
-    const std::string large_other = NameInFolder(folder, "Large", large);
-    const std::string over_folder = NameInFolder(folder, "Folder", {1});
-
-    Check(written, "the earlier rips are written");
-    Check(free_name == "New.wsflib", "a free name is taken");
-    Check(same == "Game.wsflib", "a file with the same bytes is replaced");
-    Check(same_as_second == "Game_2.wsflib", "the first name whose file holds the same bytes is taken");
-    Check(other == "Game_3.wsflib", "files of the same size with other bytes are passed over");
-    Check(shorter == "Game_3.wsflib", "longer files are passed over");
-    Check(large_same == "Large.wsflib", "a file over 1 MiB with the same bytes is replaced");
-    Check(large_other == "Large_2.wsflib", "a file over 1 MiB that differs in its last byte is passed over");
-    Check(over_folder == "Folder_2.wsflib", "a folder with the name is passed over");
 }
 
 // Appends `value` to `data`, big-endian.
@@ -1085,6 +1036,100 @@ void TestKeepSequenceData()
           "a copy that would read differently from the archive is refused");
 }
 
+// Tests the copy of an archive for a game-mode library (rip::KeepLoadedGroups).
+void TestKeepLoadedGroups()
+{
+    using ntdlib::rsar::SoundArchive;
+    using ntdlib::testing::rsar_files::MakeNewBank;
+    using ntdlib::testing::rsar_files::MakeOldBank;
+    using ntdlib::testing::rsar_files::MakeOldWaveData;
+    using ntdlib::testing::rsar_files::MakeRwar;
+
+    // Sound 0 plays file 0 with bank 0 (file 2), both in group 0. Sound 1 plays file 1 with bank 1 (file 3), both in
+    // group 1. Sound 2 plays file 0 with bank 2 (file 3). Only the last group holds both of its files, and the driver
+    // can't load the last group.
+    const std::vector<std::pair<Bytes, Bytes>> files = {
+        {MakeSequence({0xFF}), {}},
+        {MakeSequence({60, 127, 24, 0xFF}), {}},
+        {MakeNewBank(), MakeRwar()},
+        {MakeOldBank(), MakeOldWaveData()},
+    };
+    const GroupedArchive grouped = MakeGroupedArchive(
+        files, {{true, {0, 2}}, {true, {1, 3}}, {true, {0, 1, 2, 3}}},
+        {{{0, 0}, {2, 0}}, {{1, 0}, {2, 1}}, {{0, 1}, {2, 2}}, {{1, 1}, {2, 3}}}, {0, 1, 0}, {2, 3, 3});
+    const SoundArchive archive = SoundArchive::Load(grouped.bytes, nw4r::kRsarOptions);
+
+    // Whether `copy` holds the archive's bytes up to its files and in the files and wave data of `groups`, and zeros in
+    // the FILE block's other data.
+    const auto keeps = [&grouped, &archive](const Bytes& copy, const std::vector<uint32_t>& groups)
+    {
+        std::vector<bool> kept(grouped.bytes.size());
+        const auto keep = [&kept](std::size_t at, std::size_t size)
+        {
+            std::fill_n(kept.begin() + static_cast<std::ptrdiff_t>(at), size, true);
+        };
+
+        keep(0, grouped.file_block + 8);
+        for (const uint32_t g : groups)
+        {
+            keep(archive.Groups()[g].offset, archive.Groups()[g].size);
+            keep(archive.Groups()[g].wave_data_offset, archive.Groups()[g].wave_data_size);
+        }
+
+        bool same = copy.size() == grouped.bytes.size();
+        for (std::size_t i = 0; same && i < copy.size(); i++)
+        {
+            same = copy[i] == (kept[i] ? grouped.bytes[i] : 0);
+        }
+
+        return same;
+    };
+
+    const Bytes one = rip::KeepLoadedGroups(archive, {0});
+    const Bytes two_groups = rip::KeepLoadedGroups(archive, {2});
+    const Bytes two_sounds = rip::KeepLoadedGroups(archive, {0, 1});
+    const Bytes none = rip::KeepLoadedGroups(archive, {});
+    const SoundArchive cut = SoundArchive::Load(one, nw4r::kRsarOptions);
+
+    Check(keeps(one, {0}), "a copy for a sound in one group keeps that group's files and wave data, and nothing else");
+    Check(SameFile(archive.File(0), cut.File(0)) && SameFile(archive.File(2), cut.File(2)),
+          "the sequence and its bank read the same from the copy");
+    Check(keeps(two_groups, {0, 1}), "a sound whose bank lies in a second group keeps both groups");
+    Check(keeps(two_sounds, {0, 1}), "two sounds keep the groups of both");
+    Check(keeps(none, {}), "a copy for no sound keeps only the archive's tables");
+
+    // Group 0's files start 4 bytes after a multiple of 32 and end 4 bytes before one. The stream reads on to the
+    // multiple, and the disc reads from a multiple of 4. A group of no bytes would read on to the archive's end. Bytes
+    // after the FILE block aren't the groups' data.
+    const std::size_t entry = grouped.groups[0];
+    const uint32_t offset = xsflib::LoadBe32(&grouped.bytes[entry + 0x10]);
+    const uint32_t size = xsflib::LoadBe32(&grouped.bytes[entry + 0x14]);
+    const auto start = static_cast<std::ptrdiff_t>(offset);
+    const auto end = static_cast<std::ptrdiff_t>(offset + size);
+    Bytes inner = grouped.bytes;
+    xsflib::StoreBe32(&inner[entry + 0x10], offset + 4);
+    xsflib::StoreBe32(&inner[entry + 0x14], size - 8);
+    std::fill_n(inner.begin() + start, 4, uint8_t{0xAA});
+    std::fill_n(inner.begin() + end - 4, 4, uint8_t{0xAA});
+    Bytes empty_group = grouped.bytes;
+    xsflib::StoreBe32(&empty_group[entry + 0x14], 0);
+    Bytes trailing = grouped.bytes;
+    trailing.insert(trailing.end(), 32, uint8_t{0xAA});
+
+    const Bytes rounded = rip::KeepLoadedGroups(SoundArchive::Load(inner, nw4r::kRsarOptions), {0});
+    const Bytes whole = rip::KeepLoadedGroups(SoundArchive::Load(empty_group, nw4r::kRsarOptions), {0});
+    const Bytes after = rip::KeepLoadedGroups(SoundArchive::Load(trailing, nw4r::kRsarOptions), {0});
+
+    const auto marked = [](Bytes::const_iterator from, std::size_t count)
+    {
+        return std::all_of(from, from + static_cast<std::ptrdiff_t>(count), [](uint8_t b) { return b == 0xAA; });
+    };
+    Check(marked(rounded.begin() + start, 4) && marked(rounded.begin() + end - 4, 4),
+          "a group's bytes out to multiples of 32 are kept");
+    Check(whole == empty_group, "a copy that loads a group of no bytes keeps the whole archive");
+    Check(after.size() == trailing.size() && marked(after.end() - 32, 32), "the bytes after the FILE block are kept");
+}
+
 // Tests the limit on a library's program (rip::ProgramTooLarge).
 void TestProgramTooLarge()
 {
@@ -1111,10 +1156,10 @@ int main()
         TestArrangement();
         TestIsMusic();
         TestPieces();
-        TestLibraryNames();
         TestJac();
         TestPikmin2Sounds();
         TestKeepSequenceData();
+        TestKeepLoadedGroups();
         TestProgramTooLarge();
     };
     return xsflib::testing::RunTest("rip", tests);

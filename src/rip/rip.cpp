@@ -5,24 +5,16 @@
 
 #include "rip/rip.h"
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <ios>
 #include <optional>
-#include <span>
 #include <string>
-#include <system_error>
 #include <vector>
 
 #include "ntdlib/disc/containers.h"
 #include "ntdlib/disc/image.h"
 #include "ntdlib/dol.h"
 #include "xsflib/bytes.h"
-#include "xsflib/files.h"
 #include "xsflib/psf/psf.h"
 
 #include "rip/sound_libraries.h"
@@ -80,6 +72,11 @@ std::optional<std::vector<uint8_t>> BuildGameLibrary(const ntdlib::disc::GameFil
         program.AddFile(path, bytes);
     }
 
+    for (const auto& [path, data] : library.files)
+    {
+        program.AddFile(path, data);
+    }
+
     if (const std::optional<std::string> too_large = ProgramTooLarge(program.Data().size()))
     {
         return LibraryError(error, *too_large + " " + library.too_large_advice);
@@ -110,50 +107,6 @@ std::optional<std::string> ProgramTooLarge(std::size_t size)
 
     return "the library would hold " + mebibytes(size) + ". A player loads at most " +
            mebibytes(xsflib::psf::kMaxProgramSize) + ".";
-}
-
-namespace
-{
-
-// True if the file at `path` holds exactly `data`. The file is compared in blocks of 1 MiB. A library can be hundreds
-// of megabytes.
-bool FileHolds(const std::filesystem::path& path, std::span<const uint8_t> data)
-{
-    std::error_code ec;
-    if (std::filesystem::file_size(path, ec) != data.size() || ec)
-    {
-        return false;
-    }
-
-    std::ifstream file(path, std::ios::binary);
-    std::vector<char> block(std::size_t{1} << 20);
-    for (std::size_t at = 0; at < data.size(); at += block.size())
-    {
-        const std::size_t size = std::min(block.size(), data.size() - at);
-        if (!file.read(block.data(), static_cast<std::streamsize>(size)) ||
-            std::memcmp(block.data(), data.data() + at, size) != 0)
-        {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-} // namespace
-
-std::string LibraryName(const std::filesystem::path& folder, xsflib::rip::FileNames& names, const std::string& base,
-                        std::span<const uint8_t> library)
-{
-    std::string name = names.Library(base);
-    std::error_code ec;
-    while (std::filesystem::exists(folder / xsflib::PathFromUtf8(name), ec) &&
-           !FileHolds(folder / xsflib::PathFromUtf8(name), library))
-    {
-        name = names.Library(base);
-    }
-
-    return name;
 }
 
 } // namespace wsf::rip

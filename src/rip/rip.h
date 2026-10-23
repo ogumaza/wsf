@@ -10,7 +10,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
 #include <memory>
 #include <optional>
 #include <span>
@@ -23,7 +22,6 @@
 #include "ntdlib/jaudio/wave_system.h"
 #include "ntdlib/rsar/formats.h"
 #include "ntdlib/sound_build.h"
-#include "xsflib/rip/file_names.h"
 #include "xsflib/rip/length.h"
 
 #include "nw4r/arrangement.h"
@@ -110,15 +108,27 @@ bool HasEffectProfile(const std::string& dol_sha1);
 nw4r::ArchiveEffects FindEffects(const std::string& dol_sha1, const std::string& archive_path,
                                  const ntdlib::rsar::SoundArchive& archive);
 
-// Game mode: builds the .wsflib for the sound archive at `archive_path` on the disc (no leading '/'). The library holds
-// the game's code with main patched to branch to the driver, the driver, the partition's header and the archive. The
-// driver sets up the effects of `effects` that a sound gets when no effect lists it, with the game's functions. Returns
-// nullopt and sets `error` if main.dol isn't a DOL, the archive's path is longer than the driver supports, the driver's
-// block doesn't have the layout that the ripper expects, the driver can't set up all of the effects or silence the
-// game's tracks, the archive can't be read, or the library is larger than a player loads.
+// Game mode: a copy of the archive for a library that plays the sequences at `indices`. The driver reads the archive's
+// header and its INFO block (DvdSoundArchive::LoadFileHeader and LoadHeader). For each sequence, it then loads the
+// groups that FindSoundData gives: their files and their wave data (SoundArchiveLoader::LoadGroup). NW4R SND's stream
+// rounds the last read of a group's data up to a multiple of 32 bytes. The copy keeps each of those ranges, rounded out
+// to multiples of 32 bytes. The rest of the FILE block's data is zeros. The copy keeps the archive's size and layout.
+// The game then reads the same bytes in the same places. The stream of a group of no bytes would read the rest of the
+// archive. If the driver loads such a group, the copy keeps the whole archive.
+std::vector<uint8_t> KeepLoadedGroups(const ntdlib::rsar::SoundArchive& archive, const std::vector<uint32_t>& indices);
+
+// Game mode: builds the .wsflib that plays the sequences at `indices` of the sound archive at `archive_path` on the
+// disc (no leading '/'). The library holds the game's code with main patched to branch to the driver, the driver, the
+// partition's header and the archive. In the archive, only the groups that the driver loads for those sequences keep
+// their data. The rest of the FILE block is zeros (KeepLoadedGroups). The driver sets up the effects of `effects` that
+// a sound gets when no effect lists it, with the game's functions. Returns nullopt and sets `error` if main.dol isn't a
+// DOL, the archive's path is longer than the driver supports, the driver's block doesn't have the layout that the
+// ripper expects, the driver can't set up all of the effects or silence the game's tracks, or the library is larger
+// than a player loads.
 std::optional<std::vector<uint8_t>> BuildLibrary(const ntdlib::disc::GameFiles& game, const GameProfile& profile,
                                                  const std::string& archive_path,
-                                                 const ntdlib::rsar::SoundArchive& archive, const Tags& tags,
+                                                 const ntdlib::rsar::SoundArchive& archive,
+                                                 const std::vector<uint32_t>& indices, const Tags& tags,
                                                  std::string* error = nullptr,
                                                  const nw4r::ArchiveEffects& effects = {});
 
@@ -256,6 +266,13 @@ struct JAudioProfile
 
     // Another driver takes these words as its parameters, in the order of its block after the wave list.
     std::vector<uint32_t> params = {};
+
+    // A driver that plays a sound beside the ripped one writes that sound's JAISound to the word of `params` at index
+    // `background_sound`. The word holds 0 while the driver plays no such sound. The length analysis leaves out that
+    // sound's tracks. -1 for a driver without such a word. A JASTrack holds its parent at `track_parent_offset`. New
+    // Play Control! Donkey Kong Jungle Beat's chord effects play over the game's music (see driver/jungle_beat.c).
+    int32_t background_sound = -1;
+    uint32_t track_parent_offset = 0;
 
     // The sound files that the driver loads besides the start-up archive and the wave archives, by their paths on the
     // disc. A rip's library holds them. With none listed, it holds the archives that FindJAudioFiles finds.
@@ -421,13 +438,6 @@ std::vector<uint8_t> KeepSequenceData(const ntdlib::rsar::SoundArchive& archive,
 // A player loads a program of 1 GiB at most (xsflib's kMaxProgramSize). For a larger program of `size` bytes, returns
 // the rip's message. The message gives both sizes. Returns nothing for a program that a player loads.
 std::optional<std::string> ProgramTooLarge(std::size_t size);
-
-// The file name for `library` in `folder`, from `names` (see xsflib::rip::FileNames::Library). An earlier rip into the
-// folder may have written a library of that name for other sounds or in the other mode. Replacing it would leave that
-// rip's minis without their data. A name is therefore used only when nothing in the folder has it, or when its file
-// reads back as the same bytes. Otherwise the next name is tried: "<base>_2.wsflib" and so on.
-std::string LibraryName(const std::filesystem::path& folder, xsflib::rip::FileNames& names, const std::string& base,
-                        std::span<const uint8_t> library);
 
 // Lists the data that sequence `index` requires but the archive doesn't hold. The sequence or bank may be in another
 // file, or cut off by truncation. Empty when nothing is missing.

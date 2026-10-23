@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ntdlib/disc/game.h"
@@ -34,7 +35,8 @@ inline constexpr uint32_t kFrameTicks = ntdlib::flipper::kWiiBusClockHz / 4 / 60
 // What differs between the two kinds of game-mode library, for the NW4R driver (BuildLibrary) and for JAudio's drivers
 // (BuildJAudioLibrary). The driver's image has its parameters filled in. It loads at `base`, and the game's `main`
 // branches to its `entry`. For a game without a TMD, the IOS is the one that the game's profile gives. The library
-// holds the disc's files at `paths`. A library too large for a player gets an error that ends with `too_large_advice`.
+// holds the disc's files at `paths`. Then it holds `files`: each is a path on the disc and the bytes that the library
+// holds for that file. A library too large for a player gets an error that ends with `too_large_advice`.
 struct GameLibrary
 {
     std::vector<uint8_t> driver;
@@ -43,6 +45,7 @@ struct GameLibrary
     uint32_t main;
     uint32_t ios_version;
     std::vector<std::string> paths;
+    std::vector<std::pair<std::string, std::vector<uint8_t>>> files;
     std::string too_large_advice;
 };
 

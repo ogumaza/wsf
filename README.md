@@ -34,7 +34,9 @@ rips of Twilight Princess and Link's Crossbow Training have the games' echo. The
 newer than WSF 1.1.0. WSF 1.1.0 refuses them. They take more processing to play than other games' rips. A slow computer
 may not play them in real time. The two Galaxy games stream most of their music. `wsfrip` rips the pieces that the games
 play from sequences, such as the jingles and the music of the power-ups. Game mode also plays New Play Control! Donkey
-Kong Jungle Beat (USA), another JAudio2 game. Its rips require WSF 1.4.0 or later. Archive mode doesn't play JAudio2.
+Kong Jungle Beat (USA), another JAudio2 game. Its rips require WSF 1.4.0 or later. The game plays many of its effects in
+the chords of the music. A rip plays each such effect over a stage's music as the game does. The music stays silent.
+Archive mode doesn't play JAudio2.
 `wsfrip` therefore can't rip another JAudio2 game or another release of these games. It stops with an error that says
 so.
 

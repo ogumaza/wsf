@@ -19,9 +19,11 @@
  *      manager plays the speaker's sounds through WPAD, and WSF's machine has no Wii Remotes. The speaker's sounds
  *      come from another file than the TV's;
  *   6. the wave groups that the .miniwsf lists, one group of a wave bank each. The game loads its waves per stage;
- *   7. the sound, by its JAudio sound ID. Music starts in the game's BGM player, the way the game starts it. The sound
- *      manager starts other sounds;
- *   8. the audio system's frame process, once a frame, forever.
+ *   7. the sound, by its JAudio sound ID. Music starts in the game's BGM player, the way the game starts it. A chord
+ *      effect plays over a stage's music with the music's tracks off (see play_over_music). The sound manager starts
+ *      other sounds;
+ *   8. the audio system's frame process, once a frame, forever. While a chord effect plays, the rhythm's frame process
+ *      follows it.
  * A frame of the game is a sleep of the game's frame time. WSF's machine raises no video interrupts. A step that fails
  * stops the driver with its number in the status word. Step 1 is the check of the block's header.
  * `driver_params.status` reports the driver's progress to the player (see docs/wsf.md).
@@ -63,6 +65,28 @@ typedef int s32;
 
 /* The tracks of a BGM that its states set. */
 #define MUSIC_TRACKS 16u
+
+/* The chord effects. The chord database's table of records holds their count, then the records. A record holds its
+   entry, then its effect's sound ID. The audio system's chord effects hold the database at +8. The database holds the
+   table at +0xc. The chord effects hold their players from +0xc. A player's byte at +0x18 is set from its start until
+   the game stops it. Its byte at +0x19 is set while a step of its effect waits for a beat. Its sound object at +0x34
+   plays the steps. The object holds its JAISoundHandles at +0 and their number at +4. */
+#define NO_RECORD 0xffffffffu
+#define RECORD_SIZE 16u
+#define CHORD_DATABASE 0x8u
+#define RECORD_TABLE 0xcu
+#define CHORD_PLAYER_LIST 0xcu
+#define CHORD_PLAYERS 64u
+#define PLAYER_BUSY 0x18u
+#define PLAYER_WAITING 0x19u
+#define PLAYER_SOUND_OBJECT 0x34u
+
+/* The effects that some stages play in place of another effect (Params.swaps). */
+#define SWAPS 2u
+
+/* The stage object holds the stage's number at +4 and its row of the stage table at +0xc. */
+#define STAGE_NUMBER 0x4u
+#define STAGE_ROW 0xcu
 
 struct Params
 {
@@ -114,6 +138,22 @@ struct Params
                                 states, -1 for none. The second table's index is at +4 */
     u32 music_states;        /* the second table: 8 states of 8 bytes per index */
     u32 set_music_state;     /* void (player, int state, bool at_once): applies a state of the second table */
+    /* the game profile: the chord effects. A record of the chord database starts an effect whose keys follow the
+       chords of the music that plays */
+    u32 chord_offset;       /* the audio system's pointer to its chord effects */
+    u32 chord_records;      /* the number of the database's records. Its count is larger */
+    u32 start_chord_effect; /* bool (u32 record, void* object): starts a record's effect at full volume */
+    u32 stage_offset;       /* the audio system's pointer to its stage object */
+    u32 start_stage_music;  /* void (stage): starts the music of the stage's row and lets chord effects start */
+    u32 set_track_states;   /* void (player, const u8 codes[8], s32 time): a code for each track, as in a state */
+    u32 rhythm_offset;      /* the audio system's rhythm. It follows the music's beats by the time base */
+    u32 rhythm_frame;       /* void (rhythm): the rhythm's frame process. An object of the game's scenes runs it */
+    u32 swapped_effect;     /* an effect whose records some stages play with another effect */
+    u32 swaps[SWAPS * 2];   /* each such other effect, then its stage */
+    u32 combo_effect;       /* the effect that plays a tone of the chord for a combo count */
+    u32 start_with_count;   /* JAISoundHandle* (system, JAISoundID*, s32 count): starts a sound with a count */
+    /* written by the driver */
+    u32 music; /* the JAISound of the music that a chord effect plays over, or 0 */
 };
 
 __attribute__((section(".params"), used)) volatile struct Params driver_params = {
@@ -132,6 +172,11 @@ typedef u32 (*fn9)(u32, u32, u32, u32, u32, u32, u32, u32, u32);
 static u32 word(u32 address)
 {
     return *(volatile u32*)address;
+}
+
+static u32 byte(u32 address)
+{
+    return *(volatile unsigned char*)address;
 }
 
 static void wait_frame(void)
@@ -226,6 +271,166 @@ static u32 mount(u32 path, u32 heap)
     return ((fn4)driver_params.mount)(path, MOUNT_IN_MEMORY, heap, FROM_HEAD);
 }
 
+/* The first record of the chord database that starts effect `id`, or NO_RECORD. */
+static u32 chord_record(u32 chords, u32 id)
+{
+    volatile struct Params* p = &driver_params;
+    const u32 table = word(word(chords + CHORD_DATABASE) + RECORD_TABLE);
+    const u32 count = word(table) < p->chord_records ? word(table) : p->chord_records;
+    for (u32 record = 0; record < count; record++)
+    {
+        if (word(table + 4 + record * RECORD_SIZE + 4) == id)
+        {
+            return record;
+        }
+    }
+    return NO_RECORD;
+}
+
+/* The first busy player of the chord effects, or 0. */
+static u32 busy_player(u32 chords)
+{
+    const u32 players = word(chords + CHORD_PLAYER_LIST);
+    for (u32 i = 0; i < CHORD_PLAYERS; i++)
+    {
+        const u32 player = word(players + i * 4);
+        if (player && (byte(player + PLAYER_BUSY) || byte(player + PLAYER_WAITING)))
+        {
+            return player;
+        }
+    }
+    return 0;
+}
+
+/* The JAISound of the step that a chord effect's `player` plays, or 0 between steps. */
+static u32 step_sound(u32 player)
+{
+    const u32 object = word(player + PLAYER_SOUND_OBJECT);
+    const u32 handles = word(object);
+    for (u32 i = 0; i < word(object + 4); i++)
+    {
+        const u32 sound = word(handles + i * 4);
+        if (sound)
+        {
+            return sound;
+        }
+    }
+    return 0;
+}
+
+/* One frame of the game with music, and the music's JAISound copied to `music`. The rhythm gives the chord effects
+   the music's beats. The game's scenes run the rhythm's frame process. The driver runs it after the audio system's. */
+static void music_frame(u32 system, u32 music_player)
+{
+    volatile struct Params* p = &driver_params;
+    ((fn1)p->audio_frame)(system);
+    ((fn1)p->rhythm_frame)(system + p->rhythm_offset);
+    p->music = word(music_player + 4);
+    wait_frame();
+}
+
+/* Each track's code 2, for set_track_states: off at once. The BGM player sets the track's volume to 0 and mutes it.
+   The track still runs. */
+static const unsigned char tracks_off[MUSIC_TRACKS / 2] = {0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22};
+
+/* Plays chord effect `id`. Its keys follow the chords of the music that plays. The stage's code starts the music of
+   stage `stage_number`'s row. The music's tracks then go off. The music runs on in silence and gives the effect its
+   chords and beats. The game plays the effect only while such music plays.
+
+   A record of the chord database starts a chord effect: `record`, or NO_RECORD for the combo effect. The chord
+   effects' code works out the keys of each step, writes them to ports of the step's sound and starts the sound. A step
+   can wait for a beat of the music. The driver reports each step's JAISound, and the last one while the next step
+   waits. The effect ends when no step sounds or waits. Later in a combo, the game moves some effects on by more steps.
+   The player stays busy for those. The status turns 1 when the first step sounds. The combo effect starts with a
+   count of 0. The game's code then works out its key from the chord. */
+__attribute__((noreturn)) static void play_over_music(u32 system, u32 id, u32 record, u32 stage_number)
+{
+    volatile struct Params* p = &driver_params;
+    const u32 stage = word(system + p->stage_offset);
+    if (stage_number)
+    {
+        *(volatile u32*)(stage + STAGE_NUMBER) = stage_number;
+        *(volatile u32*)(stage + STAGE_ROW) = stage_number;
+    }
+    ((fn1)p->start_stage_music)(stage);
+    const u32 music_player = system + p->music_player_offset;
+    p->music = word(music_player + 4);
+    if (!p->music)
+    {
+        fail(7);
+    }
+    ((fn3)p->set_track_states)(music_player, (u32)tracks_off, (u32)-1);
+
+    /* The effect. The chord effects' code refuses an effect until the music's chords are in. */
+    const u32 chords = word(system + p->chord_offset);
+    u32 player = 0;
+    u32 handle = 0;
+    for (u32 frames = 0;; frames++)
+    {
+        if (record != NO_RECORD)
+        {
+            ((fn2)p->start_chord_effect)(record, 0);
+            player = busy_player(chords);
+            if (player)
+            {
+                break;
+            }
+        }
+        else
+        {
+            handle = ((fn3)p->start_with_count)(system, (u32)&id, 0);
+            if (handle && word(handle))
+            {
+                break;
+            }
+        }
+        if (frames > SETUP_FRAMES)
+        {
+            fail(7);
+        }
+        music_frame(system, music_player);
+    }
+
+    /* The first step's sound. */
+    u32 sound = 0;
+    for (u32 frames = 0; !(sound = player ? step_sound(player) : word(handle)); frames++)
+    {
+        if (frames > SETUP_FRAMES)
+        {
+            fail(7);
+        }
+        music_frame(system, music_player);
+    }
+    p->sound = sound;
+    p->status = STATUS_PLAYING;
+
+    for (;;)
+    {
+        music_frame(system, music_player);
+        if (player)
+        {
+            const u32 now = step_sound(player);
+            if (now)
+            {
+                sound = now;
+            }
+            else if (!byte(player + PLAYER_WAITING))
+            {
+                sound = 0;
+            }
+        }
+        else
+        {
+            sound = word(handle);
+        }
+        p->sound = sound;
+        if (p->status == STATUS_PLAYING && sound == 0)
+        {
+            p->status = STATUS_FINISHED;
+        }
+    }
+}
+
 __attribute__((noreturn)) void driver_main(void)
 {
     volatile struct Params* p = &driver_params;
@@ -315,8 +520,26 @@ __attribute__((noreturn)) void driver_main(void)
        The game turns them on later, or never. A BGM whose first state turns every track off gets its next state at
        once. The game turns that BGM's tracks on later. The sound manager starts other sounds. Its vtable gives
        startSound(JAISoundID*, JAISoundHandle*, const TVec3*) at 0xc. The player holds its sound's handle. The driver
-       copies the handle to `sound` once a frame. */
+       copies the handle to `sound` once a frame. A chord effect plays over a stage's music. Some stages play another
+       effect in place of `swapped_effect`, with the records of `swapped_effect`. Such an effect plays at its stage.
+       Every other chord effect plays at stage 0, the first row of the stage table. */
     const u32 id = p->sound_id;
+    u32 effect = id;
+    u32 stage_number = 0;
+    for (u32 i = 0; i < SWAPS; i++)
+    {
+        if (id == p->swaps[i * 2])
+        {
+            effect = p->swapped_effect;
+            stage_number = p->swaps[i * 2 + 1];
+        }
+    }
+    const u32 record = chord_record(word(system + p->chord_offset), effect);
+    if (record != NO_RECORD || id == p->combo_effect)
+    {
+        play_over_music(system, id, record, stage_number);
+    }
+
     const u32 player = (id >> 24) == p->music_section ? system + p->music_player_offset : 0;
     if (player)
     {
