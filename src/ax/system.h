@@ -85,6 +85,12 @@ public:
     // (__AXOutInit, 0x80106068). The model then follows `build`.
     void Init(Build build = Build::kDecember2006);
 
+    // The build that the model follows. Init sets it.
+    Build FollowedBuild() const
+    {
+        return build_;
+    }
+
     // The number of voices: 96, or 64 in the build of October 2006.
     uint32_t VoiceCount() const
     {

@@ -131,6 +131,7 @@ SeqPlayer* Engine::StartSequence(uint32_t index, const Arrangement& arrangement)
     players_.push_back(
         std::make_unique<SeqPlayer>(static_cast<int>(players_.size()), SequenceInfo(sound), sequences_.back()->data));
     player_sends_.push_back(SendsOf(sends_, index));
+    player_main_sends_.push_back(MainSendOf(sends_, index));
     SeqPlayer* player = players_.back().get();
     player->SetBuild(build_);
     player->Start();
@@ -337,6 +338,13 @@ WaveData Engine::ReadWaveParam(const LoadedBank& bank, const ntdlib::rsar::Wave&
     return data;
 }
 
+SndBuild EngineBuild(SndBuild build, ax::Build ax_build)
+{
+    build.october_2006 = ax_build == ax::Build::kOctober2006 || build.date == 0;
+
+    return build;
+}
+
 bool ArchiveModel::Start(const ntdlib::Microcode& microcode, const ntdlib::rsar::SoundArchive& archive)
 {
     // AXInit boots the DSP with AX's microcode. Then NW4R SND's AxManager sets up its side. The microcode identifies
@@ -348,9 +356,7 @@ bool ArchiveModel::Start(const ntdlib::Microcode& microcode, const ntdlib::rsar:
         return false;
     }
 
-    SndBuild snd_build = build;
-    snd_build.october_2006 = ax_build == ax::Build::kOctober2006;
-    engine.emplace(memory, ax, archive, snd_build);
+    engine.emplace(memory, ax, archive, EngineBuild(build, ax_build));
 
     return true;
 }

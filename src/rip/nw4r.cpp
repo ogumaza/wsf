@@ -459,10 +459,9 @@ std::vector<uint8_t> BuildMini(uint32_t index, const SoundData& data, const std:
     return xsflib::psf::WritePsf(kPsfVersionWsf, {}, program.Data(), tags);
 }
 
-std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const std::vector<uint8_t>& archive,
-                                         const std::string& microcode_path, const ntdlib::Microcode& microcode,
-                                         nw4r::SndBuild build, const Tags& tags, const nw4r::ArchiveEffects& effects,
-                                         uint32_t version)
+ArchiveDescriptor BuildArchiveDescriptor(const std::string& archive_path, const std::string& microcode_path,
+                                         const ntdlib::Microcode& microcode, nw4r::SndBuild build,
+                                         const nw4r::ArchiveEffects& effects, uint32_t version)
 {
     ArchiveDescriptor descriptor;
     descriptor.version = version;
@@ -471,6 +470,18 @@ std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const 
     descriptor.microcode_address = microcode.address;
     descriptor.snd_build = build.date;
     descriptor.effects = effects;
+    descriptor.effects.variants.clear();
+
+    return descriptor;
+}
+
+std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const std::vector<uint8_t>& archive,
+                                         const std::string& microcode_path, const ntdlib::Microcode& microcode,
+                                         nw4r::SndBuild build, const Tags& tags, const nw4r::ArchiveEffects& effects,
+                                         uint32_t version)
+{
+    const ArchiveDescriptor descriptor =
+        BuildArchiveDescriptor(archive_path, microcode_path, microcode, build, effects, version);
 
     std::vector<uint8_t> words(microcode.words.size() * 2);
     for (std::size_t i = 0; i < microcode.words.size(); i++)
@@ -494,7 +505,8 @@ std::vector<uint8_t> BuildArchiveMini(uint32_t index, const std::string& lib_nam
     return BuildArchiveMini(std::vector<uint32_t>{index}, lib_name, std::move(tags));
 }
 
-std::vector<uint8_t> BuildArchiveMini(const std::vector<uint32_t>& indices, const std::string& lib_name, Tags tags)
+std::vector<uint8_t> BuildArchiveMini(const std::vector<uint32_t>& indices, const std::string& lib_name, Tags tags,
+                                      const std::optional<ArchiveDescriptor>& descriptor)
 {
     // A list of one sound gives the same chunk as AddSound.
     ProgramBuilder program;
@@ -502,7 +514,8 @@ std::vector<uint8_t> BuildArchiveMini(const std::vector<uint32_t>& indices, cons
 
     tags["_lib"] = lib_name;
 
-    return xsflib::psf::WritePsf(kPsfVersionWsf, {}, program.Data(), tags);
+    return xsflib::psf::WritePsf(kPsfVersionWsf, descriptor ? descriptor->Serialize() : std::vector<uint8_t>{},
+                                 program.Data(), tags);
 }
 
 namespace

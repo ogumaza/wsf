@@ -10,6 +10,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "ax/pb.h"
@@ -40,6 +42,9 @@ enum class EffectType : uint8_t
     // FxReverbStd of 2008 (Mario Kart Wii and Wii Music): preDelayTime, fusedTime, coloration, damping, outGain,
     // earlyMode, preDelayTimeMax, fusedMode, earlyGain, fusedGain.
     kReverbStd2008 = 6,
+
+    // The Photo Channel 1.1's mood effect (axfx::PhotoMood), turned on: the mode that SetMode takes.
+    kPhotoMood = 7,
 };
 
 // The most words that a parameter structure has.
@@ -61,6 +66,8 @@ constexpr int EffectParamWords(EffectType type)
         return 5;
     case EffectType::kReverbStd2008:
         return 10;
+    case EffectType::kPhotoMood:
+        return 1;
     }
 
     return 0;
@@ -161,13 +168,18 @@ inline std::vector<EffectSetup> EffectsFor(const std::vector<EffectSetup>& setup
     return found;
 }
 
-// A send to an aux bus that the game sets on a sound (BasicSound::SetFxSend, Animal Crossing: City Folk).
+// A send to an aux bus that the game sets on a sound (BasicSound::SetFxSend, Animal Crossing: City Folk). A send to
+// kMainSendBus is the sound's send to the main mix instead (BasicSound::SetMainSend, the Photo Channel 1.1).
 struct SoundSend
 {
     uint32_t sound = 0; // the index in the archive's sound table
     int bus = 0;
     float send = 0.0f;
 };
+
+// The bus of a SoundSend to the main mix. The sound's main send adds to its tracks' main sends. Each track's main send
+// is relative: 0 for a track at the full send. A main send of -1 therefore takes the sound out of the main mix.
+constexpr int kMainSendBus = 3;
 
 // The sends that the game sets on `sound`, by bus: 0 for a bus without one. Of two sends to one bus, the later counts.
 inline std::array<float, ax::kAuxBusCount> SendsOf(const std::vector<SoundSend>& sends, uint32_t sound)
@@ -184,15 +196,84 @@ inline std::array<float, ax::kAuxBusCount> SendsOf(const std::vector<SoundSend>&
     return found;
 }
 
+// The main send that the game sets on `sound`: 0 without one. Of two, the later counts.
+inline float MainSendOf(const std::vector<SoundSend>& sends, uint32_t sound)
+{
+    float found = 0.0f;
+    for (const SoundSend& send : sends)
+    {
+        if (send.sound == sound && send.bus == kMainSendBus)
+        {
+            found = send.send;
+        }
+    }
+
+    return found;
+}
+
+// Another state of a game in which some of its sounds play: the Photo Channel 1.1's moods (docs/wsf.md, "Effects") and
+// the Mii Channel's scenes (docs/wsf.md, "Tracks that the game silences"). The ripper rips each of the sounds once more
+// in each variant. The variant's effects and sends go with the archive's. `name` goes in the rip's title and file name.
+struct EffectVariant
+{
+    std::string name;
+    std::vector<uint32_t> sounds;
+    std::vector<EffectSetup> setups;
+    std::vector<SoundSend> sends;
+
+    // The arrangement that the sounds play in, if the variant has one. The variant's rips hold it as tags (docs/wsf.md,
+    // "Tags"). Its tracks replace the tracks that the archive's effects give the sounds.
+    std::optional<Arrangement> arrangement;
+};
+
 // The effects that a game puts on the aux buses for the sounds of one of its sound archives, and what it sets on some
 // of those sounds as they start: sends to the buses (docs/wsf.md, "Effects"), and the volumes of the tracks that it
 // silences (docs/wsf.md, "Tracks that the game silences"). A game's effect profile gives them. The archive descriptor
-// holds them for archive mode.
+// holds them for archive mode. It doesn't hold the variants. The descriptor of a variant's rip holds the effects that
+// WithVariant gives.
 struct ArchiveEffects
 {
     std::vector<EffectSetup> setups;
     std::vector<SoundSend> sends;
     std::vector<SoundTracks> tracks;
+    std::vector<EffectVariant> variants;
 };
+
+// The effects of `effects` with those of `variant` added after them, and without variants. The result leaves out the
+// tracks that `effects` gives the sounds of a variant with an arrangement.
+inline ArchiveEffects WithVariant(const ArchiveEffects& effects, const EffectVariant& variant)
+{
+    ArchiveEffects found = effects;
+    found.setups.insert(found.setups.end(), variant.setups.begin(), variant.setups.end());
+    found.sends.insert(found.sends.end(), variant.sends.begin(), variant.sends.end());
+    found.variants.clear();
+
+    if (variant.arrangement)
+    {
+        const auto in_variant = [&variant](const SoundTracks& entry)
+        {
+            return std::find(variant.sounds.begin(), variant.sounds.end(), entry.sound) != variant.sounds.end();
+        };
+        std::erase_if(found.tracks, in_variant);
+    }
+
+    return found;
+}
+
+// Whether `effects` holds an effect or a send that only version 3 of the archive descriptor may hold: the Photo
+// Channel 1.1's mood effect, or a send to the main mix.
+inline bool RequiresMoodVersion(const ArchiveEffects& effects)
+{
+    const auto is_mood = [](const EffectSetup& setup)
+    {
+        return setup.type == EffectType::kPhotoMood;
+    };
+    const auto is_main = [](const SoundSend& send)
+    {
+        return send.bus == kMainSendBus;
+    };
+    return std::any_of(effects.setups.begin(), effects.setups.end(), is_mood) ||
+           std::any_of(effects.sends.begin(), effects.sends.end(), is_main);
+}
 
 } // namespace wsf::nw4r

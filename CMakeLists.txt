@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for wsfrip, wsfplay, the foobar2000 component, Windows file properties and macOS bundles
 # (xsflib_add_version below). For a release, update it here and add notes in docs/release-notes/.
-project(wsf VERSION 1.7.0 LANGUAGES C CXX)
+project(wsf VERSION 1.8.0 LANGUAGES C CXX)
 
 # xsflib: the code that WSF shares with the other PSF players and with the converters, as a submodule. Its
 # XsflibProject.cmake sets what the projects built on it start with: C++20, a release build by default, the static C
@@ -41,6 +41,8 @@ add_library(wsf_axfx STATIC
     src/axfx/chorus.h
     src/axfx/delay.cpp
     src/axfx/delay.h
+    src/axfx/photo_mood.cpp
+    src/axfx/photo_mood.h
     src/axfx/reverb_hi.cpp
     src/axfx/reverb_hi.h
     src/axfx/reverb_std.cpp

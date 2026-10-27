@@ -10,6 +10,7 @@
 
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -154,7 +155,7 @@ void TestArchiveMode()
 
     XSFLIB_CHECK(without_build && without_build->microcode_path == d.microcode_path && without_build->snd_build == 0);
 
-    // A player only accepts versions 1 and 2, with bit 0 of the flags set and no other, in stereo.
+    // A player only accepts versions 1 to 3, with bit 0 of the flags set and no other, in stereo.
     XSFLIB_CHECK(d.Check().has_value());
 
     ArchiveDescriptor v1 = d;
@@ -163,15 +164,17 @@ void TestArchiveMode()
     v1.output_mode = kOutputStereo;
     ArchiveDescriptor v2 = v1;
     v2.version = ArchiveDescriptor::kListVersion;
+    ArchiveDescriptor v3 = v1;
+    v3.version = ArchiveDescriptor::kMoodVersion;
 
-    XSFLIB_CHECK(!v1.Check() && !v2.Check());
-    for (const uint32_t version : {0u, 3u})
+    XSFLIB_CHECK(!v1.Check() && !v2.Check() && !v3.Check());
+    for (const uint32_t version : {0u, 4u})
     {
         ArchiveDescriptor odd = v1;
         odd.version = version;
 
         XSFLIB_CHECK(odd.Check() == "archive descriptor version " + std::to_string(version) +
-                                        "; this player supports versions 1 and 2");
+                                        "; this player supports versions 1 to 3");
     }
 
     for (const uint32_t flags : {0u, 3u, 0x80000001u})
@@ -331,6 +334,58 @@ void TestArrangementTags()
     XSFLIB_CHECK(arrangement.tracks == 0xffff && arrangement.tempo_ratio == 0.5f);
 }
 
+void TestVariantArrangement()
+{
+    // The wsf_tempo tag that wsfrip writes for a variant's tempo: the shortest decimal that reads back as the same
+    // float. Every 1/1024 from 0.25 to 4, and the floats on each side of it, read back.
+    XSFLIB_CHECK(FormatTempo(1.0878f) == "1.0878" && FormatTempo(1.1f) == "1.1" && FormatTempo(0.25f) == "0.25" &&
+                 FormatTempo(4.0f) == "4");
+
+    bool round_trips = true;
+    for (int step = 256; step <= 4096; step++)
+    {
+        const float ratio = static_cast<float>(step) / 1024.0f;
+        for (const float value : {std::nextafter(ratio, 0.0f), ratio, std::nextafter(ratio, 5.0f)})
+        {
+            round_trips &= value < 0.25f || value > 4.0f || ParseTempo(FormatTempo(value)) == value;
+        }
+    }
+
+    XSFLIB_CHECK(round_trips);
+
+    // A variant's arrangement as tags: wsf_tracks always, and wsf_tempo and wsf_var where it sets them. The tags read
+    // back as the arrangement.
+    nw4r::Arrangement scene;
+    scene.tracks = 0xf5ff;
+    scene.tempo_ratio = 1.0878f;
+    scene.variables = {{3, 7}};
+
+    const Tags tags = ArrangementTags(scene);
+    const nw4r::Arrangement back = ArrangementFromTags(tags);
+
+    XSFLIB_CHECK(tags.size() == 3 && tags.at("wsf_tracks") == "0-8, 10, 12-15" && tags.at("wsf_tempo") == "1.0878");
+    XSFLIB_CHECK(back.tracks == scene.tracks && back.tempo_ratio == scene.tempo_ratio &&
+                 back.variables == scene.variables);
+    XSFLIB_CHECK(ArrangementTags(nw4r::Arrangement{}) == (Tags{{"wsf_tracks", "0-15"}}));
+
+    // A variant with an arrangement leaves out the tracks that the archive's effects give its sounds. Its tags give
+    // them in their place. The other sounds keep theirs.
+    nw4r::ArchiveEffects effects;
+    effects.tracks = {{2, 0xf3ff}, {5, 0x00ff}};
+    const nw4r::EffectVariant variant{
+        .name = " scene 4", .sounds = {2}, .setups = {}, .sends = {}, .arrangement = scene};
+    effects.variants = {variant};
+
+    const nw4r::ArchiveEffects with = nw4r::WithVariant(effects, variant);
+    nw4r::EffectVariant plain = variant;
+    plain.arrangement.reset();
+    const nw4r::ArchiveEffects with_plain = nw4r::WithVariant(effects, plain);
+
+    XSFLIB_CHECK(with.tracks.size() == 1 && nw4r::TracksOf(with.tracks, 2) == nw4r::kAllTracks &&
+                 nw4r::TracksOf(with.tracks, 5) == 0x00ff && with.variants.empty());
+    XSFLIB_CHECK(with_plain.tracks.size() == 2 && nw4r::TracksOf(with_plain.tracks, 2) == 0xf3ff);
+}
+
 void TestEffects()
 {
     // The effects block follows the build (docs/wsf.md, "Archive descriptor").
@@ -396,6 +451,104 @@ void TestEffects()
 
     // Effects that run past the end of the descriptor make it unreadable.
     XSFLIB_CHECK(!ArchiveDescriptor::Parse(std::vector<uint8_t>(raw.begin(), raw.end() - 30)).has_value());
+}
+
+void TestReverbHi2008()
+{
+    // FxReverbHi of 2008 takes 11 words: the six of the older builds, then earlyMode, preDelayTimeMax, fusedMode,
+    // earlyGain and fusedGain. Each word reads back in its place.
+    ArchiveDescriptor d;
+    d.archive_path = "arc/sound/c.brsar";
+    d.microcode_path = "ax_microcode.bin";
+    d.snd_build = 20090701;
+
+    nw4r::EffectSetup reverb;
+    reverb.type = nw4r::EffectType::kReverbHi2008;
+    for (std::size_t i = 0; i < reverb.params.size(); i++)
+    {
+        reverb.params[i] = std::bit_cast<uint32_t>(0.25f * static_cast<float>(i + 1));
+    }
+    d.effects.setups = {reverb};
+
+    ArchiveDescriptor dry = d;
+    dry.effects.setups.clear();
+    const std::vector<uint8_t> raw = d.Serialize();
+    const auto back = ArchiveDescriptor::Parse(raw);
+
+    // 4 for the count, 12 + 11 * 4 for the reverb, and 4 for a count of 0 sends.
+    XSFLIB_CHECK(raw.size() == dry.Serialize().size() + 4 + 56 + 4);
+    XSFLIB_CHECK(back && back->effects.setups.size() == 1 && back->effects.setups[0].bus == 0 &&
+                 back->effects.setups[0].type == nw4r::EffectType::kReverbHi2008 &&
+                 back->effects.setups[0].params == reverb.params);
+}
+
+void TestMoodEffect()
+{
+    // The Photo Channel 1.1's mood effect has one word, and a send can go to the main mix (docs/wsf.md, "Archive
+    // descriptor"). Either requires version 3.
+    ArchiveDescriptor d;
+    d.version = ArchiveDescriptor::kMoodVersion;
+    d.archive_path = "Sound/b.brsar";
+    d.microcode_path = "ax_microcode.bin";
+    d.snd_build = 20081120;
+
+    nw4r::EffectSetup mood;
+    mood.bus = 1;
+    mood.type = nw4r::EffectType::kPhotoMood;
+    mood.params = {4};
+    mood.sounds = {2};
+    d.effects.setups = {mood};
+    d.effects.sends = {{2, nw4r::kMainSendBus, -1.0f}, {2, 2, -1.0f}, {2, 1, 1.0f}};
+    const auto back = ArchiveDescriptor::Parse(d.Serialize());
+
+    XSFLIB_CHECK(back && back->version == 3 && !back->Check() && back->effects.setups.size() == 1 &&
+                 back->effects.setups[0].type == nw4r::EffectType::kPhotoMood &&
+                 back->effects.setups[0].params == mood.params && back->effects.setups[0].sounds == mood.sounds);
+    XSFLIB_CHECK(back && back->effects.sends.size() == 3 && nw4r::MainSendOf(back->effects.sends, 2) == -1.0f &&
+                 nw4r::MainSendOf(back->effects.sends, 3) == 0.0f &&
+                 (nw4r::SendsOf(back->effects.sends, 2) == std::array<float, 3>{0.0f, 1.0f, -1.0f}));
+    XSFLIB_CHECK(nw4r::RequiresMoodVersion(d.effects));
+
+    nw4r::ArchiveEffects reverb_only;
+    reverb_only.setups = {{.bus = 2, .type = nw4r::EffectType::kReverbHi, .params = {}, .presets = {}, .sounds = {}}};
+
+    XSFLIB_CHECK(!nw4r::RequiresMoodVersion(reverb_only));
+
+    nw4r::ArchiveEffects main_only;
+    main_only.sends = {{2, nw4r::kMainSendBus, -1.0f}};
+
+    XSFLIB_CHECK(nw4r::RequiresMoodVersion(main_only));
+
+    // A variant adds its effects and sends after the archive's.
+    const nw4r::EffectVariant variant{.name = " mood 4", .sounds = {2}, .setups = {mood}, .sends = d.effects.sends};
+    reverb_only.variants = {variant};
+    const nw4r::ArchiveEffects with = nw4r::WithVariant(reverb_only, variant);
+
+    XSFLIB_CHECK(with.setups.size() == 2 && with.setups[0].type == nw4r::EffectType::kReverbHi &&
+                 with.setups[1].type == nw4r::EffectType::kPhotoMood && with.sends.size() == 3 &&
+                 with.variants.empty());
+
+    // A mini's descriptor of version 3 takes the place of its library's descriptor of version 1. Players of 1.7.0 and
+    // older refuse the mini. This player plays it.
+    ArchiveDescriptor v1 = d;
+    v1.version = ArchiveDescriptor::kVersion;
+    v1.effects = {};
+    ProgramBuilder lib;
+    lib.AddFile("Sound/b.brsar", {1, 2, 3});
+    ProgramBuilder mini;
+    mini.AddSound(2);
+
+    std::map<std::string, std::vector<uint8_t>> fs;
+    fs["a/lib.wsflib"] = xsflib::psf::WritePsf(kPsfVersionWsf, v1.Serialize(), lib.Data(), {});
+    fs["a/plain.miniwsf"] = xsflib::psf::WritePsf(kPsfVersionWsf, {}, mini.Data(), {{"_lib", "lib.wsflib"}});
+    fs["a/mood.miniwsf"] = xsflib::psf::WritePsf(kPsfVersionWsf, d.Serialize(), mini.Data(), {{"_lib", "lib.wsflib"}});
+    const FileReader reader = xsflib::testing::MapReader(fs);
+    LoadedSet set;
+
+    XSFLIB_CHECK(!LoadSet("a/plain.miniwsf", reader, set) && set.archive && set.archive->version == 1 &&
+                 set.archive->effects.setups.empty());
+    XSFLIB_CHECK(!LoadSet("a/mood.miniwsf", reader, set) && set.archive && set.archive->version == 3 &&
+                 set.archive->effects.setups.size() == 1 && SoundsToPlay(set) == std::vector<uint32_t>{2});
 }
 
 void TestTracks()
@@ -502,9 +655,12 @@ int main()
     TestArchiveMode();
     TestSoundsThatPlayTogether();
     TestEffects();
+    TestReverbHi2008();
+    TestMoodEffect();
     TestEffectsBySound();
     TestTracks();
     TestArrangementTags();
+    TestVariantArrangement();
     TestDescriptor();
     TestLoadSet();
     TestVersionByte();

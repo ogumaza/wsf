@@ -5,9 +5,11 @@
 #include "wsf/format.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -113,7 +115,7 @@ bool ReadEffectSetups(const std::vector<uint8_t>& data, std::size_t& pos, std::v
     return true;
 }
 
-// The sends that the game sets on sounds. A send whose bus isn't A, B or C is skipped.
+// The sends that the game sets on sounds. A send whose bus isn't A, B, C or the main mix is skipped.
 bool ReadSends(const std::vector<uint8_t>& data, std::size_t& pos, std::vector<nw4r::SoundSend>& sends)
 {
     if (pos + 4 > data.size())
@@ -131,7 +133,7 @@ bool ReadSends(const std::vector<uint8_t>& data, std::size_t& pos, std::vector<n
     for (uint32_t i = 0; i < send_count; i++, pos += 12)
     {
         const uint32_t bus = xsflib::LoadLe32(&data[pos + 4]);
-        if (bus < ax::kAuxBusCount)
+        if (bus < ax::kAuxBusCount || bus == nw4r::kMainSendBus)
         {
             sends.push_back({xsflib::LoadLe32(&data[pos]), static_cast<int>(bus),
                              std::bit_cast<float>(xsflib::LoadLe32(&data[pos + 8]))});
@@ -297,6 +299,39 @@ nw4r::Arrangement ArrangementFromTags(const Tags& tags, uint16_t tracks)
     return arrangement;
 }
 
+std::string FormatTempo(float tempo_ratio)
+{
+    // A ratio from 0.25 to 4 has its first significant digit just before the point or just after it. "%.*g" therefore
+    // writes no exponent for one. Nine significant digits give back any float.
+    std::array<char, 32> text{};
+    for (int digits = 1; digits <= 9; digits++)
+    {
+        std::snprintf(text.data(), text.size(), "%.*g", digits, static_cast<double>(tempo_ratio));
+        if (ParseTempo(text.data()) == tempo_ratio)
+        {
+            break;
+        }
+    }
+
+    return text.data();
+}
+
+Tags ArrangementTags(const nw4r::Arrangement& arrangement)
+{
+    Tags tags;
+    tags[kTracksTag] = FormatTracks(arrangement.tracks);
+    if (arrangement.tempo_ratio != 1.0f)
+    {
+        tags[kTempoTag] = FormatTempo(arrangement.tempo_ratio);
+    }
+    if (!arrangement.variables.empty())
+    {
+        tags[kVariablesTag] = xsflib::psf::FormatVariables(arrangement.variables);
+    }
+
+    return tags;
+}
+
 std::vector<uint8_t> ProcessDescriptor::Serialize() const
 {
     std::vector<uint8_t> v;
@@ -455,10 +490,10 @@ std::optional<ArchiveDescriptor> ArchiveDescriptor::Parse(const std::vector<uint
 
 std::optional<std::string> ArchiveDescriptor::Check() const
 {
-    // Version 2 has version 1's flags and output modes.
-    if (version != kVersion && version != kListVersion)
+    // Versions 2 and 3 have version 1's flags and output modes.
+    if (version != kVersion && version != kListVersion && version != kMoodVersion)
     {
-        return "archive descriptor version " + std::to_string(version) + "; this player supports versions 1 and 2";
+        return "archive descriptor version " + std::to_string(version) + "; this player supports versions 1 to 3";
     }
 
     if (auto err = xsflib::psf::CheckDescriptorFlags("archive", flags, kFlagDspRequired))

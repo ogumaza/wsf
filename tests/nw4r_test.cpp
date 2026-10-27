@@ -3,8 +3,8 @@
 // NW4R SND model tests, on the AX model with no DSP: the parameter blocks a note's channel sets up, the ramps from
 // frame to frame, the release and the end of a channel, the voices NW4R SND drops by priority when all are in use, a
 // short sequence played from an archive, a sequence in an arrangement, sequences that start together, what the builds
-// of October 2006, 2008 and 2009 do differently, the loops the ripper's length analysis counts, snapshots of the model,
-// and the end of a wave without the DSP.
+// of October 2006, 2008 and 2009 do differently, the builds that a build without a banner plays as, the loops the
+// ripper's length analysis counts, snapshots of the model, and the end of a wave without the DSP.
 
 #include <algorithm>
 #include <array>
@@ -28,9 +28,11 @@
 #include "ax/pb.h"
 #include "ax/system.h"
 #include "ax/voice.h"
+#include "axfx/axfx.h"
 #include "nw4r/arrangement.h"
 #include "nw4r/driver.h"
 #include "nw4r/effect_setup.h"
+#include "nw4r/effects.h"
 #include "nw4r/engine.h"
 #include "nw4r/rsar_options.h"
 #include "nw4r/sequence.h"
@@ -1081,6 +1083,28 @@ void TestMixOctober2006()
     Check(!MixRamps(kCommands, kBuildOctober2006), "the build of October 2006 sets the mix at once");
 }
 
+void TestBuildWithoutBanner()
+{
+    // A build of NW4R SND without a banner plays as the build of October 2006, on AX of October 2006 and on a later AX.
+    // A build with a banner plays as its date gives.
+    Check(nw4r::EngineBuild(nw4r::SndBuild{}, ax::Build::kOctober2006).October2006(),
+          "a build without a banner on AX of October 2006 plays as the build of October 2006");
+    Check(nw4r::EngineBuild(nw4r::SndBuild{}, ax::Build::kDecember2006).October2006(),
+          "a build without a banner on a later AX plays as the build of October 2006");
+    Check(!nw4r::EngineBuild(kBuild2007, ax::Build::kDecember2006).October2006(),
+          "a 2007 build doesn't play as the build of October 2006");
+
+    // AXFX comes with AX. On a later AX, a build without a banner links AXFX of December 2006.
+    Check(nw4r::AxfxBuild(kBuildOctober2006, ax::Build::kOctober2006) == axfx::Build::kOctober2006,
+          "AX of October 2006 comes with AXFX of October 2006");
+    Check(nw4r::AxfxBuild(kBuildOctober2006, ax::Build::kDecember2006) == axfx::Build::kDecember2006,
+          "a build without a banner on a later AX links AXFX of December 2006");
+    Check(nw4r::AxfxBuild(kBuild2007, ax::Build::kDecember2006) == axfx::Build::kDecember2006,
+          "a 2007 build links AXFX of December 2006");
+    Check(nw4r::AxfxBuild(kBuildMarch2008, ax::Build::kDecember2006) == axfx::Build::kSeptember2008,
+          "a build from March 2008 on links AXFX of September 2008");
+}
+
 } // namespace
 
 int main()
@@ -1112,6 +1136,7 @@ int main()
         TestReleaseStopOctober2006();
         TestRampOctober2006();
         TestMixOctober2006();
+        TestBuildWithoutBanner();
     };
     return xsflib::testing::RunTest("nw4r", tests);
 }

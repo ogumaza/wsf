@@ -56,9 +56,9 @@ void FillExpParams(Params& p, const EffectParams& params, const Reverb2008Words&
 
 } // namespace
 
-axfx::Build AxfxBuild(const SndBuild& build)
+axfx::Build AxfxBuild(const SndBuild& build, ax::Build ax_build)
 {
-    if (build.October2006())
+    if (ax_build == ax::Build::kOctober2006)
     {
         return axfx::Build::kOctober2006;
     }
@@ -84,6 +84,8 @@ Effect::Slots Effect::MakeSlot(EffectType type, axfx::Build build)
         return Slot<axfx::Delay>{};
     case EffectType::kReverbStd2008:
         return Slot<axfx::ReverbStdExp>{};
+    case EffectType::kPhotoMood:
+        return Slot<axfx::PhotoMood>{};
     case EffectType::kReverbStd:
         break;
     }
@@ -163,6 +165,14 @@ bool Effect::SetParam(const EffectParams& params)
         p.output.fill(output);
 
         return !active_ || slot->fx.Settings(p);
+    }
+
+    if (auto* slot = std::get_if<Slot<axfx::PhotoMood>>(&slot_))
+    {
+        // The Photo Channel 1.1's SetMode (0x80049820) holds the mode to 0 to 4.
+        slot->params = axfx::PhotoMood::SetMode(static_cast<int32_t>(params[0]));
+
+        return !active_ || slot->fx.Settings(slot->params);
     }
 
     // WarioWare: Smooth Moves' standard reverb (its SetParam, 0x800e33ac): preDelay, time, coloration, damping and mix.

@@ -144,10 +144,12 @@ public:
     // Sets up the effects that the game puts on the aux buses for `sound`, from a set's `setups` (see EffectsFor,
     // FollowsVariables and Effects::Set). Where the sound's variables pick an effect's presets, the engine reads the
     // variables of the sequence that starts first. Every sequence that the engine plays gets the effects. Each sequence
-    // that starts later gets the sends that `sends` gives its sound (see SendsOf and SoundSends).
+    // that starts later gets the sends that `sends` gives its sound (see SendsOf, MainSendOf, SoundSends and
+    // SoundMainSend).
     void SetEffects(const std::vector<EffectSetup>& setups, const std::vector<SoundSend>& sends, uint32_t sound)
     {
-        effects_.Set(EffectsFor(setups, sound), AxfxBuild(build_), FollowsVariables(setups, sound));
+        effects_.Set(EffectsFor(setups, sound), AxfxBuild(build_, ax_.FollowedBuild()),
+                     FollowsVariables(setups, sound));
         sends_ = sends;
     }
 
@@ -169,6 +171,18 @@ public:
         }
 
         return player_sends_[static_cast<std::size_t>(player)];
+    }
+
+    // The main send that the game sets through a sound's handle (BasicSound::SetMainSend), in the same way: 0 for a
+    // player that the engine doesn't have. Each track adds it to the track's main send.
+    float SoundMainSend(int player) const
+    {
+        if (player < 0 || static_cast<std::size_t>(player) >= player_main_sends_.size())
+        {
+            return 0.0f;
+        }
+
+        return player_main_sends_[static_cast<std::size_t>(player)];
     }
 
     // Starts the sequence sound at `index` in the archive's sound table, from the next sound frame, in `arrangement`.
@@ -280,6 +294,7 @@ private:
     // The sends that the game sets on sounds (see SetEffects), and those of each player's sound, by the player's place.
     std::vector<SoundSend> sends_;
     std::vector<std::array<float, ax::kAuxBusCount>> player_sends_;
+    std::vector<float> player_main_sends_;
 
     Effects effects_;
 
@@ -288,6 +303,13 @@ private:
     VoiceParamHook on_voice_param_;
     ChannelEventHook on_channel_event_;
 };
+
+// The build of NW4R SND that the engine follows for a game that links `build` and AX of `ax_build`. Whatever AX comes
+// with it, a build without a banner plays as the build of October 2006 (SndBuild::October2006). WarioWare: Smooth Moves
+// links such a build with AX of October 2006. The Mii Channel links one with AX of August 2007. The Mii Channel's
+// sequence clock counts in 416ths of a tick (0x800fd84c to 0x800fd8a0 in its main program). The build of October 2006
+// counts the same way.
+SndBuild EngineBuild(SndBuild build, ax::Build ax_build);
 
 // Archive mode's whole stack for one sound archive: main memory, the DSP running the game's AX microcode, AX's CPU side
 // and the engine. The player and the ripper's length analysis both build it this way.

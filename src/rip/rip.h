@@ -409,9 +409,16 @@ std::optional<std::vector<JAudioSound>> ReadJAudioSounds(const ntdlib::disc::Gam
 // Their root tracks' polls of the game stay moves (see GameWatch's `idle_in_calls`).
 ntdlib::jaudio::GameWatch WatchOf(const JAudioProfile& profile, uint32_t sound_id);
 
-// Archive mode: a .wsflib that holds the sound archive and AX's microcode as FILE chunks at the given paths. Its
-// archive descriptor names the game's build of NW4R SND, and gives the effects. The model follows that build. The
-// descriptor has version `version`: ArchiveDescriptor::kListVersion when a mini of the set plays several sounds.
+// Archive mode: the archive descriptor of a set whose FILE chunks hold the sound archive and AX's microcode at the
+// given paths. The descriptor names the game's build of NW4R SND, and gives the effects. The model follows that build.
+// The descriptor has version `version`: ArchiveDescriptor::kListVersion when a mini of the set plays several sounds,
+// and ArchiveDescriptor::kMoodVersion for effects that only version 3 may hold (nw4r::RequiresMoodVersion).
+ArchiveDescriptor BuildArchiveDescriptor(const std::string& archive_path, const std::string& microcode_path,
+                                         const ntdlib::Microcode& microcode, nw4r::SndBuild build,
+                                         const nw4r::ArchiveEffects& effects, uint32_t version);
+
+// Archive mode: a .wsflib that holds the sound archive and AX's microcode as FILE chunks at the given paths, with the
+// descriptor that BuildArchiveDescriptor gives.
 std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const std::vector<uint8_t>& archive,
                                          const std::string& microcode_path, const ntdlib::Microcode& microcode,
                                          nw4r::SndBuild build, const Tags& tags,
@@ -423,8 +430,10 @@ std::vector<uint8_t> BuildArchiveMini(uint32_t index, const std::string& lib_nam
 
 // Archive mode: a .miniwsf that plays the sequences at `indices` together from `lib_name`, started in that order
 // (docs/wsf.md, "Sounds that play together"). The library's descriptor must have ArchiveDescriptor::kListVersion when
-// `indices` holds more than one sound.
-std::vector<uint8_t> BuildArchiveMini(const std::vector<uint32_t>& indices, const std::string& lib_name, Tags tags);
+// `indices` holds more than one sound. A variant's rip holds `descriptor`. That descriptor takes the place of the
+// library's.
+std::vector<uint8_t> BuildArchiveMini(const std::vector<uint32_t>& indices, const std::string& lib_name, Tags tags,
+                                      const std::optional<ArchiveDescriptor>& descriptor = std::nullopt);
 
 // Archive mode: a copy of the archive that holds only the data that the sequences at `indices` play. That data is each
 // sequence's file, and its bank's file and wave data, in the items where SoundArchive::File finds them. The header, the

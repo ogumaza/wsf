@@ -111,7 +111,8 @@ A version 1 player rejects process descriptors with a different version or flags
 
 ```
 0x00  u32  magic "WSFA"
-0x04  u32  descriptor version (1, or 2 for a set whose files select sounds that play together)
+0x04  u32  descriptor version (1, 2 for a set whose files select sounds that play together, or 3 for a rip with
+           the Photo Channel 1.1's mood effect)
 0x08  u32  flags: bit 0 = the DSP is required; version 1 has no other flags
 0x0C  u32  output mode: 1 stereo (version 1 plays stereo only)
 0x10  u32  the address the game loads AX's microcode from (a cached address)
@@ -122,8 +123,9 @@ A version 1 player rejects process descriptors with a different version or flags
       u32  the number of effects (see "Effects"), then each effect:
              u8   bus: 0 A, 1 B, 2 C
              u8   type: 1 FxReverbHi of 2006 and 2007, 2 FxReverbHi of 2008, 3 FxChorus, 4 FxDelay,
-                  5 WarioWare: Smooth Moves' standard reverb, 6 FxReverbStd of 2008
-             u8   the number of words in the type's parameters (6, 11, 3, 3, 5 and 10)
+                  5 WarioWare: Smooth Moves' standard reverb, 6 FxReverbStd of 2008,
+                  7 the Photo Channel 1.1's mood effect (version 3)
+             u8   the number of words in the type's parameters (6, 11, 3, 3, 5, 10 and 1)
              u8   0
              u32  the number of presets, or 0 for an effect with one set of parameters
              u32  the number of sounds that the effect lists
@@ -131,21 +133,23 @@ A version 1 player rejects process descriptors with a different version or flags
              u32  the sounds that the effect lists, by their index in the archive's sound table
       u32  the number of sends that the game sets on sounds, then each send:
              u32  the sound, by its index in the archive's sound table
-             u32  the bus
+             u32  the bus, or 3 for the main mix (version 3)
              f32  the send
       u32  the number of sounds whose tracks the game sets (see "Tracks that the game silences"), then each sound:
              u32  the sound, by its index in the archive's sound table
              u32  the tracks that play, bit N for track N
 ```
 
-A descriptor that ends after the paths gives a build of 0. The model then follows its base build (see "Archive mode"). A
+A descriptor that ends after the paths gives a build of 0. The model then plays the older build (see "Archive mode"). A
 descriptor that ends after the build has no effects and no sends. One that ends after the sends plays every track of
 every sound. These blocks are little-endian, like the rest of the descriptor. The parameters are the words of the effect
-class's parameter structure: floats as their bits, and the integer modes of the reverbs of 2008 as integers. "Effects"
-says which sounds get an effect: the sounds that it lists pick its presets or, without presets, get the effect. A player
-skips an effect of a type that it doesn't know, and one whose number of words doesn't fit its type or whose bus isn't A,
-B or C. It skips a sound whose tracks have a bit above bit 15 set. Players older than 1.4.0 ignore the effects and the
-sends. Players of 1.4.1 and older ignore the tracks.
+class's parameter structure: floats as their bits, and the integer modes of the reverbs of 2008 as integers. The mood
+effect's one word is its mode, from 0 to 4, as an integer. "Effects" says which sounds get an effect: the sounds that it
+lists pick its presets or, without presets, get the effect. A send to the main mix adds to the main send of each of the
+sound's tracks. A track's main send is relative: 0 is the full send, and -1 takes the track out of the main mix. A
+player skips an effect of a type that it doesn't know, and one whose number of words doesn't fit its type or whose bus
+isn't A, B or C. It skips a send whose bus isn't A, B, C or the main mix. It skips a sound whose tracks have a bit above
+bit 15 set. Players older than 1.4.0 ignore the effects and the sends. Players of 1.4.1 and older ignore the tracks.
 
 The paths identify `FILE` chunks containing the sound archive (`.brsar`) and AX's microcode: the 4,096 big-endian 16-bit
 words that the game loads into the DSP's instruction memory. A player rejects archive descriptors with flags other than
@@ -154,8 +158,16 @@ words that the game loads into the DSP's instruction memory. A player rejects ar
 Version 2 of the archive descriptor has the layout of version 1. It marks a set in which a `.miniwsf` selects several
 sounds that play together (see "Sounds that play together"). Players of WSF 1.5.0 and older accept version 1 only. They
 refuse a set of version 2 with the message "archive descriptor version 2; this player supports version 1". They would
-otherwise play the first sound of each list alone. Later players accept versions 1 and 2, and reject any other. With
-version 1, they play the first sound of a list alone. A set whose files each select one sound has version 1.
+otherwise play the first sound of each list alone. Players of 1.6.0 and 1.7.0 accept versions 1 and 2, and reject any
+other. With version 1, a player plays the first sound of a list alone. A set whose files each select one sound has
+version 1.
+
+Version 3 has the layout of version 2 and plays lists in the same way. Only a version 3 descriptor may hold the mood
+effect or a send to the main mix. The `.miniwsf` of a rip with a mood holds such a descriptor (see "Effects"). As the
+last descriptor in loading order, it takes the place of the library's. The library keeps version 1 or 2. The set's
+other rips then play in older players too. Players of 1.6.0 and 1.7.0 refuse a rip with a mood. Their message is
+"archive descriptor version 3; this player supports versions 1 and 2". They would otherwise play the sound without its
+mood. Later players accept versions 1 to 3, and reject any other.
 
 ## The emulated system (game mode)
 
@@ -254,11 +266,15 @@ checked. The model takes them as the older kind.
 
 The model also follows an older pair of builds: AX of October 2006 and the build of `nw4r::snd` that comes with it.
 WarioWare: Smooth Moves links them. That build of `nw4r::snd` has no version banner. The archive descriptor gives a
-build of 0 for it. The model recognises the pair by the AX microcode in the set instead. That microcode reads parameter
-blocks of 0x120 bytes. The later microcodes read 0x140 bytes. Where the older builds differ from the base builds:
+build of 0 for it. The model recognises AX's build by the AX microcode in the set. That microcode reads parameter blocks
+of 0x120 bytes. The later microcodes read 0x140 bytes. A build of `nw4r::snd` without a banner can also come with a
+later AX. The Mii Channel links one with AX of August 2007. Whatever AX comes with it, the model plays every build of 0
+as the older build of `nw4r::snd`. AX's build gives the build of AXFX. Where the older builds differ from the base
+builds:
 
-- AX has 64 voices. AX's parameter blocks are 0x120 bytes long, with a block for updates within a frame and no biquad
-  filter. The command list uses other command numbers. AX also counts other DSP cycles for each voice.
+- AX of October 2006 has 64 voices. Its parameter blocks are 0x120 bytes long, with a block for updates within a frame
+  and no biquad filter. Its command list uses other command numbers. AX also counts other DSP cycles for each voice.
+  The other differences below are in `nw4r::snd`.
 - A sequence counts time in 416ths of a tick. Each frame, the player first takes out the whole ticks that it has
   counted. It adds the tempo next. Then it plays the ticks that it took out. The timebase plays no part. A tick lasts
   416 / tempo frames.
@@ -301,6 +317,11 @@ without a profile, `wsfrip` says once that its rips play without the game's reve
 | Animal Crossing: City Folk (USA) | a reverb, with the game's sends on some music | none | none |
 | Mario Kart Wii (USA) | a reverb with the parameters of the sound's scene | none | none |
 | Wii Music (USA) | a reverb, and another for Mii Maestro | none | none |
+| Wii Shop Channel (World) | a reverb | none | none |
+| Mii Channel (World) | a reverb, with the channel's sends on its sound effects | none | none |
+| Photo Channel 1.1 (World) | none | the channel's mood effect, for the photos' music with a mood | a reverb |
+| Forecast Channel (USA) | none | none | a reverb |
+| News Channel (USA) | none | none | a reverb |
 
 The ripper takes each effect's parameters from the game's code. A game sets its effects up when a scene starts, long
 before its music plays. A rip sets them up with its sound instead: the effects start in the first AX frame after the
@@ -339,13 +360,37 @@ that lists no sounds.
   `FxReverbHi` of 2008. The ripper gives Mii Maestro's sounds (`RP_OCS_`) that reverb. Some scenes put a reverb on bus B
   too. No sequence sends anything to bus B. In a jam session, the game sets the instruments' sends to the buses by
   stage. A rip doesn't know the stage and plays the instruments without those sends.
+- **The Wii Shop Channel** puts an `FxReverbHi` of 2008 on bus A as its sound system starts. It sets no send on a
+  sound. Its sequences set the sends to bus A. The channel takes the reverb away while it pauses its sounds. It sets
+  the reverb up again as they resume. A rip plays the reverb throughout.
+- **The Mii Channel** puts an `FxReverbHi` on bus A, with the parameters of `nw4r::snd`'s builds of 2006 and 2007. As
+  it starts a sound effect, the channel sets the effect's send to bus A to 0.2. The descriptor lists those sends by
+  sound. The music, `SEQ_TMP_BGM`, has no send.
+- **The Photo Channel 1.1, the Forecast Channel and the News Channel** share a sound manager. As each channel starts,
+  the sound manager puts `FxReverbHi` on bus C, with the same parameters in all three. The music sends to bus C from its
+  sequences. The Photo Channel's build of 2008 reads five more words. Their defaults bound the pre-delay to 0.02 s. The
+  sound manager also puts an effect that the channel defines on bus B. That effect starts off. Nothing sends to bus B.
+  Only the Photo Channel turns it on. While a photo with a mood is shown, the photos' music (`BGM_MAIN` or
+  `BGM_MAIN_KEIJI`) plays through it. The channel sets the effect's mode by the mood. It sets the music's main send to
+  -1, its send to bus C to -1 and its send to bus B to 1. The music then plays through the mood effect alone. The ripper
+  rips each of the two pieces as the channel starts it, without the mood effect. It then rips each piece once with each
+  of the four moods. The title of such a rip ends in `mood 1` to `mood 4`. Its file name ends in `_mood_1` to `_mood_4`.
+  Its `.miniwsf` holds a descriptor of version 3 (see "Archive descriptor"). The moods give these modes:
+  - Mood 1, an echo: each sample adds 0.6 of the effect's output from 180 ms before. A band-pass filter from 1 to
+    14 kHz then runs on the sum.
+  - Mood 2, an old radio: the two channels make one. A band-pass filter from 1 to 3.4 kHz runs on it. A random gain
+    from 0.9 to 1 changes every 8 samples. The low 7 bits of each sample are cleared.
+  - Mood 3, a vibrato: each sample reads the music from 5.3 to 6.7 ms before, along a sine with a period of 90 ms.
+    0.2 of the effect's output from 180 ms before is mixed with 0.8 of that.
+  - Mood 4, an octave down: two grains, 96 ms apart, read the music at half speed. Each has a Hamming window 192 ms
+    long. The output is 1.2 times their sum.
 
 Archive mode plays WSF's models of the effects: `AXFXReverbHi` and its core `AXFXReverbHiExp` of 2006 and 2008, the
-standard reverbs of October 2006 and of September 2008 (`AXFXReverbStdExp`), `AXFXChorus` with its core
-`AXFXChorusExp`, and `AXFXDelay`. Each model follows the game's code operation for operation, in single precision
-where the game uses it. The models give the same samples as the games' code. Their tests run each game's functions on
-an emulated Broadway and compare thousands of frames. The ripper's length analysis plays the effects too. A sequence
-that ends plays until its effects' output falls silent.
+standard reverbs of October 2006 and of September 2008 (`AXFXReverbStdExp`), `AXFXChorus` with its core `AXFXChorusExp`,
+`AXFXDelay`, and the Photo Channel 1.1's mood effect. Each model follows the game's code operation for operation, in
+single precision where the game uses it. The models give the same samples as the games' code. Their tests run each
+game's functions on an emulated Broadway and compare thousands of frames. The ripper's length analysis plays the effects
+too. A sequence that ends plays until its effects' output falls silent.
 
 Game mode sets the effects up with the game's code and runs them on the same models. The game's code for an effect
 takes tens of thousands of instructions in each AX frame. The models take a small part of that time on the computer
@@ -378,6 +423,22 @@ town music holds three arrangements, one for each kind of weather. A rip plays t
 kinds of weather. The town music also silences track 15 in every weather. The museum's music has an arrangement for
 each room. A rip plays the one that the game picks by default as the music starts. With `--mode archive`, `--tracks`
 rips another arrangement of a piece.
+
+**The Mii Channel** silences tracks 9, 10 and 11 of its music, `SEQ_TMP_BGM`, as the music starts. The scenes then let
+some of them play. A rip plays the tracks that the channel plays from boot: every track but 10 and 11. The music also
+rips once more in each of four other states of the channel. The channel's code names none of these scenes. A rip's name
+gives the number that the code gives the scene, or the label of the sound that the channel plays as the state starts:
+
+- `scene 4`: track 10 alone.
+- `menu out`: tracks 9 and 11. The channel lets track 11 play as it plays `SEQ_DOOL_MENU_OUT`. With
+  `SEQ_DOOL_INTO_MENU`, it silences track 11 again. The rip adds track 11 to the tracks from boot.
+- `scenes 1 and 3`: none of the three.
+- `plaza speed up`: the tracks from boot, at 1.0878 times the tempo. The channel sets that tempo as it plays
+  `SEQ_PLAZA_SPEED_UP`. With `SEQ_PLAZA_SPEED_DOWN`, it sets the tempo back.
+
+The channel changes its state while the music plays. Each rip plays one state from the music's start. Its tags give the
+state's tracks and tempo (see "Tags"). The channel also turns the music down to 0.4 of its volume in a fifth state. No
+tag gives a volume. That state therefore has no rip.
 
 ## Sounds that play together
 
@@ -834,7 +895,7 @@ the fade.
 
 ## Ripping
 
-`wsfrip` builds sets from a Wii disc image, an extracted disc, an unpacked WiiWare title (see "WiiWare titles") or a
+`wsfrip` builds sets from a Wii disc image, an extracted disc, an unpacked title (see "WiiWare titles") or a
 sound archive (`.brsar`). The image's game partition must be stored decrypted. NKit, RVZ and WIA images store it that
 way. An encrypted partition is rejected. `wsfrip --list` shows a game's sound archives. A game with a driver profile is
 ripped in game mode. Anything else is ripped in archive mode. `--mode` overrides the choice. A game with neither a sound
@@ -1045,6 +1106,16 @@ when any of them loops. A sequence that never makes a sound doesn't count. A pie
 sequences makes a sound, or when the data of one isn't in the archive. A set with such a piece gets version 2 of the
 archive descriptor. Players of WSF 1.5.0 and older refuse it.
 
+A game can play a piece in other states: the Photo Channel 1.1's moods and the Mii Channel's scenes. The profile then
+gives the piece's variants. The piece rips once as the game starts it, and once more in each variant. A variant's name
+follows the label in the rip's title and file name. `--suffix`'s text follows the variant's name. A variant can have
+effects, sends and an arrangement. The length analysis plays each rip with its variant's effects and in its arrangement.
+The `.miniwsf` of a variant with effects or sends holds an archive descriptor with them. The mood effect requires
+version 3 (see "Archive descriptor"). A variant's arrangement goes in its rip's tags: `wsf_tracks`, and `wsf_tempo` and
+`wsf_var` where the arrangement sets them. The variant's tracks replace those that the profile gives the piece (see
+"Tracks that the game silences"). `--tracks`, `--tempo` and `--var` give every rip their arrangement. The ripper then
+leaves out the variants that have an arrangement.
+
 The archive in the `.wsflib` holds only the data that the ripped sequences play: each sequence's file, and its bank's
 file and wave data. A game's archive can hold hundreds of megabytes of sound effects and voices that a rip of its music
 doesn't play. The archive's header, `SYMB` block and `INFO` block keep their sizes. The `FILE` block holds the kept
@@ -1074,17 +1145,17 @@ name. Rips of one sound in several arrangements can then share a folder and its 
 punctuation in the text become underscores. The same happens to a label's spaces and punctuation. The four options work
 in archive mode only. On a game with a driver profile, they require `--mode archive`.
 
-Tags written by `wsfrip`: `title` (the sound's label or the piece's name, and `--suffix`'s text), `wsf_sound` (the
-sound's label, or the piece's labels separated by commas), `game`, `length` and `fade`, `wsf_mode`, `wsfby`, `utf8=1`,
-and optionally `wsf_tracks`, `wsf_tempo`, `wsf_var`, `artist`, `year` and `copyright`.
+Tags written by `wsfrip`: `title` (the sound's label or the piece's name, a variant's name and `--suffix`'s text),
+`wsf_sound` (the sound's label, or the piece's labels separated by commas), `game`, `length` and `fade`, `wsf_mode`,
+`wsfby`, `utf8=1`, and optionally `wsf_tracks`, `wsf_tempo`, `wsf_var`, `artist`, `year` and `copyright`.
 
 ### WiiWare titles
 
 `wsfrip` rips a WiiWare game, or another title for the Wii's NAND, from a folder with the title's TMD and its decrypted
 contents. The TMD is the folder's file whose name ends in `.tmd`. A WAD unpacker that decrypts the contents writes such
 a folder. A Wii's NAND keeps each installed title's TMD (`title.tmd`) and contents in one:
-`title/<the title ID's first 8 hex digits>/<its last 8>/content`. WiiWare games are under `title/00010001`. A WAD holds
-the contents encrypted. `wsfrip` rejects it.
+`title/<the title ID's first 8 hex digits>/<its last 8>/content`. WiiWare games are under `title/00010001`. Channels
+are under `title/00010002`. A WAD holds the contents encrypted. `wsfrip` rejects it.
 
 Each content's file is named after 8 hex digits, with the extension `.app`. A WAD unpacker names a content after its
 index in the TMD. The NAND names it after its content ID. The ripper uses the naming under which more files hold their

@@ -1189,13 +1189,14 @@ void Voice::SetParam(const ntdlib::nwsnd::RevolutionPolicy::ChannelVoiceParam& p
     SetLpfFreq(param.lpf_freq);
     SetBiquadFilter(param.biquad_type, param.biquad_value);
     SetMainOutVolume(param.main_out_volume);
-    SetMainSend(param.main_send);
 
     // The game adds the sound's sends to the track's sends (SeqTrack::UpdateChannelParam; Animal Crossing: City Folk,
     // 0x802682b4). The channel then passes the sums on. The model adds them here instead. The sums don't change: each
     // of the game's other terms is 0. The sends are those of the sound whose sequence played the channel's note. A
-    // channel that its track has let go keeps them.
+    // channel that its track has let go keeps them. The sound's main send adds to the track's main send in the same
+    // way.
     const int player = owner_ == kNoChannel ? -1 : engine_->Channels().At(owner_).source_player;
+    SetMainSend(param.main_send + engine_->SoundMainSend(player));
     const std::array<float, ax::kAuxBusCount> sends = engine_->SoundSends(player);
     for (std::size_t bus = 0; bus < param.fx_send.size(); bus++)
     {

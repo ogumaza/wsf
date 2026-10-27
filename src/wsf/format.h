@@ -64,6 +64,14 @@ std::optional<float> ParseTempo(std::string_view text);
 // wsf_tracks tag, `tracks` play.
 nw4r::Arrangement ArrangementFromTags(const Tags& tags, uint16_t tracks = nw4r::kAllTracks);
 
+// The wsf_tempo tag for `tempo_ratio`, from 0.25 to 4: the shortest decimal that ParseTempo reads back as the same
+// float ("1.0878").
+std::string FormatTempo(float tempo_ratio);
+
+// The tags that give `arrangement`: wsf_tracks always, wsf_tempo for a tempo ratio other than 1, and wsf_var for any
+// variables.
+Tags ArrangementTags(const nw4r::Arrangement& arrangement);
+
 // The process descriptor: the reserved area of a game-mode set (docs/wsf.md, "Process descriptor").
 struct ProcessDescriptor
 {
@@ -99,6 +107,12 @@ struct ArchiveDescriptor
     // together"). Players of WSF 1.5.0 and older accept version 1 alone. They refuse such a set rather than play its
     // first sound alone.
     static constexpr uint32_t kListVersion = 2;
+
+    // The version of a descriptor that gives a sound the Photo Channel 1.1's mood effect, or a send to the main mix
+    // (docs/wsf.md, "Effects"). Version 3 also plays lists as version 2 does. Only the .miniwsf of a mood's rip holds
+    // such a descriptor. Players of WSF 1.6.0 and 1.7.0 accept versions 1 and 2. Older players accept version 1 alone.
+    // Every player before 1.8.0 refuses the rip rather than play it without its mood.
+    static constexpr uint32_t kMoodVersion = 3;
 
     static std::optional<ArchiveDescriptor> Parse(const std::vector<uint8_t>& data);
 
@@ -184,8 +198,8 @@ using xsflib::psf::LoadSet;
 constexpr std::size_t kMaxSounds = 16;
 
 // The sounds that an archive-mode set plays, in the order in which they start (docs/wsf.md, "Sounds that play
-// together"): every sound that the set's last SND chunk lists with archive descriptor version 2, and the first alone
-// with version 1. Empty for a set without a SND chunk or an archive descriptor.
+// together"): every sound that the set's last SND chunk lists with archive descriptor version 2 or 3, and the first
+// alone with version 1. Empty for a set without a SND chunk or an archive descriptor.
 std::vector<uint32_t> SoundsToPlay(const LoadedSet& set);
 
 } // namespace wsf

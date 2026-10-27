@@ -120,8 +120,9 @@ constexpr char kArchiveModeChosenNotice[] =
 
 // The notice for a title. Game mode emulates a disc. A title's game reads its contents from the Wii's NAND instead.
 constexpr char kTitleNotice[] =
-    "note: WiiWare titles rip in archive mode only. WSF's model of the SDK's sound player plays\n"
-    "      the sounds instead of the game's code. The DSP still runs the game's AX microcode.\n";
+    "note: a title, such as a WiiWare game or a channel, rips in archive mode only. WSF's model\n"
+    "      of the SDK's sound player plays the sounds instead of the title's code. The DSP still\n"
+    "      runs the title's AX microcode.\n";
 
 // What --list says, and what a rip's error says, about a game with neither kind of sound archive that WSF reads.
 // Such a game holds nothing that WSF rips.
@@ -133,16 +134,16 @@ constexpr char kUsage[] =
     "\n"
     "Rips each input into a .wsflib and a .miniwsf per sound. The output folder is next to the\n"
     "input and has the input's name with \"_wsf\" added. An input is a Wii disc image (ISO, NKit,\n"
-    "RVZ, WIA, GCZ, WBFS, CISO or WDF), an extracted disc, an unpacked WiiWare title or a sound\n"
-    "archive (.brsar). The game partition of a disc image or extracted disc must be stored\n"
-    "decrypted. NKit, RVZ and WIA images store it that way. An unpacked title is a folder with the\n"
-    "title's TMD (.tmd) and its decrypted contents (.app). A title rips in archive mode only. A\n"
-    "game whose sound library is JAudio rips in game mode only. A sound archive requires the\n"
-    "main.dol of its game. The ripper takes AX's microcode and the build of the sound library from\n"
-    "it. Give the main.dol with the archive or put it in the archive's folder. A WiiWare game has\n"
-    "no main.dol. Give its unpacked title with --microcode instead. You can also drop files on the\n"
-    "program. Sequences that make no sound, and those whose data isn't all there, are listed and\n"
-    "skipped.\n"
+    "RVZ, WIA, GCZ, WBFS, CISO or WDF), an extracted disc, an unpacked title (a WiiWare game or a\n"
+    "channel) or a sound archive (.brsar). The game partition of a disc image or extracted disc\n"
+    "must be stored decrypted. NKit, RVZ and WIA images store it that way. An unpacked title is a\n"
+    "folder with the title's TMD (.tmd) and its decrypted contents (.app). A title rips in archive\n"
+    "mode only. A game whose sound library is JAudio rips in game mode only. A sound archive\n"
+    "requires the main.dol of its game. The ripper takes AX's microcode and the build of the sound\n"
+    "library from it. Give the main.dol with the archive or put it in the archive's folder. A\n"
+    "WiiWare game or a channel has no main.dol. Give its unpacked title with --microcode instead.\n"
+    "You can also drop files on the program. Sequences that make no sound, and those whose data\n"
+    "isn't all there, are listed and skipped.\n"
     "\n"
     "options:\n"
     "  -o, --output DIR     put the rips in DIR\n"
@@ -264,6 +265,12 @@ struct Options : xsflib::cli::RipOptions
         return given.empty() ? text : text + (given.size() == 1 ? " is" : " are");
     }
 
+    // Whether --tracks, --tempo or --var was given.
+    bool Arranged() const
+    {
+        return tracks || tempo || !variables.empty();
+    }
+
     // The arrangement that --tracks, --tempo and --var give.
     nw4r::Arrangement ToArrangement() const
     {
@@ -304,12 +311,42 @@ struct Job
     // plays as separate sequences has all of them (see rip::FindPieces), the first at `index`. Empty in game mode.
     std::vector<uint32_t> sounds;
 
+    // Archive mode: the effect variant that the rip plays in (see nw4r::EffectVariant), by its place in the profile's
+    // variants, or -1 for the plain rip.
+    int variant = -1;
+
     // The sounds that the rip plays: `index` alone in game mode.
     std::vector<uint32_t> Sounds() const
     {
         return sounds.empty() ? std::vector<uint32_t>{index} : sounds;
     }
 };
+
+// Archive mode: the rips of the jobs in `jobs` that play one sound of a variant of `effects`, for each variant in turn.
+// Each gets the variant's name after its label.
+std::vector<Job> VariantJobs(const std::vector<Job>& jobs, const nw4r::ArchiveEffects& effects)
+{
+    std::vector<Job> found;
+    for (std::size_t v = 0; v < effects.variants.size(); v++)
+    {
+        const nw4r::EffectVariant& variant = effects.variants[v];
+        for (const Job& job : jobs)
+        {
+            const std::vector<uint32_t> sounds = job.Sounds();
+            if (sounds.size() == 1 &&
+                std::find(variant.sounds.begin(), variant.sounds.end(), sounds.front()) != variant.sounds.end())
+            {
+                Job rip = job;
+                rip.label += variant.name;
+                rip.timing.reset();
+                rip.variant = static_cast<int>(v);
+                found.push_back(rip);
+            }
+        }
+    }
+
+    return found;
+}
 
 // A count and its noun: "1 sound", "2 sounds".
 std::string Counted(std::size_t count, const std::string& noun)
@@ -656,15 +693,47 @@ int RipArchive(const fs::path& out_dir, xsflib::rip::FileNames& names, const std
 
     const std::size_t skipped = SkipIncomplete(jobs, *archive);
 
-    // --tracks replaces the tracks that the game plays of a sound. The tag does the same in the player.
-    const nw4r::ArchiveEffects effects = rip::FindEffects(code.dol_sha1, archive_path, *archive);
+    // --tracks replaces the tracks that the game plays of a sound. The tag does the same in the player. --tracks,
+    // --tempo and --var rip the arrangement that they give. The rips then leave out the variants that have an
+    // arrangement.
+    nw4r::ArchiveEffects effects = rip::FindEffects(code.dol_sha1, archive_path, *archive);
+    if (o.Arranged())
+    {
+        const auto arranged = [](const nw4r::EffectVariant& variant)
+        {
+            return variant.arrangement.has_value();
+        };
+        std::erase_if(effects.variants, arranged);
+    }
+
     nw4r::ArchiveEffects analyzed = effects;
     if (o.tracks)
     {
         analyzed.tracks.clear();
     }
 
-    const std::size_t silent = MeasureSequences(jobs, *archive, archive_bytes, code, o.ToArrangement(), analyzed, o);
+    // The rips of a sound in an effect variant follow its plain rips. Each variant's rips are measured with the
+    // variant's effects and arrangement. A variant without an arrangement takes the options' arrangement.
+    std::vector<Job> variant_jobs = VariantJobs(jobs, effects);
+    std::size_t silent = MeasureSequences(jobs, *archive, archive_bytes, code, o.ToArrangement(), analyzed, o);
+    for (std::size_t v = 0; v < effects.variants.size(); v++)
+    {
+        std::vector<Job> of_variant;
+        for (const Job& job : variant_jobs)
+        {
+            if (job.variant == static_cast<int>(v))
+            {
+                of_variant.push_back(job);
+            }
+        }
+
+        const nw4r::EffectVariant& variant = effects.variants[v];
+        const nw4r::ArchiveEffects with = nw4r::WithVariant(analyzed, variant);
+        const nw4r::Arrangement arrangement = variant.arrangement.value_or(o.ToArrangement());
+        silent += MeasureSequences(of_variant, *archive, archive_bytes, code, arrangement, with, o);
+        jobs.insert(jobs.end(), of_variant.begin(), of_variant.end());
+    }
+
     const std::string skipped_text = xsflib::cli::SkippedText(skipped, "data outside the archive", silent, "sequence");
     if (jobs.empty())
     {
@@ -679,7 +748,15 @@ int RipArchive(const fs::path& out_dir, xsflib::rip::FileNames& names, const std
     uint32_t version = ArchiveDescriptor::kVersion;
     for (const Job& job : jobs)
     {
-        indices.insert(indices.end(), job.sounds.begin(), job.sounds.end());
+        // A sound's rips in its variants play the plain rip's data.
+        for (const uint32_t sound : job.sounds)
+        {
+            if (std::find(indices.begin(), indices.end(), sound) == indices.end())
+            {
+                indices.push_back(sound);
+            }
+        }
+
         if (job.sounds.size() > 1)
         {
             version = ArchiveDescriptor::kListVersion;
@@ -700,7 +777,11 @@ int RipArchive(const fs::path& out_dir, xsflib::rip::FileNames& names, const std
         job.label += o.suffix;
     }
 
-    const auto build_mini = [&archive](const std::string& lib_name, const Job& job, Tags tags)
+    // The rip of a variant with effects or sends holds a descriptor with them. That descriptor takes the place of the
+    // library's. The mood effect and a send to the main mix require version 3. Players of WSF 1.7.0 and older refuse
+    // version 3. A variant's arrangement goes in the rip's tags.
+    const auto build_mini =
+        [&archive, &archive_path, &code, &effects, version](const std::string& lib_name, const Job& job, Tags tags)
     {
         std::string labels;
         for (const uint32_t sound : job.sounds)
@@ -709,7 +790,30 @@ int RipArchive(const fs::path& out_dir, xsflib::rip::FileNames& names, const std
         }
 
         tags["wsf_sound"] = labels;
-        return rip::BuildArchiveMini(job.sounds, lib_name, std::move(tags));
+
+        std::optional<ArchiveDescriptor> descriptor;
+        if (job.variant >= 0)
+        {
+            const nw4r::EffectVariant& variant = effects.variants[static_cast<std::size_t>(job.variant)];
+            if (variant.arrangement)
+            {
+                for (const auto& [key, value] : ArrangementTags(*variant.arrangement))
+                {
+                    tags[key] = value;
+                }
+            }
+
+            if (!variant.setups.empty() || !variant.sends.empty())
+            {
+                const nw4r::ArchiveEffects with = nw4r::WithVariant(effects, variant);
+                const uint32_t mini_version =
+                    nw4r::RequiresMoodVersion(with) ? ArchiveDescriptor::kMoodVersion : version;
+                descriptor = rip::BuildArchiveDescriptor(archive_path, kMicrocodeName, code.microcode, code.build, with,
+                                                         mini_version);
+            }
+        }
+
+        return rip::BuildArchiveMini(job.sounds, lib_name, std::move(tags), descriptor);
     };
     return WriteSet(out_dir, names, lib_base, lib, jobs, mini_tags, build_mini, archive_path, skipped_text);
 }
@@ -1264,7 +1368,7 @@ void ListGame(const ntdlib::disc::GameFiles& game, const rip::GameProfile* profi
     }
     else if (game.IsTitle())
     {
-        std::fprintf(stderr, "WiiWare titles rip in archive mode only\n");
+        std::fprintf(stderr, "a title rips in archive mode only\n");
     }
     else if (profile)
     {
@@ -1429,7 +1533,7 @@ int RipGame(const std::string& input, const fs::path& out_dir, const Options& o,
 
     if (title && o.mode == "game")
     {
-        std::fprintf(stderr, "error: WiiWare titles rip in archive mode only. Leave out --mode game.\n");
+        std::fprintf(stderr, "error: a title rips in archive mode only. Leave out --mode game.\n");
         return 2;
     }
 
@@ -1598,8 +1702,8 @@ int RipLooseArchive(const std::string& input, const fs::path& out_dir, const Opt
         std::fprintf(stderr,
                      "error: %s: a sound archive doesn't contain AX's microcode. Give the main.dol of the\n"
                      "       game it comes from with the archive (or with --microcode), or put that main.dol in\n"
-                     "       the archive's folder. For a WiiWare game, give its unpacked title with --microcode.\n"
-                     "       The rip stores a copy of the microcode.\n",
+                     "       the archive's folder. For an archive from a WiiWare game or a channel, give the\n"
+                     "       unpacked title with --microcode. The rip stores a copy of the microcode.\n",
                      file_name.c_str());
         return 1;
     }

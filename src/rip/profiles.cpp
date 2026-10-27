@@ -42,6 +42,14 @@ constexpr char kCityFolkSha1[] = "c87967b9ac0a943ba04ac16d875f5f79b4c46516";
 constexpr char kMarioKartSha1[] = "1b367209919fcc225c74a155dc46f29c5d64b9a2";
 constexpr char kWiiMusicSha1[] = "a9ab9a8a8f14aa58d9bf4e05d72d29115ec589ab";
 
+// The main programs of five channels: content 1 of each title. Each title stores it uncompressed. Each channel has an
+// effect profile. A title rips in archive mode only. No channel has a driver profile.
+constexpr char kWiiShopChannelSha1[] = "aecf1c655b67c6412998cbc71bf58eba2e4edf03";
+constexpr char kMiiChannelSha1[] = "5e0325b32438065bbc33fb82b755a250d93a9f9b";
+constexpr char kPhotoChannelSha1[] = "b739b39949d3f3baada78171ef2d3bf36d478669";
+constexpr char kForecastChannelSha1[] = "3c3bdec3e81441325e093c49380163e9d744597f";
+constexpr char kNewsChannelSha1[] = "1bb643fa5f5e11930849b5efd514f08d30ead975";
+
 // The profile's functions, in the order of their signatures.
 constexpr std::array<uint32_t GameProfile::*, kProfileFunctions> kProfileFields = {
     &GameProfile::main,         &GameProfile::ai_init,         &GameProfile::ax_init,
@@ -806,6 +814,167 @@ nw4r::ArchiveEffects WiiMusicEffects(const std::string& name, const ntdlib::rsar
     return found;
 }
 
+// The effects of the Wii Shop Channel. Its sound start-up (0x80023aa0) puts FxReverbHi of 2008 on bus A (0x80023b80)
+// with the parameters that 0x800239e0 sets: no pre-delay, fusedTime 2.5, coloration 0.5, no damping or crossTalk and an
+// outGain of 1. The channel clears the buses as it pauses its sounds (0x800241a0) and sets the reverb up again as they
+// resume (0x80024230). It sets no send on a sound.
+nw4r::ArchiveEffects WiiShopChannelEffects(const std::string& name, const ntdlib::rsar::SoundArchive&)
+{
+    nw4r::ArchiveEffects found;
+    if (name == "iplsound.brsar")
+    {
+        found.setups = {ReverbHi2008(0.0f, 2.5f, 0.5f, 0.0f, 0.0f, 1.0f, {5, 0.0f, 0, 0.0f, 1.0f})};
+    }
+
+    return found;
+}
+
+// The variants of `music`, SEQ_TMP_BGM, in the Mii Channel's other states. 0x80018018 sets the music's state by the
+// jump table at 0x80233a20. The channel's code names none of its scenes but the root scene (0x80206548). Its scene
+// factory (0x80010484) gives each scene a number. A variant's name gives a scene's number, or the sound that the code
+// plays with the change of state:
+// - " scene 4": track 10 alone. Scene 4 sets it (0x8002c2d8).
+// - " menu out": tracks 9 and 11. The code lets track 11 play as it plays SEQ_DOOL_MENU_OUT. With
+//   SEQ_DOOL_INTO_MENU, it silences track 11 again. Neither change touches tracks 9 and 10. The rip therefore adds
+//   track 11 to the tracks from boot.
+// - " scenes 1 and 3": none of the three. Scenes 1 and 3 set it (0x80011b30 and 0x8001755c).
+// - " plaza speed up": every track but 10 and 11, at a tempo ratio of 1.0878 (0x8001862c). The code sets the ratio as
+//   it plays SEQ_PLAZA_SPEED_UP. It sets the ratio back to 1 with SEQ_PLAZA_SPEED_DOWN.
+// The channel also turns the music down to a volume of 0.4 and back up (0x8001868c and 0x800186e4). An arrangement
+// holds no volume. That state therefore has no rip.
+std::vector<nw4r::EffectVariant> MiiScenes(uint32_t music)
+{
+    const auto scene = [music](const char* name, uint16_t tracks, float tempo_ratio)
+    {
+        nw4r::Arrangement arrangement;
+        arrangement.tracks = tracks;
+        arrangement.tempo_ratio = tempo_ratio;
+
+        return nw4r::EffectVariant{
+            .name = name, .sounds = {music}, .setups = {}, .sends = {}, .arrangement = arrangement};
+    };
+
+    return {scene(" scene 4", 0xf5ff, 1.0f), scene(" menu out", 0xfbff, 1.0f), scene(" scenes 1 and 3", 0xf1ff, 1.0f),
+            scene(" plaza speed up", 0xf3ff, 1.0878f)};
+}
+
+// The effects of the Mii Channel. The sound object's start-up (0x80017ff4) puts FxReverbHi on bus A through EGG's
+// AudioFxMgr (0x80151424). The parameters at 0x80206878 give no pre-delay, fusedTime 3, coloration 0.5, no damping or
+// crossTalk and an outGain of 0.25. Each of the channel's four starters of sound effects (0x80018bb4, 0x80018cf8,
+// 0x80018ddc and 0x80019474) sends 0.2 of its sound to bus A (BasicSound::SetFxSend, 0x800f73a0). The music,
+// SEQ_TMP_BGM, starts without a send (0x80018a2c). As the music starts, the channel silences its tracks 9, 10 and 11
+// (SeqSoundHandle::SetTrackSilence, 0x800fdf0c). The scenes then let some of them play (see MiiScenes). A rip plays
+// what the channel plays from boot: every track but 10 and 11. The music also rips once in each of its other states.
+nw4r::ArchiveEffects MiiChannelEffects(const std::string& name, const ntdlib::rsar::SoundArchive& archive)
+{
+    nw4r::ArchiveEffects found;
+    if (name == "nigaoesound.brsar")
+    {
+        found.setups = {ReverbHi(0.0f, 3.0f, 0.5f, 0.0f, 0.0f, 0.25f)};
+        for (uint32_t i = 0; i < archive.Sounds().size(); i++)
+        {
+            if (archive.Sounds()[i].name == "SEQ_TMP_BGM")
+            {
+                found.tracks.push_back({i, 0xf3ff});
+                found.variants = MiiScenes(i);
+            }
+            else
+            {
+                found.sends.push_back({i, 0, 0.2f});
+            }
+        }
+    }
+
+    return found;
+}
+
+// The Photo Channel 1.1, the Forecast Channel and the News Channel share a sound manager. As each channel starts, the
+// sound manager puts FxReverbHi on bus C with preDelayTime 0.1, fusedTime 2.1, coloration 0.6, damping 0.4, crossTalk
+// 0.1 and outGain 0.2 (AppendEffect is called at 0x80048a0c in the Photo Channel 1.1, 0x80041b60 in the Forecast
+// Channel and 0x8004ee00 in the News Channel). Nothing changes the reverb later. The music sends to bus C from its
+// sequences. The sound manager also puts an effect that the channel defines on bus B. That effect starts off. Nothing
+// sends to bus B. Only the Photo Channel turns it on. While a photo with a mood is shown, the music of the photos
+// (BGM_MAIN and BGM_MAIN_KEIJI) moves from the main mix and bus C to bus B (0x80049614). Both pieces also play without
+// a mood. Their plain rips play the channel as it starts, with nothing on bus B. Each piece also rips once with each
+// mood.
+constexpr float kChannelPreDelay = 0.1f;
+constexpr float kChannelTime = 2.1f;
+constexpr float kChannelColoration = 0.6f;
+constexpr float kChannelDamping = 0.4f;
+constexpr float kChannelCrosstalk = 0.1f;
+constexpr float kChannelOut = 0.2f;
+
+// The modes that the Photo Channel's moods 1 to 4 set (0x800212c8).
+constexpr std::array<uint32_t, 4> kMoodModes = {1, 4, 3, 2};
+
+// The variants of the Photo Channel's pieces with a mood. A photo's record gives its mood at +0x18c. While the photo is
+// shown with BGM_MAIN or BGM_MAIN_KEIJI, 0x80020d64 turns the effect on bus B on. 0x8002123c sets the mood's mode.
+// 0x80049614 sets the music's main send to -1, its send to bus C to -1 and its send to bus B to 1. The music then plays
+// through the effect alone.
+std::vector<nw4r::EffectVariant> PhotoMoods(const ntdlib::rsar::SoundArchive& archive)
+{
+    const std::vector<uint32_t> photos = SoundsNamed(archive, {"BGM_MAIN", "BGM_MAIN_KEIJI"});
+    std::vector<nw4r::EffectVariant> moods;
+    for (std::size_t mood = 0; mood < kMoodModes.size(); mood++)
+    {
+        nw4r::EffectSetup effect = Fixed(1, nw4r::EffectType::kPhotoMood, {kMoodModes[mood]});
+        effect.sounds = photos;
+        nw4r::EffectVariant variant{
+            .name = " mood " + std::to_string(mood + 1), .sounds = photos, .setups = {effect}, .sends = {}};
+        for (const uint32_t sound : photos)
+        {
+            variant.sends.push_back({sound, nw4r::kMainSendBus, -1.0f});
+            variant.sends.push_back({sound, 2, -1.0f});
+            variant.sends.push_back({sound, 1, 1.0f});
+        }
+
+        moods.push_back(variant);
+    }
+
+    return moods;
+}
+
+// The Photo Channel's NW4R SND of 2008 reads five more words. They keep the defaults that the sound manager's
+// constructor gives them (0x8004b9a8). FxReverbHi::SetParam then bounds the pre-delay by preDelayTimeMax, 0.02.
+nw4r::ArchiveEffects PhotoChannelEffects(const std::string& name, const ntdlib::rsar::SoundArchive& archive)
+{
+    nw4r::ArchiveEffects found;
+    if (name == "rev_photo.brsar")
+    {
+        nw4r::EffectSetup reverb = ReverbHi2008(kChannelPreDelay, kChannelTime, kChannelColoration, kChannelDamping,
+                                                kChannelCrosstalk, kChannelOut, {5, 0.02f, 0, 0.0f, 1.0f});
+        reverb.bus = 2;
+        found.setups = {reverb};
+        found.variants = PhotoMoods(archive);
+    }
+
+    return found;
+}
+
+// The older FxReverbHi of the Forecast Channel and the News Channel, for the channel's archive.
+nw4r::ArchiveEffects OlderChannelEffects(const std::string& name, const char* archive_name)
+{
+    nw4r::ArchiveEffects found;
+    if (name == archive_name)
+    {
+        found.setups = {Fixed(2, nw4r::EffectType::kReverbHi,
+                              Words({kChannelPreDelay, kChannelTime, kChannelColoration, kChannelDamping,
+                                     kChannelCrosstalk, kChannelOut}))};
+    }
+
+    return found;
+}
+
+nw4r::ArchiveEffects ForecastChannelEffects(const std::string& name, const ntdlib::rsar::SoundArchive&)
+{
+    return OlderChannelEffects(name, "rev_wtr.brsar");
+}
+
+nw4r::ArchiveEffects NewsChannelEffects(const std::string& name, const ntdlib::rsar::SoundArchive&)
+{
+    return OlderChannelEffects(name, "rev_news.brsar");
+}
+
 const std::vector<EffectProfile>& KnownEffectProfiles()
 {
     static const std::vector<EffectProfile> kProfiles = {
@@ -909,6 +1078,78 @@ const std::vector<EffectProfile>& KnownEffectProfiles()
                      0x800b80d8, 0x800b83d4},
                     {nw4r::EffectType::kReverbHi2008, 0x800b71a8, 0x800b7278, 0x800b72a4, 0x800b73cc, 0x800b72b4,
                      0x800b7368, 0x800b7698},
+                },
+        },
+        // The channels. A title rips in archive mode only. The addresses for game mode's driver are those of the
+        // channel's functions.
+        {
+            .dol_sha1 = kWiiShopChannelSha1,
+            .effects = WiiShopChannelEffects,
+            .axfx_build = axfx::Build::kSeptember2008,
+            .ax_register_callback = 0x801ec8e0,
+            .ax_manager = 0x801824e0,
+            .append_effect = 0x80182f70,
+            .clear_effect = 0x80183160,
+            .classes =
+                {
+                    {nw4r::EffectType::kReverbHi2008, 0x8018d6b0, 0x8018d780, 0x8018d7b0, 0x8018d900, 0x8018d7d0,
+                     0x8018d890, 0x8018dbd0},
+                },
+        },
+        {
+            .dol_sha1 = kMiiChannelSha1,
+            .effects = MiiChannelEffects,
+            .axfx_build = axfx::Build::kDecember2006,
+            .ax_register_callback = 0x801a4dd8,
+            .ax_manager = 0x800f0e60,
+            .append_effect = 0x800f1e40,
+            .clear_effect = 0x800f205c,
+            .classes =
+                {
+                    {nw4r::EffectType::kReverbHi, 0x800f9ac0, 0x800f9b4c, 0x800f9b78, 0x800f9c9c, 0x800f9b88,
+                     0x800f9c3c, 0x800f9e5c},
+                },
+        },
+        {
+            .dol_sha1 = kPhotoChannelSha1,
+            .effects = PhotoChannelEffects,
+            .axfx_build = axfx::Build::kSeptember2008,
+            .ax_register_callback = 0x8016e90c,
+            .ax_manager = 0x801169c4,
+            .append_effect = 0x801174b8,
+            .clear_effect = 0x801176bc,
+            .classes =
+                {
+                    {nw4r::EffectType::kReverbHi2008, 0x80120854, 0x80120924, 0x80120950, 0x80120a78, 0x80120960,
+                     0x80120a14, 0x80120d44},
+                },
+        },
+        {
+            .dol_sha1 = kForecastChannelSha1,
+            .effects = ForecastChannelEffects,
+            .axfx_build = axfx::Build::kDecember2006,
+            .ax_register_callback = 0x8010d1cc,
+            .ax_manager = 0x800b618c,
+            .append_effect = 0x800b6a6c,
+            .clear_effect = 0x800b6c70,
+            .classes =
+                {
+                    {nw4r::EffectType::kReverbHi, 0x800bcaa4, 0x800bcb30, 0x800bcb5c, 0x800bcc6c, 0x800bcb6c,
+                     0x800bcc18, 0x800bce48},
+                },
+        },
+        {
+            .dol_sha1 = kNewsChannelSha1,
+            .effects = NewsChannelEffects,
+            .axfx_build = axfx::Build::kDecember2006,
+            .ax_register_callback = 0x80125d34,
+            .ax_manager = 0x800cec58,
+            .append_effect = 0x800cf538,
+            .clear_effect = 0x800cf73c,
+            .classes =
+                {
+                    {nw4r::EffectType::kReverbHi, 0x800d5570, 0x800d55fc, 0x800d5628, 0x800d5738, 0x800d5638,
+                     0x800d56e4, 0x800d5914},
                 },
         },
     };
