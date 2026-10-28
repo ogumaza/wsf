@@ -24,6 +24,7 @@
 #include "ntdlib/sound_build.h"
 #include "xsflib/rip/length.h"
 
+#include "axfx/axfx.h"
 #include "nw4r/arrangement.h"
 #include "nw4r/effect_setup.h"
 #include "nw4r/util.h"
@@ -98,14 +99,62 @@ struct SoundData
 // group that holds each. Returns nothing if no group in the archive holds one of them.
 std::optional<SoundData> FindSoundData(const ntdlib::rsar::SoundArchive& archive, uint32_t index);
 
-// Whether WSF has an effect profile for the main.dol with `dol_sha1`. An effect profile gives the effects that the game
-// sets up for each of its sound archives. Only the release whose main.dol it was made from has one. Other games' rips
-// play without effects.
-bool HasEffectProfile(const std::string& dol_sha1);
+// The functions of a game with an effect profile that game mode's driver calls for the effects (driver/driver.c).
+struct EffectClass
+{
+    nw4r::EffectType type;
+    uint32_t ctor, mem_size, assign, set_param; // FxXxx::FxXxx, GetRequiredMemSize, AssignWorkBuffer and SetParam
+    uint32_t start_up, shutdown, update_buffer; // the virtual StartUp, Shutdown and UpdateBuffer (for the player)
+};
 
-// The effects of the game whose main.dol has `dol_sha1` for `archive`. The archive's file name in `archive_path` picks
-// them. Empty for a game without an effect profile, and for an archive that the game plays without effects.
-nw4r::ArchiveEffects FindEffects(const std::string& dol_sha1, const std::string& archive_path,
+// A game's effect profile: the effects that the game sets up for the sounds of each of its archives, and what game
+// mode's driver calls for them. Besides the classes' functions, the driver calls AXRegisterCallback, and AxManager's
+// GetInstance, AppendEffect and ClearEffect. AXRegisterCallback returns the callback that it replaces. AxManager
+// registers one. The driver calls that one first. For presets, the driver also calls SeqSoundHandle's constructor and
+// destructor and SeqSound::ReadVariable. For a send on the sound, it writes the send at an offset in BasicSound. For
+// the tracks that the game silences, it writes a volume of 0 into each track (SeqSound::SetTrackVolume): `seq_tracks`
+// is the offset of the SeqPlayer's 16 track pointers in SeqSound, and `track_volume` the offset of the volume in
+// SeqTrack. A game without presets, sends or silenced tracks leaves their words at 0.
+struct EffectProfile
+{
+    std::string dol_sha1;
+
+    // The game ID of the release whose main.dol the profile was made from, for the game's other releases (see
+    // DeriveEffectProfile). Empty in a profile that no other release takes.
+    std::string game_id = {};
+
+    // The effects for the sounds of the archive whose file name, in lower case, is `name`.
+    nw4r::ArchiveEffects (*effects)(const std::string& name, const ntdlib::rsar::SoundArchive& archive);
+
+    axfx::Build axfx_build; // the build of AXFX that the game links, for the player's models of the effects
+    uint32_t ax_register_callback, ax_manager, append_effect, clear_effect;
+    uint32_t seq_handle_ctor = 0, seq_handle_dtor = 0, read_variable = 0;
+    uint32_t sound_sends = 0;
+    uint32_t seq_tracks = 0, track_volume = 0;
+    std::vector<EffectClass> classes;
+
+    // For the game's other releases (see DeriveEffectProfile). The anchors are functions that the driver doesn't call.
+    // Each one places the functions of its library that match in several places. The signatures follow the functions:
+    // those from ax_register_callback to read_variable, without the ones at 0, then each class's in the order of its
+    // fields, then the anchors.
+    std::vector<uint32_t> anchors = {};
+    std::vector<FunctionSignature> signatures = {};
+};
+
+// The effect profile for the main.dol `dol` of the game with the ID `game_id`: the one made from that main.dol, or else
+// one derived from the profile of another release of the game (see SameGame and DeriveEffectProfile). Returns nothing
+// if neither exists. Without a game ID, as for a loose main.dol, only the first is found. Other games' rips play
+// without effects.
+std::optional<EffectProfile> FindEffectProfile(std::span<const uint8_t> dol, const std::string& game_id);
+
+// Finds `source`'s functions in `dol` by their signatures. DeriveProfile finds a driver profile's functions the same
+// way. The nearest of the functions and anchors that matched once places a function that matches in several places.
+// Returns the profile with the addresses found, or nothing if `source` has no signatures or a function isn't there.
+std::optional<EffectProfile> DeriveEffectProfile(const EffectProfile& source, std::span<const uint8_t> dol);
+
+// The effects of the game with the effect profile `profile` for `archive`. The archive's file name in `archive_path`
+// picks them. Empty for a game without an effect profile, and for an archive that the game plays without effects.
+nw4r::ArchiveEffects FindEffects(const std::optional<EffectProfile>& profile, const std::string& archive_path,
                                  const ntdlib::rsar::SoundArchive& archive);
 
 // Game mode: a copy of the archive for a library that plays the sequences at `indices`. The driver reads the archive's
@@ -121,10 +170,10 @@ std::vector<uint8_t> KeepLoadedGroups(const ntdlib::rsar::SoundArchive& archive,
 // disc (no leading '/'). The library holds the game's code with main patched to branch to the driver, the driver, the
 // partition's header and the archive. In the archive, only the groups that the driver loads for those sequences keep
 // their data. The rest of the FILE block is zeros (KeepLoadedGroups). The driver sets up the effects of `effects` that
-// a sound gets when no effect lists it, with the game's functions. Returns nullopt and sets `error` if main.dol isn't a
-// DOL, the archive's path is longer than the driver supports, the driver's block doesn't have the layout that the
-// ripper expects, the driver can't set up all of the effects or silence the game's tracks, or the library is larger
-// than a player loads.
+// a sound gets when no effect lists it, with the functions of the game's effect profile (FindEffectProfile). Returns
+// nullopt and sets `error` if main.dol isn't a DOL, the archive's path is longer than the driver supports, the driver's
+// block doesn't have the layout that the ripper expects, the driver can't set up all of the effects or silence the
+// game's tracks, or the library is larger than a player loads.
 std::optional<std::vector<uint8_t>> BuildLibrary(const ntdlib::disc::GameFiles& game, const GameProfile& profile,
                                                  const std::string& archive_path,
                                                  const ntdlib::rsar::SoundArchive& archive,
@@ -134,10 +183,11 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const ntdlib::disc::GameFiles& 
 
 // Game mode: a .miniwsf that plays sequence `index`, with `data`, from `lib_name`. It tells the driver whether the
 // sound's variables pick the presets of `effects`, and the send that the game sets on the sound. For a sound that gets
-// other effects than the library's, it gives the driver those effects. Their classes' functions come from the effect
-// profile of the main.dol with `dol_sha1`.
+// other effects than the library's, it gives the driver those effects. Their classes' functions come from the game's
+// effect profile, `effect_profile`.
 std::vector<uint8_t> BuildMini(uint32_t index, const SoundData& data, const std::string& lib_name, Tags tags,
-                               const nw4r::ArchiveEffects& effects = {}, const std::string& dol_sha1 = {});
+                               const nw4r::ArchiveEffects& effects = {},
+                               const std::optional<EffectProfile>& effect_profile = std::nullopt);
 
 // The address of Z2Params in driver/jaudio.c's block: after the block's header of three words. Every JAudio driver's
 // block starts the same way. After the header come the sound, its handle and its wave groups, at Z2Params' offsets. A

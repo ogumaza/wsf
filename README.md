@@ -24,16 +24,17 @@ Mega Man 9 (WiiWare) plays each piece of its music as four sequences, one for ea
 player newer than WSF 1.5.0. WSF 1.5.0 refuses them. `docs/wsf.md` describes them under "Sounds that play together".
 
 WSF plays the reverb and other effects that Wii Sports, Wii Play, WarioWare: Smooth Moves, Animal Crossing: City Folk,
-Mario Kart Wii and Wii Music (all USA) put on the Wii's auxiliary buses, in both modes. Both modes play WSF's models of
-the effects. Game mode sets them up with the game's code. The models give the same samples as the game's code. The rips
-of five Wii channels have the channels' effects too: the Wii Shop Channel, the Mii Channel and the Photo Channel 1.1
-(all World), and the Forecast and News Channels (USA). A channel rips in archive mode only. While a photo with a mood is
-shown, the Photo Channel plays the music of its photos through a mood effect. The channel defines that effect in its
-code. `wsfrip` rips each piece of that music once more in each of the four moods. A mood's rip requires a player newer
-than WSF 1.7.0. WSF 1.7.0 refuses such a rip but plays the channel's other rips. The Mii Channel plays its music with
-other tracks or at a faster tempo in some of its scenes. `wsfrip` rips the music once more in each of four such states.
-Rips of other NintendoWare games play without effects. `docs/wsf.md` describes the effects under "Effects". It
-describes the Mii Channel's states under "Tracks that the game silences".
+Mario Kart Wii and Wii Music (all USA) put on the Wii's auxiliary buses, in both modes. The European and Japanese
+releases of WarioWare: Smooth Moves get the same effects when `wsfrip` rips their disc image or extracted folder. Both
+modes play WSF's models of the effects. Game mode sets them up with the game's code. The models give the same samples as
+the game's code. The rips of five Wii channels have the channels' effects too: the Wii Shop Channel, the Mii Channel and
+the Photo Channel 1.1 (all World), and the Forecast and News Channels (USA). A channel rips in archive mode only. While
+a photo with a mood is shown, the Photo Channel plays the music of its photos through a mood effect. The channel defines
+that effect in its code. `wsfrip` rips each piece of that music once more in each of the four moods. A mood's rip
+requires a player newer than WSF 1.7.0. WSF 1.7.0 refuses such a rip but plays the channel's other rips. The Mii Channel
+plays its music with other tracks or at a faster tempo in some of its scenes. `wsfrip` rips the music once more in each
+of four such states. Rips of other NintendoWare games play without effects. `docs/wsf.md` describes the effects under
+"Effects". It describes the Mii Channel's states under "Tracks that the game silences".
 
 Game mode also plays four games whose sound library is JAudio2: The Legend of Zelda: Twilight Princess (USA,
 revision 2), Link's Crossbow Training (USA, revision 1), Super Mario Galaxy and Super Mario Galaxy 2 (both USA). The

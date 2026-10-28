@@ -32,7 +32,6 @@
 #include "xsflib/bytes.h"
 #include "xsflib/psf/psf.h"
 #include "xsflib/rip/length.h"
-#include "xsflib/sha1.h"
 
 #include "ax/pb.h"
 #include "ax/system.h"
@@ -163,9 +162,9 @@ namespace
 {
 
 // The driver's parameter block up to the end of the effects, for a sound without a send, with `setups` filled in. They
-// are effects of the game whose main.dol has `dol_sha1`. `sends` says whether the game sets sends on sounds. Returns
-// nullopt if the driver can't set the effects up.
-std::optional<std::array<uint8_t, kParamsEffectsEnd>> EffectsBlock(const std::string& dol_sha1,
+// are effects of the game with the effect profile `profile`. `sends` says whether the game sets sends on sounds.
+// Returns nullopt if the driver can't set the effects up.
+std::optional<std::array<uint8_t, kParamsEffectsEnd>> EffectsBlock(const std::optional<EffectProfile>& profile,
                                                                    const std::vector<nw4r::EffectSetup>& setups,
                                                                    bool sends)
 {
@@ -181,7 +180,6 @@ std::optional<std::array<uint8_t, kParamsEffectsEnd>> EffectsBlock(const std::st
         return block;
     }
 
-    const EffectProfile* profile = FindEffectProfile(dol_sha1);
     if (!profile || setups.size() > DriverBlock::kMaxEffects)
     {
         return std::nullopt;
@@ -277,10 +275,12 @@ bool GetsOtherEffects(const std::vector<nw4r::EffectSetup>& setups, uint32_t sou
 }
 
 // Fills in driver/driver.c's parameters in the driver's block at `params`: the settings, the archive at `archive_path`,
-// the game's profile, the effects and the silenced tracks. Returns nothing, or the error: the driver's block doesn't
-// have the layout that the ripper expects, or the driver can't set up the game's effects or silence its tracks.
+// the game's profile, the effects and the silenced tracks. The functions for the effects come from `effect_profile`.
+// Returns nothing, or the error: the driver's block doesn't have the layout that the ripper expects, or the driver
+// can't set up the game's effects or silence its tracks.
 std::optional<std::string> PutDriverParams(uint8_t* params, const GameProfile& profile, const std::string& archive_path,
-                                           const ntdlib::rsar::SoundArchive& archive, const std::string& dol_sha1,
+                                           const ntdlib::rsar::SoundArchive& archive,
+                                           const std::optional<EffectProfile>& effect_profile,
                                            const nw4r::ArchiveEffects& effects)
 {
     const auto put = [params](uint32_t offset, uint32_t value)
@@ -335,8 +335,8 @@ std::optional<std::string> PutDriverParams(uint8_t* params, const GameProfile& p
     // others (see BuildMini). The library holds the functions for the effects, and the effects of a sound that no
     // effect lists.
     const bool sends = !effects.sends.empty();
-    const auto all = EffectsBlock(dol_sha1, effects.setups, sends);
-    const auto unlisted = EffectsBlock(dol_sha1, nw4r::EffectsFor(effects.setups, nw4r::kUnlistedSound), sends);
+    const auto all = EffectsBlock(effect_profile, effects.setups, sends);
+    const auto unlisted = EffectsBlock(effect_profile, nw4r::EffectsFor(effects.setups, nw4r::kUnlistedSound), sends);
     if (!all || !unlisted)
     {
         return "the driver can't set up this game's effects";
@@ -349,7 +349,6 @@ std::optional<std::string> PutDriverParams(uint8_t* params, const GameProfile& p
     // The tracks that the game silences on some sounds. A .miniwsf gives the driver its sound's (see BuildMini).
     if (!effects.tracks.empty())
     {
-        const EffectProfile* effect_profile = FindEffectProfile(dol_sha1);
         if (!effect_profile || effect_profile->seq_tracks == 0)
         {
             return "the driver can't silence this game's tracks";
@@ -393,7 +392,7 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const ntdlib::disc::GameFiles& 
                             "to rip only the data that the sequences play."};
     if (const std::optional<std::string> problem =
             PutDriverParams(library.driver.data() + (kDriverParams - kDriverBase), profile, archive_path, archive,
-                            xsflib::Sha1::Hex(xsflib::Sha1::Of(game.dol)), effects))
+                            FindEffectProfile(game.dol, game.GameId()), effects))
     {
         return LibraryError(error, *problem);
     }
@@ -402,7 +401,7 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const ntdlib::disc::GameFiles& 
 }
 
 std::vector<uint8_t> BuildMini(uint32_t index, const SoundData& data, const std::string& lib_name, Tags tags,
-                               const nw4r::ArchiveEffects& effects, const std::string& dol_sha1)
+                               const nw4r::ArchiveEffects& effects, const std::optional<EffectProfile>& effect_profile)
 {
     uint8_t patch[12];
     xsflib::StoreBe32(&patch[0], index);
@@ -425,7 +424,7 @@ std::vector<uint8_t> BuildMini(uint32_t index, const SoundData& data, const std:
     std::optional<std::array<uint8_t, kParamsEffectsEnd>> block;
     if (GetsOtherEffects(effects.setups, index))
     {
-        block = EffectsBlock(dol_sha1, nw4r::EffectsFor(effects.setups, index), !effects.sends.empty());
+        block = EffectsBlock(effect_profile, nw4r::EffectsFor(effects.setups, index), !effects.sends.empty());
     }
 
     if (block)

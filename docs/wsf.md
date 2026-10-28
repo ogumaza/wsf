@@ -304,10 +304,13 @@ runs the bus's callback on the frame that the DSP mixed two frames before. The c
 The microcode mixes the result back into the main mix two frames later. Each frame of a bus holds 96 samples of the
 left, right and surround channels as 32-bit integers.
 
-WSF plays the effects of the games that it has an effect profile for. A profile is for one release: the `main.dol` whose
-SHA-1 it names. The ripper writes the effects for each sound archive into the archive descriptor and into the driver's
-parameter block. The rips of other games of NW4R SND play without effects. Before 1.4.0, all of them did. For a game
-without a profile, `wsfrip` says once that its rips play without the game's reverb and other effects.
+WSF plays the effects of the games that it has an effect profile for. A profile is for the `main.dol` whose SHA-1 it
+names. Another release of the game may take it. The ripper then finds the profile's functions in that release's
+`main.dol` by their signatures. Driver profiles work the same way (see "Game mode"). The European and Japanese releases
+of WarioWare: Smooth Moves take the USA release's profile that way. The ripper writes the effects for each sound
+archive into the archive descriptor and into the driver's parameter block. The rips of other games of NW4R SND play
+without effects. Before 1.4.0, all of them did. For a game without a profile, `wsfrip` says once that its rips play
+without the game's reverb and other effects.
 
 | Game | Bus A | Bus B | Bus C |
 |---|---|---|---|
@@ -1025,6 +1028,11 @@ characters. For such a `main.dol`, the ripper looks for the functions of that ga
 then derives a profile from the addresses it finds. A function that matches in several places takes the offset of the
 nearest function that matched in one. A profile whose library build checks the sound system's flag (the builds from
 2008) can't be derived this way.
+
+An effect profile is derived the same way, from signatures of the functions that the driver calls for the effects. A
+function that matches in several places may lie in a library where no other function of the profile matches in one. The
+profile then names an anchor in that library: a function that matches in one place. The driver doesn't call the anchors.
+A loose `main.dol` has no game ID. It gets only a profile made for it.
 
 ### Game mode for JAudio2 games
 

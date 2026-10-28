@@ -184,16 +184,19 @@ constexpr char kUsage[] =
     "  -h, --help           show this help\n";
 
 // What WSF's model reads from a game's main.dol: AX's microcode and the game's build of NW4R SND. The model follows
-// that build. Archive mode plays the model, and the length analyses of both modes run it.
+// that build. Archive mode plays the model, and the length analyses of both modes run it. The game's effect profile
+// gives the effects that both modes play.
 struct GameCode
 {
     ntdlib::Microcode microcode;
     nw4r::SndBuild build;
-    std::string dol_sha1; // the main.dol's SHA-1, for the game's profiles
+    std::string dol_sha1; // the main.dol's SHA-1, for the driver profile and the notes
+    std::optional<rip::EffectProfile> effect_profile;
 };
 
-// What WSF's model reads from `dol`, or nothing if `dol` holds no AX microcode.
-std::optional<GameCode> GameCodeOf(const std::vector<uint8_t>& dol)
+// What WSF's model reads from `dol`, the main.dol of the game with the ID `game_id`, or nothing if `dol` holds no AX
+// microcode. A loose main.dol has no game ID.
+std::optional<GameCode> GameCodeOf(const std::vector<uint8_t>& dol, const std::string& game_id)
 {
     const std::optional<ntdlib::Microcode> microcode = ntdlib::FindMicrocode(dol);
     if (!microcode)
@@ -201,14 +204,15 @@ std::optional<GameCode> GameCodeOf(const std::vector<uint8_t>& dol)
         return std::nullopt;
     }
 
-    return GameCode{*microcode, ntdlib::FindSndBuild(dol), xsflib::Sha1::Hex(xsflib::Sha1::Of(dol))};
+    return GameCode{*microcode, ntdlib::FindSndBuild(dol), xsflib::Sha1::Hex(xsflib::Sha1::Of(dol)),
+                    rip::FindEffectProfile(dol, game_id)};
 }
 
-// Notes once for each game in a run that WSF has no effect profile for it (see rip::HasEffectProfile).
+// Notes once for each game in a run that WSF has no effect profile for it (see rip::FindEffectProfile).
 void NoteNoEffectProfile(const GameCode& code)
 {
     static std::set<std::string> noted;
-    if (!rip::HasEffectProfile(code.dol_sha1) && noted.insert(code.dol_sha1).second)
+    if (!code.effect_profile && noted.insert(code.dol_sha1).second)
     {
         std::fprintf(stderr,
                      "note: WSF has no effect profile for this game: its rips play without the game's reverb\n"
@@ -696,7 +700,7 @@ int RipArchive(const fs::path& out_dir, xsflib::rip::FileNames& names, const std
     // --tracks replaces the tracks that the game plays of a sound. The tag does the same in the player. --tracks,
     // --tempo and --var rip the arrangement that they give. The rips then leave out the variants that have an
     // arrangement.
-    nw4r::ArchiveEffects effects = rip::FindEffects(code.dol_sha1, archive_path, *archive);
+    nw4r::ArchiveEffects effects = rip::FindEffects(code.effect_profile, archive_path, *archive);
     if (o.Arranged())
     {
         const auto arranged = [](const nw4r::EffectVariant& variant)
@@ -835,7 +839,7 @@ int RipArchiveInGameMode(const fs::path& out_dir, xsflib::rip::FileNames& names,
     }
 
     const std::size_t skipped = SkipUngrouped(jobs, archive);
-    const nw4r::ArchiveEffects effects = rip::FindEffects(code.dol_sha1, archive_path, archive);
+    const nw4r::ArchiveEffects effects = rip::FindEffects(code.effect_profile, archive_path, archive);
     const std::size_t silent = MeasureSequences(jobs, archive, archive_bytes, code, {}, effects, o);
     const std::string skipped_text = xsflib::cli::SkippedText(skipped, "no group holds them", silent, "sequence");
     if (jobs.empty())
@@ -862,7 +866,7 @@ int RipArchiveInGameMode(const fs::path& out_dir, xsflib::rip::FileNames& names,
 
     const auto build_mini = [&effects, &code](const std::string& lib_name, const Job& job, const Tags& tags)
     {
-        return rip::BuildMini(job.index, *job.data, lib_name, tags, effects, code.dol_sha1);
+        return rip::BuildMini(job.index, *job.data, lib_name, tags, effects, code.effect_profile);
     };
     return WriteSet(out_dir, names, lib_base, *lib, jobs, common, build_mini, archive_path, skipped_text);
 }
@@ -1545,7 +1549,7 @@ int RipGame(const std::string& input, const fs::path& out_dir, const Options& o,
         return 1;
     }
 
-    const std::optional<GameCode> code = GameCodeOf(game.dol);
+    const std::optional<GameCode> code = GameCodeOf(game.dol, game.GameId());
     if (!code)
     {
         std::fprintf(stderr, "error: the game's main.dol has no AX microcode\n");
@@ -1607,10 +1611,12 @@ int RipGame(const std::string& input, const fs::path& out_dir, const Options& o,
 
 // Reads AX's microcode and the build of NW4R SND from a game's code (see GameCodeOf). `path` is a main.dol, a main
 // program compressed with the CX library (a WiiWare title's content 1), or a folder that holds the game: an extracted
-// disc or an unpacked title. Prints an error and returns nothing if the code can't be read or holds no AX microcode.
+// disc or an unpacked title. Only a folder gives the game's ID. Prints an error and returns nothing if the code can't
+// be read or holds no AX microcode.
 std::optional<GameCode> ReadGameCode(const std::string& path)
 {
     std::vector<uint8_t> dol;
+    std::string game_id;
     std::error_code ec;
     if (fs::is_directory(xsflib::rip::InputPath(path), ec))
     {
@@ -1622,6 +1628,7 @@ std::optional<GameCode> ReadGameCode(const std::string& path)
         }
 
         dol = std::move(game.dol);
+        game_id = game.GameId();
     }
     else if (!xsflib::psf::ReadWholeFile(path, dol))
     {
@@ -1641,7 +1648,7 @@ std::optional<GameCode> ReadGameCode(const std::string& path)
         }
     }
 
-    std::optional<GameCode> code = GameCodeOf(dol);
+    std::optional<GameCode> code = GameCodeOf(dol, game_id);
     if (!code)
     {
         std::fprintf(stderr, "error: %s has no AX microcode\n", path.c_str());

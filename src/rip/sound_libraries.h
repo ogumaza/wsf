@@ -16,10 +16,7 @@
 #include "ntdlib/disc/game.h"
 #include "ntdlib/dol.h"
 #include "ntdlib/flipper/machine.h"
-#include "ntdlib/rsar/formats.h"
 
-#include "axfx/axfx.h"
-#include "nw4r/effect_setup.h"
 #include "wsf/format.h"
 
 namespace wsf::rip
@@ -59,42 +56,6 @@ std::optional<std::vector<uint8_t>> BuildGameLibrary(const ntdlib::disc::GameFil
 
 // A library that can't be built: sets `*error` to `message` unless `error` is null, and returns nothing.
 std::nullopt_t LibraryError(std::string* error, const std::string& message);
-
-// The effect profiles (profiles.cpp)
-
-// The functions of a game with an effect profile that game mode's driver calls for the effects (driver/driver.c).
-struct EffectClass
-{
-    nw4r::EffectType type;
-    uint32_t ctor, mem_size, assign, set_param; // FxXxx::FxXxx, GetRequiredMemSize, AssignWorkBuffer and SetParam
-    uint32_t start_up, shutdown, update_buffer; // the virtual StartUp, Shutdown and UpdateBuffer (for the player)
-};
-
-// A game's effect profile: the effects that the game sets up for the sounds of each of its archives, and what game
-// mode's driver calls for them. Besides the classes' functions, the driver calls AXRegisterCallback, and AxManager's
-// GetInstance, AppendEffect and ClearEffect. AXRegisterCallback returns the callback that it replaces. AxManager
-// registers one. The driver calls that one first. For presets, the driver also calls SeqSoundHandle's constructor and
-// destructor and SeqSound::ReadVariable. For a send on the sound, it writes the send at an offset in BasicSound. For
-// the tracks that the game silences, it writes a volume of 0 into each track (SeqSound::SetTrackVolume): `seq_tracks`
-// is the offset of the SeqPlayer's 16 track pointers in SeqSound, and `track_volume` the offset of the volume in
-// SeqTrack. A game without presets, sends or silenced tracks leaves their words at 0.
-struct EffectProfile
-{
-    const char* dol_sha1;
-
-    // The effects for the sounds of the archive whose file name, in lower case, is `name`.
-    nw4r::ArchiveEffects (*effects)(const std::string& name, const ntdlib::rsar::SoundArchive& archive);
-
-    axfx::Build axfx_build; // the build of AXFX that the game links, for the player's models of the effects
-    uint32_t ax_register_callback, ax_manager, append_effect, clear_effect;
-    uint32_t seq_handle_ctor = 0, seq_handle_dtor = 0, read_variable = 0;
-    uint32_t sound_sends = 0;
-    uint32_t seq_tracks = 0, track_volume = 0;
-    std::vector<EffectClass> classes;
-};
-
-// The effect profile of the main.dol with `dol_sha1`, or null if WSF has none.
-const EffectProfile* FindEffectProfile(const std::string& dol_sha1);
 
 // JAudio2, JAudio1 and Jac (jaudio.cpp)
 

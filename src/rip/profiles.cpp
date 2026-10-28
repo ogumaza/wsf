@@ -100,6 +100,83 @@ uint64_t MaskedHash(std::span<const uint8_t> code)
     return hash;
 }
 
+// Finds functions of another main.dol in `dol` by their signatures: for each address in `addresses`, the place in `dol`
+// of the function with the signature at the same index in `signatures`. A small function can match in several places.
+// The functions of a library move together. The offset of the nearest function that matched once therefore picks the
+// place. Returns the places, or nothing if a function isn't there.
+std::optional<std::vector<uint32_t>> FindFunctions(const ntdlib::Dol& dol, std::span<const uint32_t> addresses,
+                                                   std::span<const FunctionSignature> signatures)
+{
+    // The places whose code matches each function's signature.
+    std::vector<std::vector<uint32_t>> places(addresses.size());
+    for (const ntdlib::Dol::Section& section : dol.Sections())
+    {
+        for (std::size_t at = 0; at + 4 <= section.data.size(); at += 4)
+        {
+            const uint32_t first = MaskedWord(xsflib::LoadBe32(&section.data[at]));
+            for (std::size_t i = 0; i < addresses.size(); i++)
+            {
+                const FunctionSignature& signature = signatures[i];
+                if (first == signature.first && at + signature.size <= section.data.size() &&
+                    MaskedHash(section.data.subspan(at, signature.size)) == signature.hash)
+                {
+                    places[i].push_back(section.address + static_cast<uint32_t>(at));
+                }
+            }
+        }
+    }
+
+    // How far each function that matched once moved.
+    std::vector<std::optional<int64_t>> moved(addresses.size());
+    for (std::size_t i = 0; i < addresses.size(); i++)
+    {
+        if (places[i].empty())
+        {
+            return std::nullopt;
+        }
+
+        if (places[i].size() == 1)
+        {
+            moved[i] = int64_t{places[i][0]} - addresses[i];
+        }
+    }
+
+    std::vector<uint32_t> found(addresses.size());
+    for (std::size_t i = 0; i < addresses.size(); i++)
+    {
+        // A function that matched in several places moved as far as the nearest function that matched once.
+        const uint32_t address = addresses[i];
+        const auto distance = [addresses, address](std::size_t k)
+        {
+            return std::abs(int64_t{addresses[k]} - address);
+        };
+
+        std::optional<std::size_t> nearest;
+        for (std::size_t j = 0; j < addresses.size(); j++)
+        {
+            if (moved[j] && (!nearest || distance(j) < distance(*nearest)))
+            {
+                nearest = j;
+            }
+        }
+        if (!nearest)
+        {
+            return std::nullopt;
+        }
+
+        const int64_t offset = moved[i] ? *moved[i] : *moved[*nearest];
+        const auto place = std::find(places[i].begin(), places[i].end(), static_cast<uint32_t>(address + offset));
+        if (place == places[i].end())
+        {
+            return std::nullopt;
+        }
+
+        found[i] = *place;
+    }
+
+    return found;
+}
+
 } // namespace
 
 const std::vector<GameProfile>& KnownProfiles()
@@ -437,71 +514,22 @@ std::optional<GameProfile> DeriveProfile(const GameProfile& source, std::span<co
         return std::nullopt;
     }
 
-    // The places whose code matches each function's signature.
-    std::array<std::vector<uint32_t>, kProfileFunctions> places;
-    for (const ntdlib::Dol::Section& section : dol->Sections())
-    {
-        for (std::size_t at = 0; at + 4 <= section.data.size(); at += 4)
-        {
-            const uint32_t first = MaskedWord(xsflib::LoadBe32(&section.data[at]));
-            for (std::size_t i = 0; i < kProfileFunctions; i++)
-            {
-                const FunctionSignature& signature = source.signatures[i];
-                if (first == signature.first && at + signature.size <= section.data.size() &&
-                    MaskedHash(section.data.subspan(at, signature.size)) == signature.hash)
-                {
-                    places[i].push_back(section.address + static_cast<uint32_t>(at));
-                }
-            }
-        }
-    }
-
-    // How far each function that matched once moved.
-    std::array<std::optional<int64_t>, kProfileFunctions> moved;
+    std::array<uint32_t, kProfileFunctions> addresses;
     for (std::size_t i = 0; i < kProfileFunctions; i++)
     {
-        if (places[i].empty())
-        {
-            return std::nullopt;
-        }
+        addresses[i] = source.*kProfileFields[i];
+    }
 
-        if (places[i].size() == 1)
-        {
-            moved[i] = int64_t{places[i][0]} - source.*kProfileFields[i];
-        }
+    const std::optional<std::vector<uint32_t>> found = FindFunctions(*dol, addresses, source.signatures);
+    if (!found)
+    {
+        return std::nullopt;
     }
 
     GameProfile derived = source;
     for (std::size_t i = 0; i < kProfileFunctions; i++)
     {
-        // A function that matched in several places moved as far as the nearest function that matched once.
-        const uint32_t address = source.*kProfileFields[i];
-        const auto distance = [&source, address](std::size_t k)
-        {
-            return std::abs(int64_t{source.*kProfileFields[k]} - address);
-        };
-
-        std::optional<std::size_t> nearest;
-        for (std::size_t j = 0; j < kProfileFunctions; j++)
-        {
-            if (moved[j] && (!nearest || distance(j) < distance(*nearest)))
-            {
-                nearest = j;
-            }
-        }
-        if (!nearest)
-        {
-            return std::nullopt;
-        }
-
-        const int64_t offset = moved[i] ? *moved[i] : *moved[*nearest];
-        const auto place = std::find(places[i].begin(), places[i].end(), static_cast<uint32_t>(address + offset));
-        if (place == places[i].end())
-        {
-            return std::nullopt;
-        }
-
-        derived.*kProfileFields[i] = *place;
+        derived.*kProfileFields[i] = (*found)[i];
     }
 
     return derived;
@@ -975,6 +1003,31 @@ nw4r::ArchiveEffects NewsChannelEffects(const std::string& name, const ntdlib::r
     return OlderChannelEffects(name, "rev_news.brsar");
 }
 
+// The addresses of `profile`'s functions, in the order of its signatures: AXRegisterCallback, AxManager's GetInstance,
+// AppendEffect and ClearEffect, SeqSoundHandle's constructor and destructor and SeqSound::ReadVariable where the
+// profile has them, then each class's functions.
+std::vector<uint32_t*> EffectFunctions(EffectProfile& profile)
+{
+    std::vector<uint32_t*> functions = {&profile.ax_register_callback, &profile.ax_manager, &profile.append_effect,
+                                        &profile.clear_effect};
+    for (uint32_t* function : {&profile.seq_handle_ctor, &profile.seq_handle_dtor, &profile.read_variable})
+    {
+        if (*function != 0)
+        {
+            functions.push_back(function);
+        }
+    }
+
+    for (EffectClass& effect_class : profile.classes)
+    {
+        functions.insert(functions.end(),
+                         {&effect_class.ctor, &effect_class.mem_size, &effect_class.assign, &effect_class.set_param,
+                          &effect_class.start_up, &effect_class.shutdown, &effect_class.update_buffer});
+    }
+
+    return functions;
+}
+
 const std::vector<EffectProfile>& KnownEffectProfiles()
 {
     static const std::vector<EffectProfile> kProfiles = {
@@ -1014,6 +1067,7 @@ const std::vector<EffectProfile>& KnownEffectProfiles()
         },
         {
             .dol_sha1 = kSmoothMovesSha1,
+            .game_id = "RODE01",
             .effects = SmoothMovesEffects,
             .axfx_build = axfx::Build::kOctober2006,
             .ax_register_callback = 0x8002ff80,
@@ -1031,6 +1085,27 @@ const std::vector<EffectProfile>& KnownEffectProfiles()
                      0x800e2820},
                     {nw4r::EffectType::kDelay, 0x800e28e0, 0x800e2a34, 0x800e2a60, 0x800e2b84, 0x800e2a70, 0x800e2b24,
                      0x800e2cbc},
+                },
+            // AXRegisterCallback and SeqSoundHandle's destructor match in several places. AXInit places the first. The
+            // game's function that reads the music's variables (0x800fee28, which driver.c follows) places the second.
+            .anchors = {0x8002e3f0, 0x800fee28},
+            .signatures =
+                {
+                    {0x44, 0x9421fff0, 0xa0d7e48a180ad991},  {0x64, 0x9421fff0, 0xc6bcc4e1821f0a4e},
+                    {0x204, 0x9421ffc0, 0x9d5cc845ad848986}, {0xc8, 0x9421ffe0, 0xe2ec3a9c84a610f3},
+                    {0x108, 0x9421ffe0, 0x3ab8381b7a6d4019}, {0x54, 0x9421fff0, 0x8c27b2db545ed4aa},
+                    {0x50, 0x9421fff0, 0xe4d13d3b9e57f7e0},  {0x84, 0x9421ffd0, 0xe7af0ca778fbb3b0},
+                    {0x2c, 0x9421fff0, 0x03071cb3942a82a7},  {0xc4, 0x38630000, 0x68cbcd27cd639700},
+                    {0x18c, 0x9421fff0, 0xc5bafced5b1e6603}, {0xb4, 0x9421ffe0, 0x9e48aa8c140d1b40},
+                    {0x60, 0x9421fff0, 0x8995c55a93d3a9c2},  {0x44, 0x9421ffe0, 0xa0c96b3a5b882892},
+                    {0x74, 0x9421ffe0, 0x4242d47254e35f43},  {0x2c, 0x9421fff0, 0x03071cb3942a82a7},
+                    {0xc4, 0x38630000, 0x68cbcd27cd639700},  {0x148, 0x9421ffe0, 0x9fa6a8ea745a3664},
+                    {0xb4, 0x9421ffe0, 0x9e48aa8c140d1b40},  {0x60, 0x9421fff0, 0x8995c55a93d3a9c2},
+                    {0x44, 0x9421ffe0, 0xa0c96b3a5b882892},  {0x154, 0x9421ffe0, 0x875ce753b7fed176},
+                    {0x2c, 0x9421fff0, 0x03071cb3942a82a7},  {0xc4, 0x38630000, 0x68cbcd27cd639700},
+                    {0x138, 0x9421fff0, 0x3d63a8a733f6c736}, {0xb4, 0x9421ffe0, 0x9e48aa8c140d1b40},
+                    {0x60, 0x9421fff0, 0x8995c55a93d3a9c2},  {0x44, 0x9421ffe0, 0xa0c96b3a5b882892},
+                    {0x40, 0x9421fff0, 0x50ffca50e67c275d},  {0xc8, 0x9421ffe0, 0x535d001042662a33},
                 },
         },
         {
@@ -1158,28 +1233,77 @@ const std::vector<EffectProfile>& KnownEffectProfiles()
 
 } // namespace
 
-const EffectProfile* FindEffectProfile(const std::string& dol_sha1)
+std::optional<EffectProfile> FindEffectProfile(std::span<const uint8_t> dol, const std::string& game_id)
 {
+    const std::string sha1 = xsflib::Sha1::Hex(xsflib::Sha1::Of(dol));
     for (const EffectProfile& profile : KnownEffectProfiles())
     {
-        if (dol_sha1 == profile.dol_sha1)
+        if (sha1 == profile.dol_sha1)
         {
-            return &profile;
+            return profile;
         }
     }
 
-    return nullptr;
+    // Another release of a game with a profile.
+    for (const EffectProfile& source : KnownEffectProfiles())
+    {
+        if (!SameGame(source.game_id, game_id))
+        {
+            continue;
+        }
+
+        std::optional<EffectProfile> derived = DeriveEffectProfile(source, dol);
+        if (derived)
+        {
+            derived->dol_sha1 = sha1;
+            derived->game_id = game_id;
+
+            return derived;
+        }
+    }
+
+    return std::nullopt;
 }
 
-bool HasEffectProfile(const std::string& dol_sha1)
+std::optional<EffectProfile> DeriveEffectProfile(const EffectProfile& source, std::span<const uint8_t> dol_bytes)
 {
-    return FindEffectProfile(dol_sha1) != nullptr;
+    // The functions to find: the profile's, then its anchors.
+    EffectProfile derived = source;
+    std::vector<uint32_t*> functions = EffectFunctions(derived);
+    for (uint32_t& anchor : derived.anchors)
+    {
+        functions.push_back(&anchor);
+    }
+
+    const std::optional<ntdlib::Dol> dol = ntdlib::Dol::Parse(dol_bytes);
+    if (source.signatures.size() != functions.size() || !dol)
+    {
+        return std::nullopt;
+    }
+
+    std::vector<uint32_t> addresses;
+    for (const uint32_t* function : functions)
+    {
+        addresses.push_back(*function);
+    }
+
+    const std::optional<std::vector<uint32_t>> found = FindFunctions(*dol, addresses, source.signatures);
+    if (!found)
+    {
+        return std::nullopt;
+    }
+
+    for (std::size_t i = 0; i < functions.size(); i++)
+    {
+        *functions[i] = (*found)[i];
+    }
+
+    return derived;
 }
 
-nw4r::ArchiveEffects FindEffects(const std::string& dol_sha1, const std::string& archive_path,
+nw4r::ArchiveEffects FindEffects(const std::optional<EffectProfile>& profile, const std::string& archive_path,
                                  const ntdlib::rsar::SoundArchive& archive)
 {
-    const EffectProfile* profile = FindEffectProfile(dol_sha1);
     return profile ? profile->effects(ArchiveFileName(archive_path), archive) : nw4r::ArchiveEffects{};
 }
 
