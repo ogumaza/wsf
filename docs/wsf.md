@@ -306,11 +306,11 @@ left, right and surround channels as 32-bit integers.
 
 WSF plays the effects of the games that it has an effect profile for. A profile is for the `main.dol` whose SHA-1 it
 names. Another release of the game may take it. The ripper then finds the profile's functions in that release's
-`main.dol` by their signatures. Driver profiles work the same way (see "Game mode"). The European and Japanese releases
-of WarioWare: Smooth Moves take the USA release's profile that way. The ripper writes the effects for each sound
-archive into the archive descriptor and into the driver's parameter block. The rips of other games of NW4R SND play
-without effects. Before 1.4.0, all of them did. For a game without a profile, `wsfrip` says once that its rips play
-without the game's reverb and other effects.
+`main.dol` by their signatures. Driver profiles work the same way (see "Game mode"). The European releases of the six
+games in the table below take the USA release's profile that way. So does the Japanese release of WarioWare: Smooth
+Moves. The ripper writes the effects for each sound archive into the archive descriptor and into the driver's parameter
+block. The rips of other games of NW4R SND play without effects. Before 1.4.0, all of them did. For a game without a
+profile, `wsfrip` says once that its rips play without the game's reverb and other effects.
 
 | Game | Bus A | Bus B | Bus C |
 |---|---|---|---|
@@ -1020,14 +1020,17 @@ sequence. It also loads the group with the sound's bank when that's another grou
 holds the files that no other group does. That group can't be loaded. A sound whose sequence or bank only that group
 holds is skipped.
 
-A profile also holds a signature of each of its functions. A signature is the function's length up to its first `blr`,
-its first word and an FNV-1a hash of its words. In each word, the fields that the linker fills in are cleared: branch
-targets, and the immediates of `addis` and of the loads, stores and adds that don't address the stack. Another release
-or revision of a game may link the same functions at other addresses. Its game ID starts with the same three
-characters. For such a `main.dol`, the ripper looks for the functions of that game's profile by their signatures. It
-then derives a profile from the addresses it finds. A function that matches in several places takes the offset of the
-nearest function that matched in one. A profile whose library build checks the sound system's flag (the builds from
-2008) can't be derived this way.
+A profile also holds a signature of each of its functions but `main`. A signature is the function's length up to its
+first `blr`, its first word and an FNV-1a hash of its words. In each word, the fields that the linker fills in are
+cleared: branch targets, and the immediates of `addis` and of the loads, stores and adds that don't address the stack.
+Another release or revision of a game may link the same functions at other addresses. Its game ID starts with the same
+three characters. For such a `main.dol`, the ripper looks for the functions of that game's profile by their signatures.
+It then derives a profile from the addresses it finds. A function that matches in several places takes the offset of the
+nearest function that matched in one. A release's `main` can differ from the USA one. The ripper takes it from the
+start-up code instead: `__start` calls `main` and then branches to `exit`. In the library builds from 2008,
+`SoundArchivePlayer::Setup` first checks the sound system's flag. The driver sets that flag. For such a build, the
+ripper takes the flag's address from the code of `Setup` that it found. `Setup` calls a function that reads the flag
+relative to `r13`. The start-up code gives `r13`.
 
 An effect profile is derived the same way, from signatures of the functions that the driver calls for the effects. A
 function that matches in several places may lie in a library where no other function of the profile matches in one. The

@@ -50,15 +50,30 @@ constexpr char kPhotoChannelSha1[] = "b739b39949d3f3baada78171ef2d3bf36d478669";
 constexpr char kForecastChannelSha1[] = "3c3bdec3e81441325e093c49380163e9d744597f";
 constexpr char kNewsChannelSha1[] = "1bb643fa5f5e11930849b5efd514f08d30ead975";
 
-// The profile's functions, in the order of their signatures.
+// The profile's functions with signatures, in the order of the signatures.
 constexpr std::array<uint32_t GameProfile::*, kProfileFunctions> kProfileFields = {
-    &GameProfile::main,         &GameProfile::ai_init,         &GameProfile::ax_init,
-    &GameProfile::alloc,        &GameProfile::sleep_ticks,     &GameProfile::init_sound_system,
-    &GameProfile::archive_ctor, &GameProfile::archive_open,    &GameProfile::archive_load_info,
-    &GameProfile::player_ctor,  &GameProfile::player_mem_size, &GameProfile::player_strm_size,
-    &GameProfile::player_setup, &GameProfile::heap_ctor,       &GameProfile::heap_create,
-    &GameProfile::load_group,   &GameProfile::start_sound,     &GameProfile::update,
+    &GameProfile::ai_init,
+    &GameProfile::ax_init,
+    &GameProfile::alloc,
+    &GameProfile::sleep_ticks,
+    &GameProfile::init_sound_system,
+    &GameProfile::archive_ctor,
+    &GameProfile::archive_open,
+    &GameProfile::archive_load_info,
+    &GameProfile::player_ctor,
+    &GameProfile::player_mem_size,
+    &GameProfile::player_strm_size,
+    &GameProfile::player_setup,
+    &GameProfile::heap_ctor,
+    &GameProfile::heap_create,
+    &GameProfile::load_group,
+    &GameProfile::start_sound,
+    &GameProfile::update,
 };
+
+// The place of SoundArchivePlayer::Setup among the profile's functions.
+constexpr std::size_t kSetupFunction = 11;
+static_assert(kProfileFields[kSetupFunction] == &GameProfile::player_setup);
 
 // Opcodes of addi, addis and the D-form loads and stores. The linker may fill in their immediates.
 bool IsDForm(uint32_t opcode)
@@ -177,6 +192,123 @@ std::optional<std::vector<uint32_t>> FindFunctions(const ntdlib::Dol& dol, std::
     return found;
 }
 
+// Words of PowerPC code: blr, and the opcode and the AA and LK bits of b and bl, which kBranchBits selects.
+constexpr uint32_t kBlr = 0x4e800020;
+constexpr uint32_t kBranchBits = 0xfc000003;
+constexpr uint32_t kB = 0x48000000;
+constexpr uint32_t kBl = 0x48000001;
+
+// The word at the load address `address` in `dol`, if a section holds all four bytes.
+std::optional<uint32_t> WordAt(const ntdlib::Dol& dol, uint32_t address)
+{
+    const std::span<const uint8_t> bytes = dol.At(address);
+    if (bytes.size() < 4)
+    {
+        return std::nullopt;
+    }
+
+    return xsflib::LoadBe32(bytes.data());
+}
+
+// The function that the word `word` at `address` calls, if it's a relative bl.
+std::optional<uint32_t> CallTarget(std::optional<uint32_t> word, uint32_t address)
+{
+    if (!word || (*word & kBranchBits) != kBl)
+    {
+        return std::nullopt;
+    }
+
+    const int32_t offset = (static_cast<int32_t>(*word << 6) >> 6) & ~3;
+
+    return address + static_cast<uint32_t>(offset);
+}
+
+// The base of the small data area, which CodeWarrior's start-up code puts in r13. The entry point calls
+// __init_registers, which loads r13 with lis, then ori or addi. Returns nothing if none of the functions that the entry
+// point's first 400 words call does that in its first 40 words.
+std::optional<uint32_t> SmallDataBase(const ntdlib::Dol& dol)
+{
+    constexpr uint32_t kR13 = 13;
+    for (uint32_t i = 0; i < 400; i++)
+    {
+        const uint32_t at = dol.Entry() + 4 * i;
+        const std::optional<uint32_t> callee = CallTarget(WordAt(dol, at), at);
+        for (uint32_t j = 0; callee && j < 40; j++)
+        {
+            const std::optional<uint32_t> high = WordAt(dol, *callee + 4 * j);
+            const std::optional<uint32_t> low = WordAt(dol, *callee + 4 * j + 4);
+            if (!high || !low)
+            {
+                break;
+            }
+
+            const uint32_t low_opcode = *low >> 26;
+            const bool loads_high = *high >> 26 == 15 && (*high >> 21 & 31) == kR13 && (*high >> 16 & 31) == 0;
+            const bool adds_low =
+                (low_opcode == 14 || low_opcode == 24) && (*low >> 21 & 31) == kR13 && (*low >> 16 & 31) == kR13;
+            if (loads_high && adds_low)
+            {
+                const uint32_t base = *high << 16;
+                return low_opcode == 24 ? base | (*low & 0xffff)
+                                        : base + static_cast<uint32_t>(static_cast<int16_t>(*low & 0xffff));
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+// The game's main. __start, at the entry point, ends with bl main, then b exit. The function after it starts within
+// 400 words, and the first blr lies in that function. Returns the last bl before the first blr that a b follows, or
+// nothing if no blr comes in the first 400 words.
+std::optional<uint32_t> FindMain(const ntdlib::Dol& dol)
+{
+    std::optional<uint32_t> main;
+    for (uint32_t i = 0; i < 400; i++)
+    {
+        const uint32_t at = dol.Entry() + 4 * i;
+        const std::optional<uint32_t> word = WordAt(dol, at);
+        const std::optional<uint32_t> next = WordAt(dol, at + 4);
+        if (!word || !next)
+        {
+            return std::nullopt;
+        }
+
+        if (*word == kBlr)
+        {
+            return main;
+        }
+
+        const std::optional<uint32_t> callee = CallTarget(word, at);
+        if (callee && (*next & kBranchBits) == kB)
+        {
+            main = callee;
+        }
+    }
+
+    return std::nullopt;
+}
+
+// The address of the sound system's flag that SoundArchivePlayer::Setup at `setup` checks in a 2008 build of NW4R SND
+// (GameProfile::init_flag). Setup's first `size` bytes call IsInitializedSoundSystem, which reads the flag relative to
+// r13: lbz r3, d(r13), then blr. Returns nothing if no call there reaches such a function.
+std::optional<uint32_t> FindInitFlag(const ntdlib::Dol& dol, uint32_t setup, uint32_t size)
+{
+    constexpr uint32_t kLbzR3FromR13 = 0x886d0000;
+    const std::optional<uint32_t> base = SmallDataBase(dol);
+    for (uint32_t at = setup; base && at < setup + size; at += 4)
+    {
+        const std::optional<uint32_t> callee = CallTarget(WordAt(dol, at), at);
+        const std::optional<uint32_t> load = callee ? WordAt(dol, *callee) : std::nullopt;
+        if (load && (*load & 0xffff0000) == kLbzR3FromR13 && WordAt(dol, *callee + 4) == kBlr)
+        {
+            return *base + static_cast<uint32_t>(static_cast<int16_t>(*load & 0xffff));
+        }
+    }
+
+    return std::nullopt;
+}
+
 } // namespace
 
 const std::vector<GameProfile>& KnownProfiles()
@@ -213,7 +345,6 @@ const std::vector<GameProfile>& KnownProfiles()
             .ios_version = 21,
             .init_flag = 0,
             .signatures = {{
-                {0x34, 0x9421fff0, 0x4d2783dea7611fe9},
                 {0x180, 0x9421ffe0, 0x25fcee24901ac57a},
                 {0x54, 0x9421fff0, 0x60936706004ec277},
                 {0x34, 0x800d0000, 0xfad1a78efc06182b},
@@ -259,7 +390,6 @@ const std::vector<GameProfile>& KnownProfiles()
             .ios_version = 21,
             .init_flag = 0,
             .signatures = {{
-                {0x34, 0x9421fff0, 0x4d2783dea7611fe9},
                 {0x180, 0x9421ffe0, 0x25fcee24901ac57a},
                 {0x54, 0x9421fff0, 0x60936706004ec277},
                 {0x34, 0x800d0000, 0xfad1a78efc06182b},
@@ -305,7 +435,6 @@ const std::vector<GameProfile>& KnownProfiles()
             .ios_version = 9,
             .init_flag = 0,
             .signatures = {{
-                {0x1a0, 0x9421fff0, 0x94a7ddd954409b2c},
                 {0x180, 0x9421ffe0, 0x25fcee24901ac57a},
                 {0x40, 0x9421fff0, 0x50ffca50e67c275d},
                 {0x34, 0x800d0000, 0xfad1a78efc06182b},
@@ -351,7 +480,6 @@ const std::vector<GameProfile>& KnownProfiles()
             .ios_version = 36,
             .init_flag = 0x80381e88, // SoundSystem's initialized flag
             .signatures = {{
-                {0x3c, 0x48000000, 0x8f13a0d9937e24b3},
                 {0x180, 0x9421ffe0, 0x25fcee24901ac57a},
                 {0x54, 0x9421fff0, 0x60936706004ec277},
                 {0x34, 0x800d0000, 0xfad1a78efc06182b},
@@ -397,7 +525,6 @@ const std::vector<GameProfile>& KnownProfiles()
             .ios_version = 35,
             .init_flag = 0x80698230, // SoundSystem's initialized flag
             .signatures = {{
-                {0x34, 0x9421fff0, 0x4d2783dea7611fe9},
                 {0x180, 0x9421ffe0, 0x25fcee24901ac57a},
                 {0x54, 0x9421fff0, 0x60936706004ec277},
                 {0x34, 0x800d0000, 0xfad1a78efc06182b},
@@ -443,7 +570,6 @@ const std::vector<GameProfile>& KnownProfiles()
             .ios_version = 38,
             .init_flag = 0x8074ef38, // SoundSystem's initialized flag
             .signatures = {{
-                {0xb4, 0x542b06fe, 0x7028186cbbedc369},
                 {0x180, 0x9421ffe0, 0x25fcee24901ac57a},
                 {0x54, 0x9421fff0, 0x60936706004ec277},
                 {0x34, 0x800d0000, 0xfad1a78efc06182b},
@@ -486,7 +612,7 @@ std::optional<GameProfile> FindProfile(const ntdlib::disc::GameFiles& game)
     // Another release or a revision of a game with a profile.
     for (const GameProfile& source : KnownProfiles())
     {
-        if (!SameGame(source.game_id, game.GameId()) || source.init_flag != 0)
+        if (!SameGame(source.game_id, game.GameId()))
         {
             continue;
         }
@@ -521,15 +647,30 @@ std::optional<GameProfile> DeriveProfile(const GameProfile& source, std::span<co
     }
 
     const std::optional<std::vector<uint32_t>> found = FindFunctions(*dol, addresses, source.signatures);
-    if (!found)
+    const std::optional<uint32_t> main = FindMain(*dol);
+    if (!found || !main)
     {
         return std::nullopt;
     }
 
     GameProfile derived = source;
+    derived.main = *main;
     for (std::size_t i = 0; i < kProfileFunctions; i++)
     {
         derived.*kProfileFields[i] = (*found)[i];
+    }
+
+    // A 2008 build's Setup checks the sound system's flag. Its code gives the flag's address.
+    if (source.init_flag != 0)
+    {
+        const std::optional<uint32_t> flag =
+            FindInitFlag(*dol, derived.player_setup, source.signatures[kSetupFunction].size);
+        if (!flag)
+        {
+            return std::nullopt;
+        }
+
+        derived.init_flag = *flag;
     }
 
     return derived;
@@ -1033,6 +1174,7 @@ const std::vector<EffectProfile>& KnownEffectProfiles()
     static const std::vector<EffectProfile> kProfiles = {
         {
             .dol_sha1 = kWiiSportsSha1,
+            .game_id = "RSPE01",
             .effects = WiiSportsEffects,
             .axfx_build = axfx::Build::kDecember2006,
             .ax_register_callback = 0x80106260,
@@ -1046,9 +1188,24 @@ const std::vector<EffectProfile>& KnownEffectProfiles()
                     {nw4r::EffectType::kChorus, 0x80039d88, 0x80039dfc, 0x80039e28, 0x80039f54, 0x80039e38, 0x80039ef4,
                      0x8003a0c0},
                 },
+            .anchors = {0x80104450},
+            .signatures =
+                {
+                    {0x44, 0x9421fff0, 0xa0d7e48a180ad991},  {0x64, 0x9421fff0, 0xc6bcc4e1821f0a4e},
+                    {0x204, 0x9421ffc0, 0x9d5cc845ad848986}, {0xc8, 0x9421ffe0, 0xe2ec3a9c84a610f3},
+                    {0x8c, 0x9421ffd0, 0xcb31914fa11fed70},  {0x2c, 0x9421fff0, 0x03071cb3942a82a7},
+                    {0xcc, 0x38630000, 0x894189134e969a59},  {0x1ec, 0x9421ffe0, 0xe49a28b6e723d392},
+                    {0xbc, 0x9421ffe0, 0x27575a32c85c8399},  {0x60, 0x9421ffe0, 0x2e338e3485d8bc6b},
+                    {0x44, 0x9421ffe0, 0xa0c96b3a5b882892},  {0x74, 0x9421ffe0, 0x4242d47254e35f43},
+                    {0x2c, 0x9421fff0, 0x03071cb3942a82a7},  {0xcc, 0x38630000, 0x894189134e969a59},
+                    {0x16c, 0x9421ffe0, 0x8cd480b7638c6104}, {0xbc, 0x9421ffe0, 0x27575a32c85c8399},
+                    {0x60, 0x9421ffe0, 0x2e338e3485d8bc6b},  {0x44, 0x9421ffe0, 0xa0c96b3a5b882892},
+                    {0x54, 0x9421fff0, 0x60936706004ec277},
+                },
         },
         {
             .dol_sha1 = kWiiPlaySha1,
+            .game_id = "RHAE01",
             .effects = WiiPlayEffects,
             .axfx_build = axfx::Build::kDecember2006,
             .ax_register_callback = 0x80105c48,
@@ -1063,6 +1220,23 @@ const std::vector<EffectProfile>& KnownEffectProfiles()
                      0x8003a058},
                     {nw4r::EffectType::kDelay, 0x8003a118, 0x8003a28c, 0x8003a2b8, 0x8003a3e4, 0x8003a2c8, 0x8003a384,
                      0x8003a540},
+                },
+            .anchors = {0x80103e38},
+            .signatures =
+                {
+                    {0x44, 0x9421fff0, 0xa0d7e48a180ad991},  {0x64, 0x9421fff0, 0xc6bcc4e1821f0a4e},
+                    {0x204, 0x9421ffc0, 0x9d5cc845ad848986}, {0xc8, 0x9421ffe0, 0xe2ec3a9c84a610f3},
+                    {0x8c, 0x9421ffd0, 0xcb31914fa11fed70},  {0x2c, 0x9421fff0, 0x03071cb3942a82a7},
+                    {0xcc, 0x38630000, 0x894189134e969a59},  {0x1ec, 0x9421ffe0, 0xe49a28b6e723d392},
+                    {0xbc, 0x9421ffe0, 0x27575a32c85c8399},  {0x60, 0x9421ffe0, 0x2e338e3485d8bc6b},
+                    {0x44, 0x9421ffe0, 0xa0c96b3a5b882892},  {0x74, 0x9421ffe0, 0x4242d47254e35f43},
+                    {0x2c, 0x9421fff0, 0x03071cb3942a82a7},  {0xcc, 0x38630000, 0x894189134e969a59},
+                    {0x16c, 0x9421ffe0, 0x8cd480b7638c6104}, {0xbc, 0x9421ffe0, 0x27575a32c85c8399},
+                    {0x60, 0x9421ffe0, 0x2e338e3485d8bc6b},  {0x44, 0x9421ffe0, 0xa0c96b3a5b882892},
+                    {0x174, 0x9421ffd0, 0xd3122aeba6f9ba41}, {0x2c, 0x9421fff0, 0x03071cb3942a82a7},
+                    {0xcc, 0x38630000, 0x894189134e969a59},  {0x15c, 0x9421ffe0, 0x71e20de898e8cb90},
+                    {0xbc, 0x9421ffe0, 0x27575a32c85c8399},  {0x60, 0x9421ffe0, 0x2e338e3485d8bc6b},
+                    {0x44, 0x9421ffe0, 0xa0c96b3a5b882892},  {0x54, 0x9421fff0, 0x60936706004ec277},
                 },
         },
         {
@@ -1110,6 +1284,7 @@ const std::vector<EffectProfile>& KnownEffectProfiles()
         },
         {
             .dol_sha1 = kCityFolkSha1,
+            .game_id = "RUUE01",
             .effects = CityFolkEffects,
             .axfx_build = axfx::Build::kSeptember2008,
             .ax_register_callback = 0x80376748,
@@ -1124,9 +1299,26 @@ const std::vector<EffectProfile>& KnownEffectProfiles()
                     {nw4r::EffectType::kReverbHi2008, 0x80262d10, 0x80262de0, 0x80262e34, 0x80262fe8, 0x80262e44,
                      0x80262f6c, 0x8026333c},
                 },
+            .anchors = {0x80374924},
+            .signatures =
+                {
+                    {0x44, 0x9421fff0, 0xa0d7e48a180ad991},
+                    {0x64, 0x9421fff0, 0xc6bcc4e1821f0a4e},
+                    {0x204, 0x9421ffc0, 0x9d5cc845ad848986},
+                    {0x15c, 0x9421ffe0, 0x9befc0e47bab4e14},
+                    {0xd0, 0x9421ffc0, 0x039354d5ccec9971},
+                    {0x54, 0x9421fff0, 0xafb952a0e6c9afa7},
+                    {0x138, 0x38630000, 0x97851330e118afe4},
+                    {0x354, 0x9421ffe0, 0x17d7f12fd32b83d0},
+                    {0x128, 0x9421ffe0, 0x6c652ee81a3bc9a4},
+                    {0x7c, 0x9421ffe0, 0xd0bfd2100e516bd0},
+                    {0xa0, 0x9421ffd0, 0xf04fd0562541f958},
+                    {0x54, 0x9421fff0, 0x60936706004ec277},
+                },
         },
         {
             .dol_sha1 = kMarioKartSha1,
+            .game_id = "RMCE01",
             .effects = MarioKartEffects,
             .axfx_build = axfx::Build::kSeptember2008,
             .ax_register_callback = 0x80126c04,
@@ -1138,9 +1330,24 @@ const std::vector<EffectProfile>& KnownEffectProfiles()
                     {nw4r::EffectType::kReverbStd2008, 0x80095080, 0x80095150, 0x800951b0, 0x80095380, 0x800951d0,
                      0x80095300, 0x800956a0},
                 },
+            .signatures =
+                {
+                    {0x44, 0x9421fff0, 0xa0d7e48a180ad991},
+                    {0x64, 0x9421fff0, 0xc6bcc4e1821f0a4e},
+                    {0x1f0, 0x9421ffc0, 0x727cd9d284365b23},
+                    {0xc8, 0x9421ffe0, 0xe0fe1cc79461efd3},
+                    {0xc4, 0x9421ffc0, 0xec0a766fee3b8b41},
+                    {0x54, 0x9421fff0, 0xafb952a0e6c9afa7},
+                    {0x148, 0x38630000, 0x934ca3d31fef2304},
+                    {0x31c, 0x9421ffe0, 0xaa7c744d0175d5a2},
+                    {0x128, 0x9421ffe0, 0xbd6df491c46977e4},
+                    {0x7c, 0x9421ffe0, 0x40b3d5b5b84ab030},
+                    {0xa0, 0x9421ffd0, 0x5854c13449161e78},
+                },
         },
         {
             .dol_sha1 = kWiiMusicSha1,
+            .game_id = "R64E01",
             .effects = WiiMusicEffects,
             .axfx_build = axfx::Build::kSeptember2008,
             .ax_register_callback = 0x800e8b48,
@@ -1153,6 +1360,27 @@ const std::vector<EffectProfile>& KnownEffectProfiles()
                      0x800b80d8, 0x800b83d4},
                     {nw4r::EffectType::kReverbHi2008, 0x800b71a8, 0x800b7278, 0x800b72a4, 0x800b73cc, 0x800b72b4,
                      0x800b7368, 0x800b7698},
+                },
+            .signatures =
+                {
+                    {0x44, 0x9421fff0, 0xa0d7e48a180ad991},
+                    {0x64, 0x9421fff0, 0xc6bcc4e1821f0a4e},
+                    {0x204, 0x9421ffc0, 0x9d5cc845ad848986},
+                    {0x15c, 0x9421ffe0, 0x9befc0e47bab4e14},
+                    {0xc4, 0x9421ffc0, 0xec0a766fee3b8b41},
+                    {0x2c, 0x9421fff0, 0x03071cb3942a82a7},
+                    {0xc4, 0x38630000, 0xe7f5b805ad388eb6},
+                    {0x298, 0x9421ffe0, 0xa0ce37ffefa99ff6},
+                    {0xb4, 0x9421ffe0, 0xe553350da1d254f6},
+                    {0x64, 0x9421ffe0, 0x34b83493f8cebe5a},
+                    {0x58, 0x9421ffe0, 0xb75671833a45eae1},
+                    {0xd0, 0x9421ffc0, 0x039354d5ccec9971},
+                    {0x2c, 0x9421fff0, 0x03071cb3942a82a7},
+                    {0xc4, 0x38630000, 0xe7f5b805ad388eb6},
+                    {0x2cc, 0x9421ffe0, 0x9324aaef50f3b9d2},
+                    {0xb4, 0x9421ffe0, 0xe553350da1d254f6},
+                    {0x64, 0x9421ffe0, 0x34b83493f8cebe5a},
+                    {0x58, 0x9421ffe0, 0xb75671833a45eae1},
                 },
         },
         // The channels. A title rips in archive mode only. The addresses for game mode's driver are those of the

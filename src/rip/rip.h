@@ -43,8 +43,8 @@ struct FunctionSignature
     uint64_t hash = 0;
 };
 
-// The functions of a profile: main, then those from ai_init to update.
-constexpr std::size_t kProfileFunctions = 18;
+// The functions of a profile that have signatures: those from ai_init to update. main has none (see DeriveProfile).
+constexpr std::size_t kProfileFunctions = 17;
 
 // Game-specific addresses for the driver (see driver/driver.c): the game's functions in its main.dol.
 struct GameProfile
@@ -60,7 +60,7 @@ struct GameProfile
     uint32_t startable_offset; // SoundArchivePlayer's SoundStartable base
     uint32_t ios_version;      // the IOS that the game's TMD requests
     uint32_t init_flag;        // the sound system's flag byte, checked by Setup in 2008 builds, or 0
-    std::array<FunctionSignature, kProfileFunctions> signatures; // main's, then those of ai_init to update
+    std::array<FunctionSignature, kProfileFunctions> signatures; // those of ai_init to update
     std::string derived_from = {}; // the profile that a derived profile comes from (see FindProfile), or nothing
 };
 
@@ -82,8 +82,10 @@ std::optional<GameProfile> FindProfile(const ntdlib::disc::GameFiles& game);
 
 // Finds `source`'s functions in `dol` by their signatures. A small function can match in several places. The functions
 // of a library move together. The offset of the nearest function that matched once therefore picks the place. Returns
-// the profile with the addresses found, or nothing if a function isn't there. `source` must have no init flag. The
-// flag's address can't be found this way.
+// the profile with the addresses found, or nothing if a function isn't there. A game's main differs between releases.
+// It comes from the start-up code instead: __start calls main, then branches to exit. For a source with an init flag,
+// the flag's address comes from the code of Setup that was found: Setup calls a function that reads the flag relative
+// to r13, and the start-up code gives r13.
 std::optional<GameProfile> DeriveProfile(const GameProfile& source, std::span<const uint8_t> dol);
 
 // What game mode loads to play a sequence: the groups that hold its sequence and its bank (with the bank's waves), and
