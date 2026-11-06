@@ -315,8 +315,8 @@ struct Job
     // plays as separate sequences has all of them (see rip::FindPieces), the first at `index`. Empty in game mode.
     std::vector<uint32_t> sounds;
 
-    // Archive mode: the effect variant that the rip plays in (see nw4r::EffectVariant), by its place in the profile's
-    // variants, or -1 for the plain rip.
+    // The effect variant that the rip plays in (see nw4r::EffectVariant), by its place in the profile's variants, or -1
+    // for the plain rip.
     int variant = -1;
 
     // The sounds that the rip plays: `index` alone in game mode.
@@ -326,8 +326,8 @@ struct Job
     }
 };
 
-// Archive mode: the rips of the jobs in `jobs` that play one sound of a variant of `effects`, for each variant in turn.
-// Each gets the variant's name after its label.
+// The rips of the jobs in `jobs` that play one sound of a variant of `effects`, for each variant in turn. Each gets the
+// variant's name after its label.
 std::vector<Job> VariantJobs(const std::vector<Job>& jobs, const nw4r::ArchiveEffects& effects)
 {
     std::vector<Job> found;
@@ -426,35 +426,26 @@ std::vector<Job> SelectSounds(const ntdlib::rsar::SoundArchive& archive, const O
     return jobs;
 }
 
-// Archive mode: the sequences that --only and --bgm pick. A piece whose channels the game plays as separate sequences
-// makes one job (see rip::FindPieces). --only picks it by its name or by any of its sequences' labels, and --bgm by any
-// of its sequences.
+// Archive mode: the sequences that --only and --bgm pick. A piece that the game plays as separate sequences makes one
+// job (see rip::FindPieces). --only picks it by its name or by any of its sequences' labels, and --bgm by any of its
+// sequences. A sequence of a piece makes no job of its own.
 std::vector<Job> SelectArchiveSounds(const ntdlib::rsar::SoundArchive& archive, const Options& o)
 {
     const auto& sounds = archive.Sounds();
     const std::vector<rip::Piece> pieces = rip::FindPieces(archive);
-    std::vector<const rip::Piece*> piece_of(sounds.size(), nullptr);
+    std::vector<bool> in_piece(sounds.size(), false);
     for (const rip::Piece& piece : pieces)
     {
         for (const uint32_t sound : piece.sounds)
         {
-            piece_of[sound] = &piece;
+            in_piece[sound] = true;
         }
     }
 
     std::vector<Job> jobs;
-    for (std::size_t i = 0; i < sounds.size(); i++)
+    const auto select =
+        [&archive, &sounds, &o, &jobs](uint32_t index, const std::string& label, const std::vector<uint32_t>& members)
     {
-        // Streams are out of scope, and wave sounds aren't ripped yet. A piece's job comes at its first sound.
-        const auto index = static_cast<uint32_t>(i);
-        const rip::Piece* piece = piece_of[i];
-        if (sounds[i].type != ntdlib::rsar::SoundType::kSequence || (piece && piece->sounds.front() != index))
-        {
-            continue;
-        }
-
-        const std::string label = piece ? piece->name : sounds[i].name;
-        const std::vector<uint32_t> members = piece ? piece->sounds : std::vector<uint32_t>{index};
         bool matches = std::regex_search(label, o.only);
         bool music = false;
         for (const uint32_t sound : members)
@@ -466,6 +457,30 @@ std::vector<Job> SelectArchiveSounds(const ntdlib::rsar::SoundArchive& archive, 
         if (matches && (!o.bgm || music))
         {
             jobs.push_back({index, label, std::nullopt, std::nullopt, members});
+        }
+    };
+
+    for (std::size_t i = 0; i < sounds.size(); i++)
+    {
+        // Streams are out of scope, and wave sounds aren't ripped yet. A piece's jobs come at its first sound.
+        const auto index = static_cast<uint32_t>(i);
+        if (sounds[i].type != ntdlib::rsar::SoundType::kSequence)
+        {
+            continue;
+        }
+
+        if (!in_piece[i])
+        {
+            select(index, sounds[i].name, {index});
+            continue;
+        }
+
+        for (const rip::Piece& piece : pieces)
+        {
+            if (piece.sounds.front() == index)
+            {
+                select(index, piece.name, piece.sounds);
+            }
         }
     }
 
@@ -608,6 +623,36 @@ std::size_t MeasureSequences(std::vector<Job>& jobs, const ntdlib::rsar::SoundAr
     return silent;
 }
 
+// Measures the rips of `variant_jobs` (see VariantJobs) and adds them to `jobs`, after the plain rips. Each variant's
+// rips are measured with the variant's effects added to `effects`, and in the variant's arrangement. A variant without
+// an arrangement takes `arrangement`. Returns the number of rips taken out.
+std::size_t MeasureVariants(std::vector<Job>& jobs, const std::vector<Job>& variant_jobs,
+                            const ntdlib::rsar::SoundArchive& archive, const std::vector<uint8_t>& archive_bytes,
+                            const GameCode& code, const nw4r::Arrangement& arrangement,
+                            const nw4r::ArchiveEffects& effects, const Options& o)
+{
+    std::size_t silent = 0;
+    for (std::size_t v = 0; v < effects.variants.size(); v++)
+    {
+        std::vector<Job> of_variant;
+        for (const Job& job : variant_jobs)
+        {
+            if (job.variant == static_cast<int>(v))
+            {
+                of_variant.push_back(job);
+            }
+        }
+
+        const nw4r::EffectVariant& variant = effects.variants[v];
+        const nw4r::ArchiveEffects with = nw4r::WithVariant(effects, variant);
+        silent += MeasureSequences(of_variant, archive, archive_bytes, code, variant.arrangement.value_or(arrangement),
+                                   with, o);
+        jobs.insert(jobs.end(), of_variant.begin(), of_variant.end());
+    }
+
+    return silent;
+}
+
 // Writes a rip's library `lib` into `out_dir`, with the name that `names` gives it from `base`. An earlier rip's
 // library there stays (see xsflib::rip::FileNames::LibraryIn). Returns the name. For a library that can't be written,
 // prints the error and returns nothing.
@@ -716,27 +761,11 @@ int RipArchive(const fs::path& out_dir, xsflib::rip::FileNames& names, const std
         analyzed.tracks.clear();
     }
 
-    // The rips of a sound in an effect variant follow its plain rips. Each variant's rips are measured with the
-    // variant's effects and arrangement. A variant without an arrangement takes the options' arrangement.
-    std::vector<Job> variant_jobs = VariantJobs(jobs, effects);
+    // The rips of a sound in an effect variant follow its plain rips. A variant without an arrangement takes the
+    // options' arrangement.
+    const std::vector<Job> variant_jobs = VariantJobs(jobs, effects);
     std::size_t silent = MeasureSequences(jobs, *archive, archive_bytes, code, o.ToArrangement(), analyzed, o);
-    for (std::size_t v = 0; v < effects.variants.size(); v++)
-    {
-        std::vector<Job> of_variant;
-        for (const Job& job : variant_jobs)
-        {
-            if (job.variant == static_cast<int>(v))
-            {
-                of_variant.push_back(job);
-            }
-        }
-
-        const nw4r::EffectVariant& variant = effects.variants[v];
-        const nw4r::ArchiveEffects with = nw4r::WithVariant(analyzed, variant);
-        const nw4r::Arrangement arrangement = variant.arrangement.value_or(o.ToArrangement());
-        silent += MeasureSequences(of_variant, *archive, archive_bytes, code, arrangement, with, o);
-        jobs.insert(jobs.end(), of_variant.begin(), of_variant.end());
-    }
+    silent += MeasureVariants(jobs, variant_jobs, *archive, archive_bytes, code, o.ToArrangement(), analyzed, o);
 
     const std::string skipped_text = xsflib::cli::SkippedText(skipped, "data outside the archive", silent, "sequence");
     if (jobs.empty())
@@ -817,6 +846,13 @@ int RipArchive(const fs::path& out_dir, xsflib::rip::FileNames& names, const std
             }
         }
 
+        // The variables that the game sets on a sound that rips alone, under those of --var or the variant's
+        // arrangement. The length analysis plays the same.
+        if (job.sounds.size() == 1)
+        {
+            rip::AddSoundVariables(effects, job.sounds.front(), tags);
+        }
+
         return rip::BuildArchiveMini(job.sounds, lib_name, std::move(tags), descriptor);
     };
     return WriteSet(out_dir, names, lib_base, lib, jobs, mini_tags, build_mini, archive_path, skipped_text);
@@ -839,8 +875,21 @@ int RipArchiveInGameMode(const fs::path& out_dir, xsflib::rip::FileNames& names,
     }
 
     const std::size_t skipped = SkipUngrouped(jobs, archive);
-    const nw4r::ArchiveEffects effects = rip::FindEffects(code.effect_profile, archive_path, archive);
-    const std::size_t silent = MeasureSequences(jobs, archive, archive_bytes, code, {}, effects, o);
+
+    // Game mode rips a sound in a variant whose arrangement gives only the tracks that play. The driver silences the
+    // other tracks. It does the same for a sound whose tracks the profile gives (see rip::BuildMini). It sets no
+    // effects, sends, tempo or variables of a variant. The rips leave out the variants that have any.
+    nw4r::ArchiveEffects effects = rip::FindEffects(code.effect_profile, archive_path, archive);
+    const auto tracks_only = [](const nw4r::EffectVariant& variant)
+    {
+        return variant.setups.empty() && variant.sends.empty() && variant.arrangement &&
+               variant.arrangement->tempo_ratio == 1.0f && variant.arrangement->variables.empty();
+    };
+    std::erase_if(effects.variants, std::not_fn(tracks_only));
+
+    const std::vector<Job> variant_jobs = VariantJobs(jobs, effects);
+    std::size_t silent = MeasureSequences(jobs, archive, archive_bytes, code, {}, effects, o);
+    silent += MeasureVariants(jobs, variant_jobs, archive, archive_bytes, code, {}, effects, o);
     const std::string skipped_text = xsflib::cli::SkippedText(skipped, "no group holds them", silent, "sequence");
     if (jobs.empty())
     {
@@ -848,25 +897,55 @@ int RipArchiveInGameMode(const fs::path& out_dir, xsflib::rip::FileNames& names,
         return 0;
     }
 
-    // The library holds the data of the groups that the driver loads for the sounds.
+    // The library holds the data of the groups that the driver loads for the sounds. A sound's rips in its variants
+    // play the plain rip's data.
     std::vector<uint32_t> indices;
     for (const Job& job : jobs)
     {
-        indices.push_back(job.index);
+        if (std::find(indices.begin(), indices.end(), job.index) == indices.end())
+        {
+            indices.push_back(job.index);
+        }
+    }
+
+    // A variant's rip gives the driver the variant's tracks for its sound. The library then requires the offsets that
+    // silence a track, even where the profile gives no sound's tracks.
+    const auto with_tracks = [&effects](const nw4r::EffectVariant& variant)
+    {
+        nw4r::ArchiveEffects found = nw4r::WithVariant(effects, variant);
+        for (const uint32_t sound : variant.sounds)
+        {
+            found.tracks.push_back({sound, variant.arrangement->tracks});
+        }
+
+        return found;
+    };
+    nw4r::ArchiveEffects library_effects = effects;
+    for (const nw4r::EffectVariant& variant : effects.variants)
+    {
+        const nw4r::ArchiveEffects with = with_tracks(variant);
+        library_effects.tracks.insert(library_effects.tracks.end(), with.tracks.begin(), with.tracks.end());
     }
 
     const Tags common = xsflib::cli::RipTags(o, game_name, "wsf", "game");
     std::string error;
-    const auto lib = rip::BuildLibrary(game, profile, archive_path, archive, indices, common, &error, effects);
+    const auto lib = rip::BuildLibrary(game, profile, archive_path, archive, indices, common, &error, library_effects);
     if (!lib)
     {
         std::fprintf(stderr, "error: %s\n", error.c_str());
         return -1;
     }
 
-    const auto build_mini = [&effects, &code](const std::string& lib_name, const Job& job, const Tags& tags)
+    const auto build_mini =
+        [&effects, &code, &with_tracks](const std::string& lib_name, const Job& job, const Tags& tags)
     {
-        return rip::BuildMini(job.index, *job.data, lib_name, tags, effects, code.effect_profile);
+        if (job.variant < 0)
+        {
+            return rip::BuildMini(job.index, *job.data, lib_name, tags, effects, code.effect_profile);
+        }
+
+        const nw4r::EffectVariant& variant = effects.variants[static_cast<std::size_t>(job.variant)];
+        return rip::BuildMini(job.index, *job.data, lib_name, tags, with_tracks(variant), code.effect_profile);
     };
     return WriteSet(out_dir, names, lib_base, *lib, jobs, common, build_mini, archive_path, skipped_text);
 }
@@ -975,6 +1054,9 @@ struct JAudioJob
     std::optional<rip::Timing> timing;
     std::vector<uint32_t> waves;
     std::string start_error; // the player's message when the length pass can't start the sound
+
+    // The state that the driver gives a piece (rip::JAudioSound::piece_state).
+    ntdlib::flipper::z2::PieceState piece_state;
 };
 
 // Takes out the sounds that the length pass couldn't start with their wave groups loaded. No player could start their
@@ -996,16 +1078,23 @@ std::size_t SkipUnstartable(std::vector<JAudioJob>& jobs)
     return std::erase_if(jobs, unstartable);
 }
 
-// A JAudio game's sounds that --only and --bgm pick. Streams are out of scope.
+// A JAudio game's sounds that --only and --bgm pick. Streams are out of scope. A sound's number is its place in the
+// list without the sounds that share the number before them (rip::JAudioSound::shares_number).
 std::vector<JAudioJob> SelectJAudioSounds(const std::vector<rip::JAudioSound>& sounds, const Options& o)
 {
     std::vector<JAudioJob> jobs;
-    for (const rip::JAudioSound& sound : sounds)
+    uint32_t index = 0;
+    for (std::size_t i = 0; i < sounds.size(); i++)
     {
+        const rip::JAudioSound& sound = sounds[i];
+        if (i > 0 && !sound.shares_number)
+        {
+            index++;
+        }
+
         if (!sound.stream && std::regex_search(sound.label, o.only) && (!o.bgm || sound.music))
         {
-            jobs.push_back(
-                {static_cast<uint32_t>(&sound - sounds.data()), sound.id, sound.label, std::nullopt, sound.waves, {}});
+            jobs.push_back({index, sound.id, sound.label, std::nullopt, sound.waves, {}, sound.piece_state});
         }
     }
 
@@ -1185,7 +1274,7 @@ bool DiscoverWaves(std::vector<JAudioJob>& jobs, const ntdlib::disc::GameFiles& 
         }
 
         std::set<ntdlib::jaudio::WaveUse> found;
-        if (!rip::FindJAudioWaves(*base, profile, job.sound_id, found))
+        if (!rip::FindJAudioWaves(*base, profile, job.sound_id, found, &job.piece_state))
         {
             std::fprintf(stderr, "warning: the waves of %s can't be found; it plays without them\n", job.label.c_str());
             return false;
@@ -1219,7 +1308,8 @@ void AnalyzeLengths(std::vector<JAudioJob>& jobs, const std::vector<uint8_t>& li
     const auto analyze = [&](JAudioJob& job)
     {
         std::set<ntdlib::jaudio::WaveUse> played;
-        job.timing = rip::AnalyzeJAudioSound(lib, profile, job.sound_id, job.waves, &played, &job.start_error);
+        job.timing =
+            rip::AnalyzeJAudioSound(lib, profile, job.sound_id, job.waves, &played, &job.start_error, &job.piece_state);
         if (!job.start_error.empty())
         {
             return false;
@@ -1343,7 +1433,7 @@ int RipJAudioGame(const std::string& input, const fs::path& out_dir, const ntdli
     xsflib::rip::FileNames& names = xsflib::cli::NamesIn(registries, out_dir, ".wsflib", ".miniwsf");
     const auto build_mini = [](const std::string& lib_name, const JAudioJob& job, const Tags& tags)
     {
-        return rip::BuildJAudioMini(job.sound_id, job.waves, lib_name, tags);
+        return rip::BuildJAudioMini(job.sound_id, job.waves, lib_name, tags, &job.piece_state);
     };
     const std::string source = xsflib::rip::InputPath(input).filename().string();
     const int count = WriteSet(out_dir, names, game_name, *lib, jobs, common, build_mini, source, skipped_text);

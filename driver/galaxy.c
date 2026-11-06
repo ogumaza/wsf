@@ -25,7 +25,8 @@
  *      the scene manager's stationed banks. Then the wave groups that the .miniwsf lists, one group of a wave bank
  *      each. The game loads them per stage and per scenario;
  *   7. the sound, by its JAudio sound ID. Music starts in the BGM manager's stage slot, the way the game starts a
- *      stage's music. The manager sets the tracks to the music's first state. The audio system starts other sounds;
+ *      stage's music. The manager sets the tracks to the music's first state. The audio system starts other sounds,
+ *      and the driver writes the low-pass cutoff that the game's sound objects give an effect;
  *   8. the audio system's frame process, once a frame, forever.
  * A frame of the game is a sleep of the game's frame time. WSF's machine raises no video interrupts. A step that fails
  * stops the driver with its number in the status word. Step 1 is the check of the block's header.
@@ -117,6 +118,8 @@ struct Params
     u32 start_sound;            /* bool (audio system, JAISoundID*, JAISoundHandle*, const TVec3*) */
     u32 dimming_threshold;      /* the video interface's idle time before the screen dims, in retraces */
     u32 scene_volume;           /* void (audio system): the volumes that the game sets as each scene starts */
+    u32 effect_object_offset;   /* the audio system's pointer to its sound object for system sound effects */
+    u32 set_cutoff_to_port;     /* void (sound object, JAISoundHandle*, JAISoundID*): an effect's cutoff */
 };
 
 __attribute__((section(".params"), used)) volatile struct Params driver_params = {
@@ -301,9 +304,19 @@ __attribute__((noreturn)) void driver_main(void)
             fail(7);
         }
     }
-    else if (!(((fn4)p->start_sound)(system, (u32)&id, (u32)&p->sound, 0) & 0xff))
+    else
     {
-        fail(7);
+        if (!(((fn4)p->start_sound)(system, (u32)&id, (u32)&p->sound, 0) & 0xff))
+        {
+            fail(7);
+        }
+
+        /* The game starts its sound effects through sound objects. A sound object writes the effect's low-pass
+           cutoff to port 0xa of the effect's track as the effect starts. The cutoff is 127 (open) unless the
+           sound table marks the effect for the stage's filter, and the stage's cutoff is 127 until a stage sets
+           another. Most effects give the port's value to their tracks' IIR filters. The driver writes the port
+           with the game's function, for the object that plays the system's sound effects. */
+        ((fn3)p->set_cutoff_to_port)(word(system + p->effect_object_offset), (u32)&p->sound, (u32)&id);
     }
     p->status = STATUS_PLAYING;
 

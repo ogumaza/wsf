@@ -124,8 +124,8 @@ A version 1 player rejects process descriptors with a different version or flags
              u8   bus: 0 A, 1 B, 2 C
              u8   type: 1 FxReverbHi of 2006 and 2007, 2 FxReverbHi of 2008, 3 FxChorus, 4 FxDelay,
                   5 WarioWare: Smooth Moves' standard reverb, 6 FxReverbStd of 2008,
-                  7 the Photo Channel 1.1's mood effect (version 3)
-             u8   the number of words in the type's parameters (6, 11, 3, 3, 5, 10 and 1)
+                  7 the Photo Channel 1.1's mood effect (version 3), 8 FxChorus of 2009, 9 FxDelay of 2009
+             u8   the number of words in the type's parameters (6, 11, 3, 3, 5, 10, 1, 5 and 5)
              u8   0
              u32  the number of presets, or 0 for an effect with one set of parameters
              u32  the number of sounds that the effect lists
@@ -150,6 +150,7 @@ sound's tracks. A track's main send is relative: 0 is the full send, and -1 take
 player skips an effect of a type that it doesn't know, and one whose number of words doesn't fit its type or whose bus
 isn't A, B or C. It skips a send whose bus isn't A, B, C or the main mix. It skips a sound whose tracks have a bit above
 bit 15 set. Players older than 1.4.0 ignore the effects and the sends. Players of 1.4.1 and older ignore the tracks.
+Players of 1.8.2 and older skip types 8 and 9. They play Pokémon Rumble's music with its reverb alone.
 
 The paths identify `FILE` chunks containing the sound archive (`.brsar`) and AX's microcode: the 4,096 big-endian 16-bit
 words that the game loads into the DSP's instruction memory. A player rejects archive descriptors with flags other than
@@ -325,6 +326,7 @@ profile, `wsfrip` says once that its rips play without the game's reverb and oth
 | Photo Channel 1.1 (World) | none | the channel's mood effect, for the photos' music with a mood | a reverb |
 | Forecast Channel (USA) | none | none | a reverb |
 | News Channel (USA) | none | none | a reverb |
+| Pokémon Rumble (WiiWare, USA) | a reverb that the music picks | most music: a delay | some music: a chorus |
 
 The ripper takes each effect's parameters from the game's code. A game sets its effects up when a scene starts, long
 before its music plays. A rip sets them up with its sound instead: the effects start in the first AX frame after the
@@ -347,7 +349,9 @@ that lists no sounds.
   last one sets that row of a table of 10 reverbs, clears bus A and appends the reverb again. A value of 0 clears bus A.
   Other values change nothing. In a rip, the variables of the music do the same in each AX frame. The music is what
   `wsfrip --bgm` takes. A sound effect plays with bus A empty: the state of the game before any music has picked a
-  reverb. The reverb is the SDK's "standard" reverb of 2006.
+  reverb. The reverb is the SDK's "standard" reverb of 2006. The microgames' music picks nothing. In the game, it plays
+  through the reverb of its stage. The profile gives such a piece's variable 0 the value of the stage that plays it
+  first (see "Variables that the game sets").
 - **Animal Crossing: City Folk** has one reverb on bus A, with the parameters of `nw4r::snd`'s builds of 2008. As it
   starts a piece of music, the game sets the sound's send to bus A: 0.25 for the outdoor and town music, and 0.28 for
   K.K. Slider's songs. The descriptor lists those sends by sound. A rip sets the send as the sound starts.
@@ -362,7 +366,9 @@ that lists no sounds.
 - **Wii Music** has the standard reverb of 2008 on bus A in every scene but Mii Maestro. There, bus A has an
   `FxReverbHi` of 2008. The ripper gives Mii Maestro's sounds (`RP_OCS_`) that reverb. Some scenes put a reverb on bus B
   too. No sequence sends anything to bus B. In a jam session, the game sets the instruments' sends to the buses by
-  stage. A rip doesn't know the stage and plays the instruments without those sends.
+  stage. A rip doesn't know the stage and plays the instruments without those sends. Pitch Perfect sends its phrases
+  and the jingles of its pictures (`RP_KKM_SE_PHRASE_1_*` and `RP_KKM_SE_IMG_*`) to bus A at 0.2. That is the send that
+  its scene gives the bus. The ripper gives them the same send.
 - **The Wii Shop Channel** puts an `FxReverbHi` of 2008 on bus A as its sound system starts. It sets no send on a
   sound. Its sequences set the sends to bus A. The channel takes the reverb away while it pauses its sounds. It sets
   the reverb up again as they resume. A rip plays the reverb throughout.
@@ -387,10 +393,19 @@ that lists no sounds.
     0.2 of the effect's output from 180 ms before is mixed with 0.8 of that.
   - Mood 4, an octave down: two grains, 96 ms apart, read the music at half speed. Each has a Hamming window 192 ms
     long. The output is 1.2 times their sum.
+- **Pokémon Rumble** sets its effects up as each piece of music starts. The first user parameter of the piece's sound
+  picks one of nine presets. If the preset differs from the last one, the game clears the three buses at once and sets
+  the preset up. Every preset puts the standard reverb of 2008 on bus A, with one of two settings. Presets 2 to 9 add a
+  delay on bus B, of 167 to 438 ms with a feedback of 0.4 to 0.8. Presets 4, 5, 6 and 9 add a chorus on bus C, with a
+  feedback of 0.9. The game's build of `nw4r::snd` (2009) gives `FxChorus` and `FxDelay` five parameters each. The
+  chorus gains a feedback and an output gain. The delay gains a longest delay and a low-pass filter. The two classes
+  run the SDK's `AXFXChorusExp` and `AXFXDelayExp`. A sound effect plays through the effects of the music that plays
+  with it. Its rip plays without effects: the state of the game before its first piece of music.
 
 Archive mode plays WSF's models of the effects: `AXFXReverbHi` and its core `AXFXReverbHiExp` of 2006 and 2008, the
 standard reverbs of October 2006 and of September 2008 (`AXFXReverbStdExp`), `AXFXChorus` with its core `AXFXChorusExp`,
-`AXFXDelay`, and the Photo Channel 1.1's mood effect. Each model follows the game's code operation for operation, in
+`AXFXDelay`, Pokémon Rumble's `AXFXChorusExp` and `AXFXDelayExp` of February 2009, and the Photo Channel 1.1's mood
+effect. Each model follows the game's code operation for operation, in
 single precision where the game uses it. The models give the same samples as the games' code. Their tests run each
 game's functions on an emulated Broadway and compare thousands of frames. The ripper's length analysis plays the effects
 too. A sequence that ends plays until its effects' output falls silent.
@@ -422,10 +437,62 @@ other tracks' volumes to 0 as it starts the sound. The length analysis plays the
 
 **Animal Crossing: City Folk** has such arrangements in its outdoor music (`BGM_OUTDOOR_00` to `23`), its town music
 (`BGM_TOWN_EARLY`, `_DAY`, `_NIGHT` and `_MIDNIGHT`) and its museum's music (`BGM_MUSEUM`). Each piece of outdoor and
-town music holds three arrangements, one for each kind of weather. A rip plays the one for the game's first three
-kinds of weather. The town music also silences track 15 in every weather. The museum's music has an arrangement for
-each room. A rip plays the one that the game picks by default as the music starts. With `--mode archive`, `--tracks`
-rips another arrangement of a piece.
+town music holds three arrangements, one for each kind of weather. A rip plays the one for the game's first three kinds
+of weather. The piece also rips once more in each other arrangement. Those rips' names end in `rain` and `snow`. The
+town music also silences track 15 in every weather. The museum's music has seven arrangements. The room picks one. A rip
+plays the one that the game picks by default as the music starts. The music also rips once more as `arrangements 2 and
+3` (the two play the same tracks), `arrangement 4`, `arrangement 5` and `arrangement 6`. No room plays arrangement 7.
+With `--mode archive`, `--tracks` rips any arrangement of a piece.
+
+**Wii Play** mutes tracks of seven pieces while they play. Pose Mii's music for play (`RP_BOM_BGM_PLAY`) plays only
+its track 0.
+
+Five minigames add or swap tracks as a game goes on. A rip of each piece plays the tracks that sound as the minigame
+starts it. The piece also rips once more with each later set of tracks. A rip's name gives the minigame's state:
+
+- Table Tennis plays `RP_PNP_BGM_PLAY` for one player and `RP_PNP_BGM_PLAY_VS` for two. Each starts without tracks 7 to
+  11 and 15. A rip plays the other tracks. The rally's arrangement, `rally`, plays tracks 0 to 3, 7 to 11, 14 and 15.
+  One player hears it each time a rally's count reaches a multiple of 10. Two players hear it each time the ball goes
+  into play. Three bars later, the game fades it back to the start's tracks in under a second. In a match, once a player
+  has 11 points, the rally's arrangement stays.
+- Laser Hockey's `RP_HKY_BGM_ALL_PLAY` starts with tracks 1 to 5. `last 30 s` adds tracks 0, 12 and 14. They join
+  once 30 seconds or less of the match are left. In a match that ends at 8 goals, tracks 0, 13 and 14 join once a
+  player has 7 goals: `match point`. `last 30 s at match point` plays every track.
+- Billiards' `RP_BIL_BGM_PLAY` starts with tracks 0, 1, 2, 5 and 7. `state 3` adds track 3. The game enters that state
+  as the crowd boos. `state 4` plays every track. The game enters it as the crowd cheers. The game plays states 2 and 3
+  at half the sound's volume (-6 dB). The rips play at full volume.
+- Find Mii's `RP_WLY_BGM_PLAY_GUSU` plays as the time runs out. It fades in at 20 seconds left with track 9 alone. A rip
+  plays that track. Tracks then join every 2 seconds: `17 or 18 s left` adds track 0, `15 or 16 s left` track 1,
+  `13 or 14 s left` track 2 and `11 or 12 s left` track 3. `7 to 10 s left` adds tracks 4 and 12. In the `last 6 s`,
+  only tracks 0, 3 and 4 play as the music fades out. Track 11 never plays.
+- Tanks' `RP_TNK_BGM_LOOP2` plays the tracks in a cell of a table. The strongest kind of enemy tank still in play picks
+  the row, and the number of enemy tanks left, up to 4, the column. A rip plays the first row's tracks: 0, 4 and 10.
+  `arrangement 2` to `arrangement 22` play the table's other sets of tracks, in the table's order.
+
+**Wii Music** plays its main menu's music, `RP_MUSIC_MAINMENU_BACKTRACK`, with some of its 15 tracks. The menu's state
+picks them. Tracks 0 and 7 play in every state. The game starts the menu in state 0. States 0, 2 and 4 play tracks 0
+to 7. A rip plays those tracks. The music also rips once more with the tracks of each other state. A rip's name gives
+the states:
+
+- `state 1`: tracks 0, 7 and 8 to 11.
+- `state 3`: tracks 0, 6, 7 and 12 to 14.
+- `states 5 to 7`: tracks 0 and 7.
+
+The game sets the tracks' volumes each frame. As the state changes, it fades them to the new state's levels over a
+second. In state 0, the menu's carousel plays tracks 1 to 6 at 0.74 or 0.51 of their volume (-2.6 or -5.8 dB), by the
+stop that faces the front. State 2 plays them at 0.9. Each rip plays its tracks at full volume.
+
+Wii Music's Pitch Perfect plays its beats, `RP_KKM_BEATS_LOOP`, with tracks 0, 1 and 3 at its lowest levels. Higher
+levels add tracks 4, 5 and 6. Track 2 joins once the round's time reads 10 seconds or less. A rip plays the tracks of
+the lowest levels. The beats also rip once more with the tracks of each other set of levels, with and without track 2:
+
+- `levels 2 and 3`: tracks 0, 1, 3 and 4.
+- `levels 4 to 6`: tracks 0, 1 and 3 to 5.
+- `levels 7 to 9`: tracks 0, 1 and 3 to 6.
+- `with track 2`, `levels 2 and 3 with track 2` and so on: the same sets with track 2.
+
+In two of its modes, the game plays `RP_KKM_BEATS_LOOP_MAKE_SCORE` instead. That piece has five tracks. It rips once
+more as `levels 2 to 9`, `with track 2` and `levels 2 to 9 with track 2`.
 
 **The Mii Channel** silences tracks 9, 10 and 11 of its music, `SEQ_TMP_BGM`, as the music starts. The scenes then let
 some of them play. A rip plays the tracks that the channel plays from boot: every track but 10 and 11. The music also
@@ -443,6 +510,66 @@ The channel changes its state while the music plays. Each rip plays one state fr
 state's tracks and tempo (see "Tags"). The channel also turns the music down to 0.4 of its volume in a fifth state. No
 tag gives a volume. That state therefore has no rip.
 
+**Mario Kart Wii**'s menus play two pieces with some of their tracks: `SEQ_O_SELECT`, the music of the menus, and
+`SEQ_O_EARTH`, the music of the Wi-Fi menus. Each page of the menus has a state. As a page opens, the game fades the
+tracks to those of the page's state in 30 frames. As `SEQ_O_EARTH` starts, the section of the menus picks its state. A
+rip plays state 0: track 0 of `SEQ_O_SELECT` alone, as the main menu plays it, and tracks 1, 2, 4 and 6 of
+`SEQ_O_EARTH`, as the first of the Wi-Fi menus plays them. Each piece rips once more in each other state. The game
+names none of the states. A rip's name gives the state's number:
+
+- `SEQ_O_SELECT`, `state 1`: tracks 0, 1 and 3. `state 2`: tracks 0, 1 and 2. In both, the game plays track 0 at 0.93
+  of its volume. No tag gives a volume. The rips play the track at full volume.
+- `SEQ_O_EARTH`, `state 1`: tracks 0, 1, 2, 4, 6, 8, 9 and 11. `state 2`: tracks 1, 2, 4, 5, 6, 8, 9, 11 and 13.
+  `state 3`: every track.
+
+Each rip plays one state from the music's start. Two pages take a state that keeps the tracks and turns the music down
+to 0.55 of its volume. No tag gives a volume. That state therefore has no rip.
+
+**Twilight Princess** sets the volumes of some children of track 0 to 0 as it starts five pieces of music
+(`Z2SeqMgr::bgmStart`). Game mode's driver does the same through the game's code (see "JAudio2's driver (version 2)").
+Hyrule Field's day music holds two arrangements. One plays while Link walks: `Z2BGM_FIELD_LINK_DAY` mutes children 5 to
+11. The other plays while he rides: `Z2BGM_FIELD_LINK_DAY_riding` mutes children 12 to 15. Both rips have the piece's
+number. `Z2BGM_HORSE_BATTLE` mutes children 11 to 13, `Z2BGM_TOAL_VILLEGE` 9 and 10, `Z2BGM_BOSS_SNOWWOMAN_1` 10 to 12
+and `Z2BGM_VS_GANON_02` 10 to 13. The game's scenes, its fights and its other starters give 17 more pieces states
+(ntdlib's `kTwilightPrincessStates`). Some states play a child at a volume between 0 and 1, and some write a status to
+port 9. A rip starts a piece in the state that the game starts it in, such as Castle Town's music in its first room. It
+holds each other state in a separate rip, named after the piece and the state, for example
+`Z2BGM_TOAL_VILLEGE_status1`, with the piece's number.
+
+## Variables that the game sets
+
+A sequence can read variables that the game writes through the sound's handle (`SeqSound::WriteVariable`). Some
+sequences play nothing until the game gives a variable a value. An effect profile can give the values that a game gives
+some variables of a sound. Game mode's driver writes them into the sound's player as it starts the sound. The ripper
+writes the sound's offset of the player's local variables into the driver's parameter block, and a sound's values into
+its `.miniwsf`. The driver writes local variables (0 to 15) only. In archive mode, the ripper writes the values into
+the sound's `wsf_var` tag (see "Tags"). `--var` gives others, and a variable that it leaves out keeps the profile's
+value. The archive descriptor holds no variables. The length analysis plays the same values.
+
+**Wii Sports'** golf plays its wind, `SE_LV_Wind`, only while the hole has wind. In every frame, the game writes the
+wind's speed to the sound's variable 0, and the wind's direction from the camera, 0 to 7, to variable 1. At a speed of
+0, the sequence plays nothing. The courses draw each hole's speed from 0 to 15. A rip plays a speed of 8 and direction
+0. With `--mode archive`, `--var 0=N` and `--var 1=N` rip another speed or direction.
+
+**WarioWare: Smooth Moves'** bus A keeps the reverb of the last piece of music that gave its variable 0 a value (see
+"Effects"). The opening of each stage and the music between its microgames pick a row of the table of reverbs, or
+clear the bus. The microgames' music and Dribble and Spitz's songs pick nothing. Each of these pieces plays through
+its stage's reverb. A rip plays the stage that plays the piece first in the story: the stage of the microgame's
+character. The stages of Wario, Mona, Kat and Ana, Dribble and Spitz and Orbulon pick row 1. The profile gives the
+variable 0 of their pieces the value 1. Ashley's stage picks row 4, and her pieces get 4. The stages of Young Cricket,
+Penny, 9-Volt, Tiny Wario and Dr. Crygor clear the bus. Their pieces get no value and rip without the reverb. Only
+pieces that send to bus A get a value. Later stages play some microgames again, with another reverb or none. Mix,
+Thrilling, Hard, Surprise and the multiplayer modes play microgames from every stage. The rips play none of these
+other states. With `--mode archive`, `--var 0=N` rips a piece with row N, and `--var 0=0` without the reverb.
+
+**Mario Kart Wii** writes variable 0 of seven sound effects with a value for each play. A rip plays the value of the
+effect's first play in the game, from the start of a Grand Prix's first race with controller 1. `SE_CN_RBW_RING`,
+Rainbow Road's ring, gets 0, the first ring's value. `SE_CN_RBW_STAR_RING` gets 0, its count at the first ring.
+`SE_RC_RANK_UP` gets 1, for 11th place, the first rank up from 12th on the grid. `SE_RC_RANK_DOWN` gets 0, for 12th
+place. `SE_UI_BTN_OK` and `SE_UI_CTRL_ON` get 0, controller 1's channel. Six of them transpose by the variable.
+`SE_CC_MSR_GATE_PASS` keeps -1. The game gives it the number of gates on the course minus the gate's number. The
+course's file holds both. At -1 it plays the gate's three tracks without the count's transposition.
+
 ## Sounds that play together
 
 A game can play a piece of music as several sequences that it starts together. **Mega Man 9** plays each piece of its
@@ -451,6 +578,24 @@ noise. The game's table of its 33 pieces (0x802805c0) gives each piece's four so
 0x800d5564 starts the four in that order, with one call for each. The four start in the same sound frame. While a sound
 effect holds one of the NES's channels, the game sets the music's sequence for that channel to a volume of 0
 (0x800d4ca8). A rip plays the music without sound effects.
+
+**The Forecast Channel and the News Channel** play a piece as a base sequence and a layer. Each sequence has a player
+of its own. Every frame, a fader sets each sequence's volume. Each view of the channel gives the fader a target of 0 or
+1 for each sequence. The base and the layer have one tempo.
+
+- The News Channel (USA, version 7) starts `NEW_BGM_NEWS` and `NEW_BGM_READ` together for its news, in that order
+  (0x80030720). The fader takes both to 1 in 60 frames. The archive gives `NEW_BGM_READ` a volume of 0. The news
+  therefore sounds as `NEW_BGM_NEWS` alone. The globe takes `NEW_BGM_READ` to 0 and `NEW_BGM_CIKYU` to 1
+  (0x80030650). The globe starts `NEW_BGM_CIKYU` afresh as it opens. `NEW_BGM_NEWS` goes on from where it was. The
+  fader is at 0x8002fb34. The slide show's pieces play alone.
+- The Forecast Channel (USA, version 7) starts its base and its layer together, in that order (0x8000f4b8). By day
+  they're `WTR_BGM_MORNING_YOHOU` and `WTR_BGM_MORNING_CIKYU`. At night they're `WTR_BGM_NIGHT_YOHOU` and
+  `WTR_BGM_NIGHT_CIKYU`. The globe takes both to 1. The forecasts take the layer to 0 (0x8000ee34). The layer then
+  plays on in silence. The two stay in step. The fader is at 0x8000dec4. The other pieces play alone.
+
+A rip of a state plays the state's volumes from its first frame. The base and the layer start together. The fades from
+one view to another have no rip. Each base rips alone, and once more with the globe's layer. The title of that rip
+ends in `globe`.
 
 In archive mode, a `.miniwsf` for such a piece lists its sounds in its `SND ` chunk, in the order in which the game
 starts them. The set's archive descriptor has version 2 (see "Archive descriptor"). A player then plays the sounds
@@ -466,7 +611,8 @@ together:
 - The sounds have finished when every sequence has ended and no voice is sounding.
 - A list holds at most 16 sounds. A player refuses a longer one.
 
-The ripper finds such pieces by their labels (see "Archive mode" under "Ripping").
+The ripper finds such pieces by their labels (see "Archive mode" under "Ripping"). The labels work without a profile
+of a game's code: for the game's other releases and for a loose archive.
 
 ## Chord effects
 
@@ -498,15 +644,14 @@ main.dol (`R49E01`).
 
 **The state of a rip.** The game plays a chord effect only over a stage's music. Its keys depend on the stage, on the
 chord of the moment and on earlier keys. A rip plays one state: the state that the game plays first or most, by its
-code. WSF offers no variants. The rips of Animal Crossing: City Folk's arrangements follow the same rule (see "Tracks
-that the game silences"). The driver starts the music of stage 0, the first row of the stage table: `JA_BGM_MAIN_01`.
-The game plays stage 0 for any scene that the table leaves out. The driver then turns each of the music's tracks off
-at once with code 2 of the BGM player's track states. The tracks still run and give the effect its chords and beats.
-The driver starts each effect through 0x8027c050 with the lowest-numbered record that names it. The key memory and the
-random state (0x8050311c) are those of the game after its start-up. `JA_SE_IST_AUTO_COMP_E_PIANO_T` plays at stage
-0x2c and `JA_SE_IST_AUTO_COMP_E_PIANO` at stage 0x35. Both play the first record of `JA_SE_IST_AUTO_COMP_ALTO_SAX`.
-`JA_SE_EAT_BIND_COMBO` plays for a count of 0. A step that waits for a beat waits for the music's first beat of its
-kind.
+code. WSF offers no variants of these effects. The driver starts the music of stage 0, the first row of the stage table:
+`JA_BGM_MAIN_01`. The game plays stage 0 for any scene that the table leaves out. The driver then turns each of the
+music's tracks off at once with code 2 of the BGM player's track states. The tracks still run and give the effect its
+chords and beats. The driver starts each effect through 0x8027c050 with the lowest-numbered record that names it. The
+key memory and the random state (0x8050311c) are those of the game after its start-up. `JA_SE_IST_AUTO_COMP_E_PIANO_T`
+plays at stage 0x2c and `JA_SE_IST_AUTO_COMP_E_PIANO` at stage 0x35. Both play the first record of
+`JA_SE_IST_AUTO_COMP_ALTO_SAX`. `JA_SE_EAT_BIND_COMBO` plays for a count of 0. A step that waits for a beat waits for
+the music's first beat of its kind.
 
 **The end of an effect.** A player stays busy (its byte at +0x18) after its last step until the game stops it. Later
 in a combo, the game moves some effects on by more steps. A rip plays the steps that start by themselves: the first
@@ -577,6 +722,37 @@ and a range of keys in bytes 2 and 3. The offset of each note follows from +4. A
 two ranges (0x80276460). Where one of them is 0 to 0, the voice's range is the other. The table of records holds a
 count, then 16 bytes for each record: the entry, the sound ID and two more words. The table's count can be larger than
 the file holds. The driver reads only the records that the file holds (see "Donkey Kong Jungle Beat's driver").
+
+## Effects that the game starts with a count
+
+New Play Control! Donkey Kong Jungle Beat starts most effects by name. 0x80260f20 (name, count) looks the name up and
+calls the audio system's start of a sound with a count, 0x802678b0 (system, sound ID, count). For some effects, that
+function writes the count to port 0xb of the sound once it starts (0x802686b0). It holds a count above a limit at the
+limit for some of them. Each of these effects reads the port and adds it to a key. The game's code decides the count.
+Some of the game's objects start a sound and then write a value to port 0xb of it in the same way (0x8026e2b0, from
+0x8026aea0). A rip plays the value that the game's code gives an effect first.
+
+| Effect | Sound ID | The value | First | Key |
+|---|---|---|---|---|
+| `JA_SE_PAUSE_MENU_CLAP_PARAM` | 0x8e | the opening ceremony's count of hits + 1 (0x801cf75c). The ceremony's constructor sets the count to 0 (0x801ced3c). Each hit raises it (0x801cf3a4). 0x802678b0 holds the count from 0 to 11. | 1 | 71 + the value. With 0, the effect plays no note. |
+| `JA_SE_STAGE_RESULT_DEC` | 0xcc | 7, from the stage's result (0x801d53c0) | 7 | 55 + the value |
+| `JA_SE_BLACK_FAIRY_REFLECT` | 0x169 | (the reflections + 1) * 2 (0x8013c4a0). The count of reflections starts at 0 (0x8013a5b8), and only 0 is stored there otherwise (0x8013b3c4, 0x8013bac8). 0x802678b0 holds the count from 0 to 14. | 2 | 62 + the value |
+| `JA_SE_BEAT_POINT_ADD` | 0x37 | the points added so far + 60 (0x80268124), once a frame while the points added stay below a limit (0x802680d0). Both start at 0 (0x802680b4). No code in main.dol sets the limit. The game therefore never reaches the start. | 60 | the value |
+| `JA_SE_MOOSHIN_CONTINUOUS_JUMP_H` | 0x18a | a count of jumps, from 8 (0x802123dc). The count starts at 0 (0x801e4db4) and rises by 1 after each jump's effect (0x801e5370). 0x802678b0 holds the count from 0 to 20. | 8 | 55 + the value |
+| `JA_SE_OBJ_SOUND_BLOCK_DISAPPEAR` | 0x4000f | the entry of a table (8, 4, 1, 0 at 0x80500780) for the block's step (0x8026bf6c). The step starts at 0 (0x8026aa10) and goes on by 1 after each block (0x8026aae0). It goes back to 0 after 90 frames without a block (0x8026aa80). | 8 | 56 + the value |
+| `JA_SE_BOXING_COMBO` | 0x0e | the combo's count of hits - 1, at most 8 (0x80165adc). The hit raises the count first (0x80165a64). | 0 | 60 + the value |
+| `JA_SE_MOOSHIN_CONTINUOUS_JUMP_L` | 0x189 | the same count of jumps, below 8 | 0 | 55 + the value |
+| `JA_SE_CTN_CALL_GUAGE` | 0xc7 | the banana gauge's step, less 1 (0x8018d1a0). The gauge starts at 0 (0x8018ce8c) and rises. Each step of 200 plays the effect (0x8018d34c). | 0 | 67 + the value |
+| `JA_SE_OBJ_SOUND_BLOCK_APPEAR` | 0x4000e | the entry of a table (0, 4, 7, 14, 12, 9 at 0x8045c2d0) for the block's step (0x8026bf40). The step starts at 0 and goes on by 1 after each block (0x8026aab0). | 0 | 60 + the value |
+| `JA_SE_PLY_JUMP_OBJ` | 0x2000b | the object's count (0x8026bf20). It starts at 0 and rises by 2 after each jump, up to 10 or 11 (0x8026aa90). | 0 | 53 + the value |
+
+The profile gives the driver the effects whose first value isn't 0. The driver starts the first five through 0x802678b0
+with their counts. With a count of 0 or more, 0x802678b0 starts the sound through another function (0x8026cee0). That
+function refuses `JA_SE_OBJ_SOUND_BLOCK_DISAPPEAR`. The driver therefore starts that effect as it starts other sounds,
+then writes its value to port 0xb (0x802686b0). The other effects play their first value, 0, without the profile. Two
+effects stay open. The game's code doesn't name `JA_SE_BOSS_DK_FIST_COMBO` (0x47). Nobody has found the code that starts
+it. 0x802678b0 holds its count at 6 or below. `JA_SE_CHR_FAILY_SING` (0x30043) takes a note of the chord that plays
+(0x80274350, from 0x8026c2ac). Their rips play them with 0 at the port.
 
 ## Driver (game mode)
 
@@ -677,31 +853,43 @@ at version 1. WSF 1.1.0's players refuse it with "driver block version 2; this p
 0x1C8  16   the first scene's wave groups, each as at 0x18
 0x1D8  u32  the number of the start-up's other wave groups that follow, at most 4
 0x1DC  16   the start-up's other wave groups, each as at 0x18, erased only to make room
-0x1EC  u32  the address of the game's sleep of the calling thread, or of the driver's sleep (0x224)
-0x1F0  u32  time-base ticks in one video frame (1,012,500: 60 Hz)
-0x1F4  u32  the address of the game's variable that holds the reset data's address
-0x1F8  u32  the reset data's byte that lets the audio set-up read the disc
-0x1FC  u32  for the driver's sleep: the address of the game's OSSetAlarm
-0x200  u32  the address of the game's OSDisableInterrupts
-0x204  u32  the address of the game's OSRestoreInterrupts
-0x208  u32  the address of the game's OSSuspendThread
-0x20C  u32  the address of the game's OSResumeThread
-0x210  u32  for the driver's loading of a wave group: the address of the game's variable that holds JAUSectionHeap's
+0x1EC  u32  the address of the game's variable that holds its music manager (Z2SeqMgr), or 0
+0x1F0  u32  the address of the game's Z2SeqMgr::setChildTrackVolume, or 0
+0x1F4  u32  the address of the game's Z2SoundStarter::setPortData, or 0
+0x1F8  u32  the children of the sound's track 0 that the driver mutes after it starts the sound, bit n for child n
+0x1FC  u32  the children 0 to 15 of track 0 that play at a volume between 0 and 1, bit n for child n
+0x200  64   the volumes of those children, child n's at 0x200 + 4n, as floats
+0x240  u32  the piece's status: 0x10000 plus the value that the driver writes to port 9 of the root track, or 0
+0x244  u32  the address of the game's sleep of the calling thread, or of the driver's sleep (0x27C)
+0x248  u32  time-base ticks in one video frame (1,012,500: 60 Hz)
+0x24C  u32  the address of the game's variable that holds the reset data's address
+0x250  u32  the reset data's byte that lets the audio set-up read the disc
+0x254  u32  for the driver's sleep: the address of the game's OSSetAlarm
+0x258  u32  the address of the game's OSDisableInterrupts
+0x25C  u32  the address of the game's OSRestoreInterrupts
+0x260  u32  the address of the game's OSSuspendThread
+0x264  u32  the address of the game's OSResumeThread
+0x268  u32  for the driver's loading of a wave group: the address of the game's variable that holds JAUSectionHeap's
             instance
-0x214  u32  the offset in that object of two words: the address of the wave banks' array, then its length
-0x218  u32  the address of the game's JASWaveArc::load
-0x21C  u32  the address of the game's JASWaveArc::loadTail
-0x220  u32  the address of the game's JASWaveArc::erase
-0x224  u32  for the ripper (written by the driver's build): the address of the driver's sleep
-0x228  u32  the address of the driver's function that loads a wave group of wave bank 0
-0x22C  u32  the address of the driver's function that loads a wave group of wave bank 1
-0x230  u32  the address of the driver's function that gives a wave group's load status
-0x234  u32  the address of the driver's function that erases a wave group of wave bank 1
-0x238  u32  the address of the driver's function that erases a wave group of wave bank 0
+0x26C  u32  the offset in that object of two words: the address of the wave banks' array, then its length
+0x270  u32  the address of the game's JASWaveArc::load
+0x274  u32  the address of the game's JASWaveArc::loadTail
+0x278  u32  the address of the game's JASWaveArc::erase
+0x27C  u32  for the ripper (written by the driver's build): the address of the driver's sleep
+0x280  u32  the address of the driver's function that loads a wave group of wave bank 0
+0x284  u32  the address of the driver's function that loads a wave group of wave bank 1
+0x288  u32  the address of the driver's function that gives a wave group's load status
+0x28C  u32  the address of the driver's function that erases a wave group of wave bank 1
+0x290  u32  the address of the driver's function that erases a wave group of wave bank 0
+0x294  u32  for the driver's start of the sound: the address of the game's start of a sound (Z2AudioMgr::startSound)
+0x298  u32  the address of JASDriver::finishDSPFrame's count of full rings, or 0
+0x29C  u32  for the ripper (written by the driver's build): the address of the driver's start of the sound
 ```
 
 A `.miniwsf` patches the sound ID (a 4-byte `MEM` chunk at 0x8170001C) and the wave groups (a `MEM` chunk at 0x81700024
-with the count and the groups).
+with the count and the groups). A rip of a piece to which Twilight Princess gives a state also patches the state: a
+`MEM` chunk at 0x81700208 with the state's words from 0x1F8 on, up to the last that isn't 0. A state that only mutes
+children takes 4 bytes.
 
 The driver repeats the game's start-up for sound with the game's functions: the heaps, the ARAM manager (the Wii keeps
 it in MEM2), the thread switch manager, the disc thread, and the audio set-up. Before that, it sets up the reset data
@@ -710,17 +898,26 @@ change of scene erases them. Before it loads the sound's wave groups, the driver
 groups that the list at 0x18 doesn't hold. It then loads the wave groups. The game's wave heap puts each group below the
 lowest group in it. Space that an erased group leaves above that group stays unused. If a group doesn't fit, the driver
 waits until none of the sound's groups is loading. It erases the sound's groups that loaded and the groups at 0x1DC.
-Then it loads the sound's groups again. Once they're loaded, the driver starts the sound and calls the audio frame
-process. It sleeps between calls for the video frames at 0x118. The function at 0x1EC does the sleeping. Some games
-have no such function. In others, the scene manager has no function that loads or erases one wave group. For such a
-game, the ripper writes the addresses of the driver's functions from 0x224 where the game's functions would go: at
-0x1EC, and in the list at 0x11C in place of loadSeWave, loadBgmWave, getWaveLoadStatus, eraseBgmWave and eraseSeWave.
-The driver's sleep works like Twilight Princess's threadSleep. It sets an alarm with the functions at 0x1FC to 0x20C.
-The alarm's handler resumes the thread. The driver's functions for a wave group call the functions at 0x218 to 0x220.
-Twilight Princess's scene manager calls them the same way. A group of wave bank 0 loads at the wave heap's head. A group
-of bank 1 loads at the tail. The status rules are version 1's. On an error, the low byte gives the step: 1 the block's
-header, 2 the root and system heaps, 3 the game's heaps, 4 the audio heap, 5 the audio set-up, 6 the wave groups, 7 the
-start of the sound. Steps 5 and 6 give up after 600 frames.
+Then it loads the sound's groups again. Once they're loaded, the driver starts the sound. If the block names the music
+manager, the driver then sets the volume of each child at 0x1F8 to 0 at once, as Twilight Princess's `bgmStart` does.
+It gives each child at 0x1FC its volume from 0x200 the same way. If the block names setPortData and the status at 0x240
+is set, the driver then writes the status to port 9 of the sound's root track, as the game's `changeBgmStatus` does.
+Then it calls the audio frame process. It sleeps between calls for the video frames at 0x118. The function at 0x244 does
+the sleeping. Some games have no such function. In others, the scene manager has no function that loads or erases one
+wave group. For such a game, the ripper writes the addresses of the driver's functions from 0x27C where the game's
+functions would go: at 0x244, and in the list at 0x11C in place of loadSeWave, loadBgmWave, getWaveLoadStatus,
+eraseBgmWave and eraseSeWave. The driver's sleep works like Twilight Princess's threadSleep. It sets an alarm with the
+functions at 0x254 to 0x264. The alarm's handler resumes the thread. The driver's functions for a wave group call the
+functions at 0x270 to 0x278. Twilight Princess's scene manager calls them the same way. For a game whose profile names
+finishDSPFrame's count, the ripper writes 0x29C's address in the list at 0x11C in place of startSound, the game's start
+at 0x294 and the count's address at 0x298. The Wii's finishDSPFrame counts the DSP frames that find the DSP's ring of
+output buffers full. At the seventh, it starts one more DSP frame. JASDriver::updateDSP takes the short gaps of the
+frames that follow for a DSP that can't keep up. It stops the lowest active channel at each sub-frame, for about 6 ms.
+That happens early in the audio driver's start-up. A sound that started before then would lose the notes that it began
+with. The driver's start of the sound runs the game's frames until the count reaches 8. Then it calls the game's start.
+A group of wave bank 0 loads at the wave heap's head. A group of bank 1 loads at the tail. The status rules are version
+1's. On an error, the low byte gives the step: 1 the block's header, 2 the root and system heaps, 3 the game's heaps, 4
+the audio heap, 5 the audio set-up, 6 the wave groups, 7 the start of the sound. Steps 5 and 6 give up after 600 frames.
 
 ### Donkey Kong Jungle Beat's driver (version 2)
 
@@ -734,6 +931,11 @@ patches them in the same way. The profile follows:
 0x11C  ...  the sizes that the game's start-up gives, and the addresses and offsets of the game's functions, variables
             and tables (49 words, in the order of driver/jungle_beat.c's Params)
 0x1E0  u32  written by the driver: the JAISound of the music that a chord effect plays over, or 0
+0x1E4  u32  the game's function that writes a port of a sound that plays
+0x1E8  40   the effects that the game starts with a count: five pairs of a sound ID and the count that the game's code
+            gives the effect first. A pair without an effect holds 0xFFFFFFFF
+0x210  8    the effect that a game object gives a value at port 0xb after the start: a pair of a sound ID and the value
+            that the game's code gives the effect first, as above
 ```
 
 The driver repeats the game's start-up for sound with the game's functions: the root heap, the game's heaps, the ARAM
@@ -742,11 +944,14 @@ the Wii Remote speaker's manager out of it. That manager sends the speaker's sou
 no Wii Remotes. Then the driver loads the wave groups and starts the sound. The game's BGM player starts music. It sets
 each track of a piece to the piece's first state from tables in the game's code. A piece whose first state turns every
 track off gets its next state at once. A chord effect starts through the game's chord code over a stage's music. The
-music's tracks are off (see "Chord effects"). The profile gives the number of records in the chord database. Other
-sounds start in the game's sound manager. The driver calls the audio frame process once a frame and sleeps for a frame
-between calls. While a chord effect plays, the rhythm's frame process runs after each audio frame. On an error, the
-low byte of the status gives the step: 1 the block's header, 2 the game's heaps, 4 the sound files, 5 the audio system,
-6 the wave groups, 7 the start of the sound. Step 6 gives up after 600 frames.
+music's tracks are off (see "Chord effects"). The profile gives the number of records in the chord database. An effect
+that the game starts with a count starts through the audio system's start of a sound with a count, with the count that
+the game's code gives it first (see "Effects that the game starts with a count"). Other sounds start in the game's sound
+manager. A game object writes a value to port 0xb of one effect after the start. The driver does the same. The driver
+calls the audio frame process once a frame and sleeps for a frame between calls. While a chord effect plays, the
+rhythm's frame process runs after each audio frame. On an error, the low byte of the status gives the step: 1 the
+block's header, 2 the game's heaps, 4 the sound files, 5 the audio system, 6 the wave groups, 7 the start of the sound.
+Step 6 gives up after 600 frames.
 
 ### New Play Control! Pikmin's driver (version 2)
 
@@ -759,14 +964,15 @@ have the same places too. A `.miniwsf` patches them in the same way. The block:
 0x00   u32  magic "WSFD"
 0x04   u32  version (2)
 0x08   u32  status: as in version 1
-0x0C   u32  sound ID: 0x80000000 | the part << 8 | the piece's number in the game's sequence index
+0x0C   u32  sound ID: 0x80000000 | the part << 8 | the piece's number in the game's sequence index, or an effect's
+            ID (see "Game mode for Jac games")
 0x10   u32  the address of a word that holds the sound's root track while the sound plays, then 0 (written by the
             driver)
 0x14   u32  the number of wave groups to load, at most 64
 0x18   256  the wave groups: each the wave system in the high half and the group in the low half
 0x118  u32  time-base ticks between the driver's polls (1,012,500: 60 Hz)
 0x11C  ...  the sizes and values that the game's start-up gives, and the addresses of the game's functions and
-            variables (26 words, in the order of driver/pikmin.c's Params)
+            variables (39 words, in the order of driver/pikmin.c's Params). The last 13 serve the effects.
 ```
 
 The driver gives the sound library the memory that the game's start-up gives it: a heap in MEM1, and a block of MEM2 in
@@ -777,26 +983,39 @@ plays the piece in the game's slot for music. The piece's root track is the soun
 play parts of one piece. The sound library starts that piece during the library's start-up. For any other part, the
 driver writes the part's number to a port of that piece's root track. A cutscene does the same. The root track then
 opens a track that plays the part. That track is the sound's root track. The driver polls once a frame and sleeps
-between polls. The driver sets the status to 2 when the sound's root track is free again. On an error, the low byte of
-the status gives the step: 1 the block's header, 2 the start of the sound library, 3 the disc's read of the sequence
-and the wave groups, 4 the start of the piece, 5 the root track that a cutscene writes to, 6 the start of the part.
-Steps 2, 3 and 6 give up after 600 polls.
+between polls. The driver sets the status to 2 when the sound's root track is free again.
+
+For an effect, the driver sets the game's scene to the play of a stage. It loads the wave groups as the game's set-up of
+its first scene of play loads them. The groups of the effects' wave system load without becoming the system's scene.
+Once the disc has read them and the effects' tracks are there, the driver starts the effect with the game's function
+for its kind. An effect of the system goes through `Jac_PlaySystemSe` and one of the player through `Jac_PlayOrimaSe`.
+For an event's effect, the driver creates an event at the camera with `Jac_CreateEvent` and plays the action with
+`Jac_PlayEventAction`. For the sound of the formation, the driver calls `Jac_Orima_Formation` once a frame with a full
+move straight ahead. The track that plays the effect becomes a child of the track for its kind. That child is the
+sound's root track. Once a frame, the driver calls the game's update of the camera.
+
+On an error, the low byte of the status gives the step: 1 the block's header, 2 the start of the sound library, 3 the
+disc's read of the sequence and the wave groups, 4 the start of the piece, 5 the root track that a cutscene writes to, 6
+the start of the part, 7 the disc's read of an effect's wave groups, 8 the effects' tracks, 9 the start of an effect, 10
+the track that plays the effect. Steps 2, 3, 6, 7, 8 and 10 give up after 600 polls.
 
 ### New Play Control! Pikmin 2's driver (version 2)
 
 Game-mode rips of New Play Control! Pikmin 2 contain the driver `driver/pikmin2.c`. The game's sound library is a later
 JAudio1. A sound layer in the game's code calls the library. The driver loads at the same address. Its block has the
 same place, magic and version as the block of `driver/jaudio.c`. The first 0x118 bytes of the two blocks match, and a
-`.miniwsf` patches them in the same way. The sound ID is a piece's number in the table at 0x21C with bit 31 set, or an
-effect's ID. The profile follows:
+`.miniwsf` patches them in the same way. The sound ID is a piece's number in the table at 0x224 with bit 31 set, or an
+effect's ID. Bits 20 to 27 of an effect's ID give a count of random numbers. The driver draws that many from the sound
+library's generator before the set-up. The game's effect IDs leave bits 16 to 30 clear. The profile follows:
 
 ```
 0x118  u32  time-base ticks between the sound layer's frames (2,025,000: 30 Hz)
-0x11C  ...  15 sizes that the game's start-up gives, then 47 addresses of the game's functions, variables and strings
+0x11C  ...  15 sizes that the game's start-up gives, then 48 addresses of the game's functions, variables and strings
             (in the order of driver/pikmin2.c's Params)
-0x214  u32  the Home Button menu's wave group, as at 0x18
-0x218  u32  the number of pieces in the table, at most 64
-0x21C  ...  the pieces, 0x44 bytes each: a word with how the game makes the piece's object (bits 0 to 7), a boss's
+0x218  u32  the Home Button menu's wave group, as at 0x18
+0x21C  u32  the address of the game's JASPlayer::getRandomS32, the sound library's random numbers
+0x220  u32  the number of pieces in the table, at most 96
+0x224  ...  the pieces, 0x44 bytes each: a word with how the game makes the piece's object (bits 0 to 7), a boss's
             start point (bits 8 to 15) and the root track's beat interval (bits 16 to 31, 0 for the default); the
             object's sound information (4 words); the sequence's file name (24 bytes); an AutoBgm's conductor (24 bytes)
 ```
@@ -807,9 +1026,11 @@ heap of the sound system. It reads the start-up archive, and makes the sound lay
 global scene loads group 0 of wave system 0, the Home Button menu's wave group and the effects sequence. For a piece,
 the driver makes a scene of the type that the game gives the challenge mode's menu. The scene loads the other groups at
 0x18, one in each of its two areas. The driver makes the piece's object in it as the game makes it, and the scene starts
-the piece. A boss's music starts at the boss's start point. An effect starts as the game's system effects start. The
-driver calls the sound layer's frame work once a frame and sleeps between calls for the time at 0x118. On an error, the
-low byte of the status gives the step: 1 the block's header or the piece's number, 2 the disc and the heaps, 3 the sound
+the piece. A boss's music starts at the boss's start point. For the final boss's music, l_boss, the driver first sets
+the variable that holds the final boss's sound object to a stand-in. The music's directors then take the tracks that
+they take on the boss's floor. An effect starts as the game's system effects start. The driver calls the sound layer's
+frame work once a frame and sleeps between calls for the time at 0x118. On an error, the low byte of the status gives
+the step: 1 the block's header or the piece's number, 2 the disc and the heaps, 3 the sound
 system, 4 the global scene's resources, 5 the piece's scene and object, 6 the scene's resources, 7 the start of the
 sound. Steps 4 and 6 give up after 600 frames.
 
@@ -823,7 +1044,7 @@ profile follows:
 ```
 0x118  u32  time-base ticks in one frame of the game (1,012,500: 60 Hz)
 0x11C  ...  the sizes that the game's start-up gives, and the addresses and offsets of the game's functions, variables
-            and paths (38 words, in the order of driver/galaxy.c's Params)
+            and paths (40 words, in the order of driver/galaxy.c's Params)
 ```
 
 The driver repeats the game's start-up for sound with the game's functions: the root heaps, the game's heaps, the ARAM
@@ -834,10 +1055,12 @@ therefore gives the interface's screen-saver threshold the value that the SDK's 
 the volumes that the game sets as each scene starts. The audio system loads one wave group itself. The game's scene
 manager then loads the wave groups that the game loads before its first scene. Then the driver loads the listed wave
 groups and starts the sound. Music starts in the game's BGM manager. The manager sets each track of a piece to the
-piece's first state from a table in the game's code. Other sounds start in the audio system. The driver calls the audio
-frame process once a frame and sleeps for a frame between calls. On an error, the low byte of the status gives the step:
-1 the block's header, 2 the game's heaps, 4 the sound files, 5 the audio system, 6 the wave groups, 7 the start of the
-sound. Each of step 6's three waits gives up after 600 frames.
+piece's first state from a table in the game's code. Other sounds start in the audio system. The game starts its sound
+effects through sound objects. A sound object writes the effect's low-pass cutoff to port 0xa of the effect's track: 127
+unless the sound table marks the effect for the stage's filter. The driver writes the port with the game's function. The
+driver calls the audio frame process once a frame and sleeps for a frame between calls. On an error, the low byte of the
+status gives the step: 1 the block's header, 2 the game's heaps, 4 the sound files, 5 the audio system, 6 the wave
+groups, 7 the start of the sound. Each of step 6's three waits gives up after 600 frames.
 
 ### Super Mario Galaxy 2's driver (version 2)
 
@@ -847,7 +1070,7 @@ address. The first 0x118 bytes of its block match those of the other two blocks.
 ```
 0x118  u32  time-base ticks in one frame of the game (1,012,500: 60 Hz)
 0x11C  ...  the sizes that the game's start-up gives, the game's number for the disc's language, and the addresses and
-            offsets of the game's functions and variables (44 words, in the order of driver/galaxy2.c's Params)
+            offsets of the game's functions and variables (46 words, in the order of driver/galaxy2.c's Params)
 ```
 
 The game's sound code is the same as Super Mario Galaxy's. Its start-up for sound differs. Super Mario Galaxy 2 loads
@@ -957,6 +1180,12 @@ The zeros compress well. The `.wsflib` file therefore shrinks. Its program keeps
 would make the sound library read on to the archive's end. If the driver loads one, the archive stays whole. The format
 doesn't change. Players that play earlier game-mode rips play these too. Rips made with 1.6.1 and older hold the whole
 archive.
+
+A game can play a piece with other tracks in another state (see "Tracks that the game silences"). The profile then gives
+the piece's variants. As in archive mode, the piece rips once as the game starts it, and once more in each variant (see
+"Archive mode" below). In game mode, a variant gives only the tracks that play. Its `.miniwsf` gives the driver those
+tracks. The driver silences the others as the sound starts. Game mode leaves out a variant with effects, sends, a tempo
+or variables.
 
 Each `.miniwsf` selects one sequence. The sequence's length comes from playing it on WSF's model of the sound player
 (see "Archive mode") with the game's effects. A looping sequence gets two loops plus a 10-second fade. A sequence that
@@ -1083,6 +1312,19 @@ start-up and that a ripped sound plays. Every piece and part is music for `--bgm
 over a track's commands and the jump command. A track's parent and children give the sound's tracks. The rules for a
 sound's length are those for JAudio2.
 
+A profile can also give the game's catalogue of sound effects in `main.dol`. A row of the catalogue gives an effect's
+number, its name and how the game starts it: as an effect of the system, as one of the player, or as an action of an
+event of a type. A table gives each event type's first entry in a table of actions. An action's entry gives the effect
+that it plays. The effects follow the pieces. An effect's ID is 0x80000000 | the kind << 24 | the number << 8 | the file
+that plays it. The kind is 1 for the system, 2 for the player, 3 for an event and 4 for the formation. An event's
+number is its type << 12 | the action. The file is 0, the effects sequence, or 1 for an event's effect. The catalogue's
+name labels an effect. Actions of events of different types can play the same effect. The first row that plays an
+effect names it. The game creates an event of one type with an effect that sounds at once. A rip plays that type's
+effects on an event of a quiet type, by the same entry of the table of actions. The profile also lists the effects that
+the game's code plays itself, labelled by their kind and number in hexadecimal (`system-19`, `player-800c`), and the
+sound of the formation (`formation`). It leaves out the catalogue's effects that play no sequence. Every effect plays
+the wave groups that the game loads for its effects.
+
 ### Game mode for New Play Control! Pikmin 2
 
 The game's sound library is a later JAudio1. Its start-up archive (`PSound.aaf`) holds the sound table, the instrument
@@ -1092,11 +1334,26 @@ holds them as `FILE` chunks, with the AW files of the global scene's groups and 
 plays. The game's name table (`PSound.asn`) names the sounds.
 
 The game's sound layer starts a piece of music by the sequence's file name. The rips' sounds are the game's 48 pieces of
-music and the effects of the sound table. The pieces are the files of the sequence archive other than the effects
-sequence. The sound table's sequences aren't ripped: the sound layer gives them their data, and the pieces take their
-place. A piece plays group 0 and the group of the scene in which the game plays it. Wave discovery finds the groups of
-the 14 pieces that the game never plays. A cave's piece plays with the first conductor of its floors. An effect plays
-with the global scene's groups. An effect without a name is labelled `se<category>-<index>`. `--bgm` picks the pieces.
+music, their variants and the effects of the sound table. The pieces are the files of the sequence archive other than
+the effects sequence. The sound table's sequences aren't ripped: the sound layer gives them their data, and the pieces
+take their place. A piece plays group 0 and the group of the scene in which the game plays it. Wave discovery finds the
+groups of the 14 pieces that the game never plays. A cave's piece plays with the first conductor of its family. Each
+other conductor that the game's lists of cave floors name gets a variant of its piece, with the group that the
+conductor's name gives. A boss's music starts at the part at which the boss starts it. Each other part gets a variant
+that starts there. l_boss has no variant at part 0, where a track jumps to itself without end. The game plays l_boss's
+tracks 10 and 11 in full. Its directors mute tracks 14 and 15 until the fight turns them on, and the rips keep them
+muted. Track 15 holds notes only in parts 4 and 11. It plays while a captain stands within 300 units of the boss. Those
+two parts get another variant each, with the track on. A variant's label is its conductor's name without the extension,
+or the piece's name, a hyphen and the part's number, with `-near` for a variant with track 15 on. An effect plays with
+the global scene's groups. An effect without a name is labelled `se<category>-<index>`. `--bgm` picks the pieces and
+their variants.
+
+Three effects play only some of the times that the game starts them: `PSSE_EN_FROG_VOICE`, `PSSE_EN_OOPAN_BOUND2` and
+`PSSE_EN_OOPAN_VOICE_DOWN`. Each one draws a random number and ends at once on some draws. The sound library's
+generator starts from the same state at each boot. From that state, the first draw ends all three. Before a rip of one
+of them starts, the driver draws the numbers that come before the first draw on which it plays: 3 for
+`PSSE_EN_FROG_VOICE`, and 1 for each of the other two. Each of the three plays the same sound on every draw that doesn't
+end it. The profile lists the counts (`JAudioProfile::random_starts`).
 
 The length analysis is the one for JAudio2, with the rules of JAudio1's sequence parser. A cave's piece never repeats:
 its conductor picks the phrases at random. The root track's polls of the game hold back every loop, and the piece plays
@@ -1117,15 +1374,21 @@ when any of them loops. A sequence that never makes a sound doesn't count. A pie
 sequences makes a sound, or when the data of one isn't in the archive. A set with such a piece gets version 2 of the
 archive descriptor. Players of WSF 1.5.0 and older refuse it.
 
-A game can play a piece in other states: the Photo Channel 1.1's moods and the Mii Channel's scenes. The profile then
-gives the piece's variants. The piece rips once as the game starts it, and once more in each variant. A variant's name
-follows the label in the rip's title and file name. `--suffix`'s text follows the variant's name. A variant can have
-effects, sends and an arrangement. The length analysis plays each rip with its variant's effects and in its arrangement.
-The `.miniwsf` of a variant with effects or sends holds an archive descriptor with them. The mood effect requires
-version 3 (see "Archive descriptor"). A variant's arrangement goes in its rip's tags: `wsf_tracks`, and `wsf_tempo` and
-`wsf_var` where the arrangement sets them. The variant's tracks replace those that the profile gives the piece (see
-"Tracks that the game silences"). `--tracks`, `--tempo` and `--var` give every rip their arrangement. The ripper then
-leaves out the variants that have an arrangement.
+The Forecast Channel's and the News Channel's pieces come from a table of labels in the ripper. Each row gives a
+piece's name, its base and its layer. A row without a layer gives the base alone. An archive makes the pieces whose
+labels it holds. A sequence can be in more than one piece. Each base is in two. A sequence that is in a piece makes
+no rip of its own. The pieces' rips go in the order of their first sounds. Rips with the same first sound keep the
+table's order. `--only` and `--bgm` pick these pieces as they pick Mega Man 9's.
+
+A game can play a piece in other states: the Photo Channel 1.1's moods, the Mii Channel's scenes and the states of Wii
+Music's main menu. The profile then gives the piece's variants. The piece rips once as the game starts it, and once more
+in each variant. A variant's name follows the label in the rip's title and file name. `--suffix`'s text follows the
+variant's name. A variant can have effects, sends and an arrangement. The length analysis plays each rip with its
+variant's effects and in its arrangement. The `.miniwsf` of a variant with effects or sends holds an archive descriptor
+with them. The mood effect requires version 3 (see "Archive descriptor"). A variant's arrangement goes in its rip's
+tags: `wsf_tracks`, and `wsf_tempo` and `wsf_var` where the arrangement sets them. The variant's tracks replace those
+that the profile gives the piece (see "Tracks that the game silences"). `--tracks`, `--tempo` and `--var` give every rip
+their arrangement. The ripper then leaves out the variants that have an arrangement.
 
 The archive in the `.wsflib` holds only the data that the ripped sequences play: each sequence's file, and its bank's
 file and wave data. A game's archive can hold hundreds of megabytes of sound effects and voices that a rip of its music

@@ -22,7 +22,9 @@
  * "Effects"). It makes the game's effect objects before it starts the sound. AX's frame callback then appends them in
  * the first frame after the sound has started. Archive mode does the same. In each frame, the callback lets the sound's
  * variables pick the presets of an effect that has them. The profile can also give tracks that the game silences on the
- * sound (docs/wsf.md, "Tracks that the game silences"). The driver sets their volumes to 0 as the sound starts.
+ * sound (docs/wsf.md, "Tracks that the game silences"). The driver sets their volumes to 0 as the sound starts. It can
+ * give values of the sound's variables too (docs/wsf.md, "Variables that the game sets"). The driver writes them into
+ * the sound's player as the sound starts.
  * `driver_params.status` reports the driver's progress to the player (see docs/wsf.md).
  *
  * Build with driver/build.py (clang). The result is committed as src/rip/driver_blob.h. Building WSF itself requires
@@ -30,6 +32,7 @@
  */
 
 typedef unsigned int u32;
+typedef short s16;
 
 #define PARAMS_MAGIC 0x57534644u /* 'WSFD' */
 #define PARAMS_VERSION 1u
@@ -115,6 +118,11 @@ struct Params {
     u32 seq_tracks;      /* the offset of the SeqPlayer's 16 track pointers in SeqSound */
     u32 track_volume;    /* the offset of the volume, a float, in SeqTrack */
     u32 silenced_tracks; /* bit N for track N; patched by a .miniwsf */
+    /* The variables that the game sets on the sound (none while set_variables is 0). The driver writes each into the
+       sound's player, as SeqSound::WriteVariable does. */
+    u32 seq_variables;  /* the offset of the SeqPlayer's 16 local variables, each an s16, in SeqSound */
+    u32 set_variables;  /* bit N for local variable N; patched by a .miniwsf */
+    s16 variables[16];  /* the values, by number; patched by a .miniwsf */
 };
 
 #define NO_GROUP 0xffffffffu
@@ -259,6 +267,15 @@ static void silence_tracks(void) {
     }
 }
 
+/* SeqSound::WriteVariable(N, variables[N]) on the sound that `handle` holds, for each N in set_variables. */
+static void set_variables(void) {
+    volatile struct Params* p = &driver_params;
+    for (u32 i = 0; i < 16; i++) {
+        if (p->set_variables & (1u << i))
+            *(volatile s16*)(handle + p->seq_variables + i * 2) = p->variables[i];
+    }
+}
+
 /* Makes the effect objects, each with a work buffer large enough for its Params, and takes over AX's frame callback. */
 static void set_up_effects(void) {
     volatile struct Params* p = &driver_params;
@@ -322,15 +339,15 @@ __attribute__((noreturn)) void driver_main(void) {
     if (p->bank_group_id != NO_GROUP && !(((fn4)p->load_group)(player, p->bank_group_id, heap, 0) & 0xff))
         fail(8);
 
-    /* nw4r::snd's sound system and threads, then the sound. With effects or silenced tracks, no AX frame comes between
-       the start of the sound and the driver's writes to it. The silenced tracks are then silent from the sound's first
-       frame. With effects, an update in that window passes the game's send on the sound to its player. AX's next frame
-       then appends the effects. */
+    /* nw4r::snd's sound system and threads, then the sound. With effects, silenced tracks or variables, no AX frame
+       comes between the start of the sound and the driver's writes to it. The silenced tracks are then silent from the
+       sound's first frame, and the sequence reads the variables from its first tick. With effects, an update in that
+       window passes the game's send on the sound to its player. AX's next frame then appends the effects. */
     if (p->init_flag)
         *(volatile unsigned char*)p->init_flag = 0;
     ((fn2)p->init_sound_system)(p->sound_priority, p->dvd_priority);
     const u32 effects = p->effect_count != 0;
-    const u32 at_once = effects || p->silenced_tracks;
+    const u32 at_once = effects || p->silenced_tracks || p->set_variables;
     u32 msr = 0;
     if (effects)
         set_up_effects();
@@ -340,6 +357,8 @@ __attribute__((noreturn)) void driver_main(void) {
         fail(7);
     if (p->silenced_tracks && handle)
         silence_tracks();
+    if (p->set_variables && handle)
+        set_variables();
     if (effects) {
         if (p->send_bus < 3 && handle)
             *(volatile u32*)(handle + p->sound_sends + p->send_bus * 4) = p->send;

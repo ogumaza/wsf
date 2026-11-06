@@ -20,6 +20,8 @@
 #include "ntdlib/flipper/z2_params.h"
 #include "ntdlib/jaudio/game_lengths.h"
 #include "ntdlib/jaudio/wave_system.h"
+#include "ntdlib/jaudio/z2_starts.h"
+#include "ntdlib/jaudio/z2_states.h"
 #include "ntdlib/rsar/formats.h"
 #include "ntdlib/sound_build.h"
 #include "xsflib/rip/length.h"
@@ -116,7 +118,9 @@ struct EffectClass
 // destructor and SeqSound::ReadVariable. For a send on the sound, it writes the send at an offset in BasicSound. For
 // the tracks that the game silences, it writes a volume of 0 into each track (SeqSound::SetTrackVolume): `seq_tracks`
 // is the offset of the SeqPlayer's 16 track pointers in SeqSound, and `track_volume` the offset of the volume in
-// SeqTrack. A game without presets, sends or silenced tracks leaves their words at 0.
+// SeqTrack. For the variables that the game sets on the sound, it writes each into the sound's player
+// (SeqSound::WriteVariable): `seq_variables` is the offset of the SeqPlayer's 16 local variables in SeqSound. A game
+// without presets, sends, silenced tracks or variables leaves their words at 0.
 struct EffectProfile
 {
     std::string dol_sha1;
@@ -133,6 +137,7 @@ struct EffectProfile
     uint32_t seq_handle_ctor = 0, seq_handle_dtor = 0, read_variable = 0;
     uint32_t sound_sends = 0;
     uint32_t seq_tracks = 0, track_volume = 0;
+    uint32_t seq_variables = 0;
     std::vector<EffectClass> classes;
 
     // For the game's other releases (see DeriveEffectProfile). The anchors are functions that the driver doesn't call.
@@ -277,6 +282,42 @@ struct JacPart
     uint8_t group = 0;
 };
 
+// How a Jac game starts a sound effect: by its number as an effect of the system or of the player, by an action of an
+// event, or as the sound of the formation. An event's number is its type << 12 | the action. The formation's number
+// is 0.
+enum class JacEffect : uint8_t
+{
+    kSystem = 1,
+    kPlayer = 2,
+    kEvent = 3,
+    kFormation = 4,
+};
+
+// The files of a Jac game's sequence index that play its effects: the effects sequence plays the system's, the
+// player's and the formation's, and the events' sequence the events'. A piece of music has a higher number.
+inline constexpr uint32_t kJacEffectsSequence = 0;
+inline constexpr uint32_t kJacEventsSequence = 1;
+inline constexpr uint32_t kJacFirstPiece = 2;
+
+// A Jac effect's sound ID: 0x80000000 | kind << 24 | number << 8 | the file that plays it. The number takes 16 bits.
+constexpr uint32_t JacEffectId(JacEffect kind, uint32_t number)
+{
+    const uint32_t file = kind == JacEffect::kEvent ? kJacEventsSequence : kJacEffectsSequence;
+    return 0x80000000u | static_cast<uint32_t>(kind) << 24 | (number & 0xffffu) << 8 | file;
+}
+
+// The first bit of an effect's value that gives the random numbers that the driver draws before it starts the effect
+// (JAudioProfile::random_starts). New Play Control! Pikmin 2's effect IDs leave bits 16 to 30 clear.
+inline constexpr uint32_t kRandomDrawsShift = 20;
+
+// An effect that ends at once on some draws of the sound library's random numbers, and the draws from the generator's
+// first state that come before the first draw on which it plays (see JAudioProfile::random_starts).
+struct RandomStart
+{
+    uint32_t id; // the effect's sound ID
+    uint8_t draws;
+};
+
 // A JAudio game's driver profile. For driver/jaudio.c, ntdlib's Z2 start-up takes the sizes and the game's functions,
 // and the driver adds the Wii's steps. Another driver takes its parameters from `params`. The length analysis and the
 // wave discovery watch the functions in `watch`.
@@ -299,6 +340,27 @@ struct JAudioProfile
     uint32_t parted_piece = 0;
     std::vector<JacPart> parts = {};
 
+    // A Jac game's catalogue of sound effects in its code (0 for none): `effect_count` rows of 20 bytes. A row gives a
+    // number in its word at +4, a pointer to the effect's name at +8 and how the game starts the effect at +16: -2 for
+    // an effect of the system, -1 for one of the player, or the type of the event whose action the number is. The
+    // table at `event_offsets` holds each event type's first entry in the table of actions that follows it. An
+    // action's entry gives the number of the effect that it plays, in its halfword at +4. The game's code starts the
+    // effects in `other_effects` itself. `left_out_effects` are effects of the catalogue that the ripper leaves out.
+    // Both lists hold sound IDs (JacEffectId).
+    uint32_t effect_table = 0;
+    uint32_t effect_count = 0;
+    uint32_t event_offsets = 0;
+    std::vector<uint32_t> other_effects = {};
+    std::vector<uint32_t> left_out_effects = {};
+
+    // A Jac game's event type whose event starts an effect as the game creates it (0 for none), and the type of the
+    // event that a rip plays the type's effects on instead (see ReadJacSounds).
+    uint32_t sounding_event = 0;
+    uint32_t quiet_event = 0;
+
+    // The wave groups that a Jac game loads for its effects, each (system << 16) | group. They are an effect's groups.
+    std::vector<uint32_t> effect_groups = {};
+
     // The path of the name table (.asn) of an AAF game's sounds on the disc, or empty for none.
     std::string sound_names = {};
 
@@ -309,6 +371,7 @@ struct JAudioProfile
     uint32_t reset_flag = 0;              // the reset data's byte that lets the audio set-up read the disc
     JAudioAlarm alarm = {};               // for a game whose sleep is 0
     JAudioWaveArcs wave_arcs = {};        // for a game whose z2.load_se_wave, z2.load_bgm_wave and z2.wave_status are 0
+    uint32_t full_ring_count = 0;         // JASDriver::finishDSPFrame's count of full rings, or 0 (driver/jaudio.c)
     uint32_t ios_version;                 // the IOS that the game's TMD requests
     ntdlib::jaudio::GameWatch watch;      // what the length analysis and the wave discovery watch
     std::vector<uint32_t> static_waves;   // the groups that the audio set-up loads itself: (system << 16) | group
@@ -329,6 +392,21 @@ struct JAudioProfile
     // The sound files that the driver loads besides the start-up archive and the wave archives, by their paths on the
     // disc. A rip's library holds them. With none listed, it holds the archives that FindJAudioFiles finds.
     std::vector<std::string> files = {};
+
+    // The effects that draw a random number and end at once on some draws, for a driver that draws numbers before the
+    // start (driver/pikmin2.c). From the generator's first state, the first draw ends each of them. The list of sounds
+    // gives such an effect with its draws at kRandomDrawsShift of its ID. Its label stays the same.
+    std::vector<RandomStart> random_starts = {};
+
+    // The pieces whose tracks the game mutes as it starts them, for driver/jaudio.c with the music manager in `z2`.
+    // ReadJAudioSounds gives each piece the children to mute (JAudioSound::piece_state). A start with a suffix becomes
+    // a sound after its piece, named with the suffix. Other profiles have none.
+    std::span<const ntdlib::jaudio::MutedStart> muted_starts = {};
+
+    // The states in which the game plays a piece once it has started, and the states that its scenes start more pieces
+    // in, for the same driver. A state without a suffix gives its piece the state (JAudioSound::piece_state). A state
+    // with a suffix becomes a sound after its piece, named with the suffix. Other profiles have none.
+    std::span<const ntdlib::jaudio::MusicState> piece_states = {};
 };
 
 const std::vector<JAudioProfile>& KnownJAudioProfiles();
@@ -381,9 +459,10 @@ std::optional<std::vector<uint8_t>> BuildJAudioLibrary(const ntdlib::disc::GameF
                                                        std::string* error = nullptr);
 
 // Game mode for a JAudio game: a .miniwsf that plays sound `sound_id` from `lib_name`, with the wave groups `waves`
-// loaded, each (system << 16) | group. Throws std::invalid_argument for more than ntdlib's 64 groups.
+// loaded, each (system << 16) | group. `state`, if given, is the state that driver/jaudio.c gives the piece after it
+// starts the sound (JAudioSound::piece_state). Throws std::invalid_argument for more than ntdlib's 64 groups.
 std::vector<uint8_t> BuildJAudioMini(uint32_t sound_id, std::span<const uint32_t> waves, const std::string& lib_name,
-                                     Tags tags);
+                                     Tags tags, const ntdlib::flipper::z2::PieceState* state = nullptr);
 
 // A sound of a JAudio game that a rip can play. `id` is the ID that the game passes to the sound library. `section` is
 // the sound's section in the name table, or empty. `music` is true if `--bgm` selects the sound, and `stream` is true
@@ -397,6 +476,12 @@ struct JAudioSound
     bool music = false;
     bool stream = false;
     std::vector<uint32_t> waves = {};
+
+    // The state that the driver gives the piece after it starts the sound: the children of track 0 that it mutes or
+    // plays at a volume between 0 and 1, and the status on port 9 (JAudioProfile::muted_starts and piece_states). Then
+    // whether the sound's files take the number of the sound before it: a piece's second start or another state.
+    ntdlib::flipper::z2::PieceState piece_state = {};
+    bool shares_number = false;
 };
 
 // A JAudio2 game's sounds, from the start-up archive's sound table, with the names of the table's sections. A sound
@@ -425,26 +510,34 @@ std::vector<ntdlib::jaudio::WaveSystem> ReadJacWaveSystems(std::span<const uint8
 // game's bank file (ReadJacWaveSystems) or an AAF start-up archive. Throws xsflib::FormatError if the file is damaged.
 std::vector<ntdlib::jaudio::WaveSystem> ReadWaveSystems(JAudioLibrary library, std::span<const uint8_t> start_up);
 
-// A Jac game's pieces of music, from the sequence index in `dol` at the profile's `sequence_index`. The index is a
-// BARC: a 32-byte header ("BARC", four bytes, a word, the number of files and the sequence archive's name), then a
-// 32-byte entry for each file. An entry holds the file's name in up to 14 bytes, two bytes, two words, and the file's
-// offset and size in the archive. Files 0 and 1 are the effects sequence and the system's events. The pieces are the
-// other files that aren't empty. A piece's ID is 0x80000000 | the file's number. The label is the file's name without
-// the extension. The game plays group 0 of the wave system with the piece's number. The profile's piece in parts gives
-// a sound for each of the piece's parts in place of the piece. A part's ID is 0x80000000 | the part's number << 8 | the
-// piece's number. A part's label is the piece's label, then "-" and the part's number. A part plays the wave group in
-// the part's entry of the profile. Throws xsflib::FormatError if `dol` isn't a DOL, or if the index lies outside the
-// DOL's sections, isn't a BARC or ends early.
+// A Jac game's sounds: its pieces of music, from the sequence index in `dol` at the profile's `sequence_index`, then
+// its sound effects. The index is a BARC: a 32-byte header ("BARC", four bytes, a word, the number of files and the
+// sequence archive's name), then a 32-byte entry for each file. An entry holds the file's name in up to 14 bytes, two
+// bytes, two words, and the file's offset and size in the archive. Files 0 and 1 are the effects sequence and the
+// system's events. The pieces are the other files that aren't empty. A piece's ID is 0x80000000 | the file's number.
+// The label is the file's name without the extension. The game plays group 0 of the wave system with the piece's
+// number. The profile's piece in parts gives a sound for each of the piece's parts in place of the piece. A part's ID
+// is 0x80000000 | the part's number << 8 | the piece's number. A part's label is the piece's label, then "-" and the
+// part's number. A part plays the wave group in the part's entry of the profile.
+// The effects are the rows of the profile's catalogue of effects, then its other effects, without its left-out
+// effects. A row's name labels its effect. Actions of events of different types can play the same effect. The first
+// row that plays an effect names it. An event of the sounding type starts another effect as the game creates it. The
+// rip plays that type's effects on an event of the quiet type, by the same entry of the table of actions. An other
+// effect is labelled by its kind and its number in hexadecimal, as system-19 or player-800c. The formation's sound is
+// labelled formation. An effect plays the profile's `effect_groups`. Throws xsflib::FormatError if `dol` isn't a DOL,
+// if the index lies outside the DOL's sections, isn't a BARC or ends early, or if the catalogue of effects or the table
+// of actions runs past its section or has a row of an unknown kind.
 std::vector<JAudioSound> ReadJacSounds(std::span<const uint8_t> dol, const JAudioProfile& profile);
 
-// Pikmin 2's sounds (JAudioDriver::kPikmin2): its pieces of music, then the effects of the start-up archive's sound
-// table. A piece is a file of the sequence archive, named without the extension. The sound table's sequences are left
-// out: the game's sound layer gives them their data, and the pieces take their place. A piece's ID is 0x80000000 |
-// the piece's number in the driver's table. Its wave groups are group 0 and the group that the game's scene loads, or
-// none for a piece that the game never plays. An effect plays in the effects sequence. The name table `names` names it.
-// Without a name there, the effect is named se<category>-<index>. Its wave groups are the profile's `static_waves`. The
-// sequence archive may be compressed with Yaz0. Throws xsflib::FormatError if a file is damaged, or if the sequence
-// archive lacks a piece's file.
+// Pikmin 2's sounds (JAudioDriver::kPikmin2): its pieces of music and their variants, then the effects of the start-up
+// archive's sound table. A piece is a file of the sequence archive, named without the extension. A variant plays a
+// piece with another conductor or from another part. It is named after the conductor or the part. The sound table's
+// sequences are left out: the game's sound layer gives them their data, and the pieces take their place. A piece's ID
+// is 0x80000000 | the piece's number in the driver's table. Its wave groups are group 0 and the group that the game's
+// scene loads, or none for a piece that the game never plays. An effect plays in the effects sequence. The name table
+// `names` names it. Without a name there, the effect is named se<category>-<index>. Its wave groups are the profile's
+// `static_waves`. The sequence archive may be compressed with Yaz0. Throws xsflib::FormatError if a file is damaged, or
+// if the sequence archive lacks a piece's file.
 std::vector<JAudioSound> ReadPikmin2Sounds(std::span<const uint8_t> aaf, std::span<const uint8_t> sequence_archive,
                                            std::span<const uint8_t> names, const JAudioProfile& profile);
 
@@ -480,6 +573,10 @@ std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const 
 // Archive mode: a .miniwsf that plays sequence `index` from `lib_name`.
 std::vector<uint8_t> BuildArchiveMini(uint32_t index, const std::string& lib_name, Tags tags);
 
+// Archive mode: writes the variables that `effects` gives `sound` into `tags`, under those that the tags give already
+// (docs/wsf.md, "Variables that the game sets"). The archive descriptor holds no variables. A rip's tag gives them.
+void AddSoundVariables(const nw4r::ArchiveEffects& effects, uint32_t sound, Tags& tags);
+
 // Archive mode: a .miniwsf that plays the sequences at `indices` together from `lib_name`, started in that order
 // (docs/wsf.md, "Sounds that play together"). The library's descriptor must have ArchiveDescriptor::kListVersion when
 // `indices` holds more than one sound. A variant's rip holds `descriptor`. That descriptor takes the place of the
@@ -504,18 +601,22 @@ std::optional<std::string> ProgramTooLarge(std::size_t size);
 // file, or cut off by truncation. Empty when nothing is missing.
 std::vector<std::string> MissingData(const ntdlib::rsar::SoundArchive& archive, uint32_t index);
 
-// A piece of music whose channels a game plays as separate sequences, started together (docs/wsf.md, "Sounds that
-// play together"): the piece's name, and the sequences in the order in which the game starts them.
+// A piece of music that a game plays as separate sequences, started together (docs/wsf.md, "Sounds that play
+// together"): the piece's name, and the sequences in the order in which the game starts them.
 struct Piece
 {
     std::string name;
     std::vector<uint32_t> sounds;
 };
 
-// The pieces of `archive` whose channels are separate sequences. Mega Man 9 plays each piece of its music as four
-// sequences, one for each channel of the NES's sound chip. It starts them together: the two pulse channels, the
-// triangle and the noise. Their labels are the piece's name followed by _S1, _S2, _TR and _NO. A piece is four
-// sequences labelled with one name and those suffixes. The pieces come in the order of their first sounds.
+// The pieces of `archive` that the game plays as separate sequences. A sequence of a piece rips only in its pieces.
+// - Mega Man 9 plays each piece of its music as four sequences, one for each channel of the NES's sound chip. It
+//   starts them together: the two pulse channels, the triangle and the noise. Their labels are the piece's name
+//   followed by _S1, _S2, _TR and _NO. A piece is four sequences labelled with one name and those suffixes.
+// - The Forecast and News channels play a piece as a base sequence and a layer that some views add. A table of labels
+//   gives these pieces (kLayeredPieces in nw4r.cpp). Each base also makes a piece of one sequence: the views without
+//   the layer. A sequence can be in several pieces.
+// The pieces come in the order of their first sounds. Pieces with the same first sound keep the table's order.
 std::vector<Piece> FindPieces(const ntdlib::rsar::SoundArchive& archive);
 
 // Whether the sound at `index` is music, by the rule that `wsfrip --bgm` uses. Music is a sequence whose label contains

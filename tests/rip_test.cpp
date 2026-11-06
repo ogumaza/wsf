@@ -160,8 +160,8 @@ void TestLengths()
                 7);
 
     // Track 0 plays a note of 24 ticks, then ties the note to itself over and over (from 11). The wave doesn't loop,
-    // and at 30 Hz it ends during the third pass. The first tie changes the note's volume, and later ones change
-    // nothing. After the note ends, the next pass starts it again.
+    // and at 30 Hz it ends during the third pass. The first tie only drops the region's volume from the note's channel,
+    // and later ones change nothing. After the note ends, the next pass starts it again.
     const auto restart =
         Measure({0xD1, 0x7F, 0xD2, 0x7F, 0xD3, 0x7F, 0xC8, 1, 60, 127, 24, 60, 127, 24, 0x89, 0x00, 0x00, 11, 0xFF}, 1,
                 false, 30);
@@ -175,9 +175,11 @@ void TestLengths()
     // the main track. Track 2's loops at 48 and 72 ticks count. At 24 ticks, track 0 had made no pass yet.
     CheckTiming("a track that plays no notes doesn't keep a later one from the loops", quiet, 740, 760, 10000);
 
-    // The first tie's pass is the first loop. The note ends at about 0.9 s. A track whose passes play notes isn't stuck
-    // then, and the pass that starts the note again is the second loop.
-    CheckTiming("a still track that plays notes isn't stuck", restart, 1235, 1265, 10000);
+    // A pass that only drops the region's volume is idle (ntdlib's NoteOn), so the first tie's pass isn't a loop. The
+    // note ends at about 0.9 s. A track whose passes play notes isn't stuck then. The pass that starts the note again
+    // ends at 1.25 s and is the first loop. The note ends again at about 1.9 s, and the pass that starts it once more
+    // is the second loop. It ends at 2.25 s.
+    CheckTiming("a still track that plays notes isn't stuck", restart, 2235, 2265, 10000);
 
     // The note runs out at 500 ms, and 500 ms of tail follow. Its track polls, but isn't settled while the note has
     // length left.
@@ -452,6 +454,26 @@ void TestPieces()
               "a piece's sounds go by their suffixes, not their places in the archive");
     }
 
+    // The channels' layered pieces: each base alone and with its layer. NEW_BGM_READ is in no piece. A layer without
+    // its base makes no piece. The pieces go by their first sounds, then the table's order.
+    const std::vector<TableSound> kLayered = {{"NEW_BGM_READ", 1, 0},          {"NEW_BGM_NEWS", 1, 0},
+                                              {"NEW_BGM_CIKYU", 1, 0},         {"WTR_BGM_MORNING_YOHOU", 1, 0},
+                                              {"WTR_BGM_MORNING_CIKYU", 1, 0}, {"WTR_BGM_NIGHT_CIKYU", 1, 0}};
+    const ntdlib::rsar::SoundArchive layered =
+        ntdlib::rsar::SoundArchive::Load(MakeSoundTable(kLayered, {"PLAYER_BGM"}), wsf::nw4r::kRsarOptions);
+    const std::vector<rip::Piece> layers = rip::FindPieces(layered);
+    const std::vector<rip::Piece> kLayers = {{"NEW_BGM_NEWS", {1}},
+                                             {"NEW_BGM_NEWS globe", {1, 2}},
+                                             {"WTR_BGM_MORNING_YOHOU", {3}},
+                                             {"WTR_BGM_MORNING_YOHOU globe", {3, 4}}};
+    bool same_layers = layers.size() == kLayers.size();
+    for (std::size_t i = 0; same_layers && i < layers.size(); i++)
+    {
+        same_layers = layers[i].name == kLayers[i].name && layers[i].sounds == kLayers[i].sounds;
+    }
+
+    Check(same_layers, "the channels' layered pieces (" + std::to_string(layers.size()) + ")");
+
     // The latest end, and the longest fade. A silent sequence doesn't count.
     using rip::Timing;
     const Timing kLoop{60000, 10000};
@@ -605,6 +627,80 @@ void TestJac()
     profile.parted_piece = 0;
     profile.parts.clear();
 
+    // A second section at 0x80310000 holds a catalogue of six effects, their names, and the first entries of the event
+    // types with the table of actions. The rows: the system's effect 5, the player's effect 0x8003, action 1 of event
+    // type 2, action 0 of type 3, action 0 of type 7, and the system's effect 0, which the profile leaves out. Actions
+    // 3 and 4 play the same effect. Type 7 is the sounding type, and type 1 the quiet type.
+    constexpr uint32_t kEffects = 0x80310000, kRows = kEffects, kNames = kEffects + 0x80, kOffsets = kEffects + 0xc0;
+    std::vector<uint8_t> effects_dol = dol;
+    std::vector<uint8_t> effects(0x140);
+    const auto put = [&effects](uint32_t address, uint32_t value)
+    {
+        xsflib::StoreBe32(&effects[address - kEffects], value);
+    };
+    const char* const names[] = {"SYS_A", "PLY_B", "EV_C", "EV_D", "EV_E", "LEFT"};
+    const uint32_t rows[][2] = {{5, 0xfffffffe}, {0x8003, 0xffffffff}, {1, 2}, {0, 3}, {0, 7}, {0, 0xfffffffe}};
+    for (uint32_t i = 0; i < 6; i++)
+    {
+        std::copy(names[i], names[i] + std::strlen(names[i]), effects.begin() + (kNames - kEffects) + i * 8);
+        put(kRows + i * 20 + 4, rows[i][0]);
+        put(kRows + i * 20 + 8, kNames + i * 8);
+        put(kRows + i * 20 + 16, rows[i][1]);
+    }
+
+    const uint32_t first_entries[] = {0, 0, 2, 4, 4, 4, 4, 6};
+    for (uint32_t type = 0; type < 8; type++)
+    {
+        put(kOffsets + type * 4, first_entries[type]);
+    }
+
+    for (uint32_t entry = 0; entry < 8; entry++)
+    {
+        const uint32_t effect = entry == 3 || entry == 4 ? 0x30 : entry == 6 ? 0x40 : 0x10 + entry;
+        effects[kOffsets - kEffects + 0x20 + entry * 6 + 4] = static_cast<uint8_t>(effect >> 8);
+        effects[kOffsets - kEffects + 0x20 + entry * 6 + 5] = static_cast<uint8_t>(effect);
+    }
+
+    xsflib::StoreBe32(&effects_dol[0x20], static_cast<uint32_t>(effects_dol.size())); // the second data section
+    xsflib::StoreBe32(&effects_dol[0x68], kEffects);
+    xsflib::StoreBe32(&effects_dol[0xb0], static_cast<uint32_t>(effects.size()));
+    effects_dol.insert(effects_dol.end(), effects.begin(), effects.end());
+
+    profile.effect_table = kRows;
+    profile.effect_count = 6;
+    profile.event_offsets = kOffsets;
+    profile.left_out_effects = {rip::JacEffectId(rip::JacEffect::kSystem, 0)};
+    profile.other_effects = {rip::JacEffectId(rip::JacEffect::kSystem, 0x19),
+                             rip::JacEffectId(rip::JacEffect::kPlayer, 0x800c),
+                             rip::JacEffectId(rip::JacEffect::kFormation, 0)};
+    profile.sounding_event = 7;
+    profile.quiet_event = 1;
+    profile.effect_groups = {0u << 16 | 1, 14u << 16};
+    const std::vector<rip::JAudioSound> with_effects = rip::ReadJacSounds(effects_dol, profile);
+    std::vector<std::pair<uint32_t, std::string>> listed;
+    for (std::size_t i = 3; i < with_effects.size(); i++)
+    {
+        listed.emplace_back(with_effects[i].id, with_effects[i].label);
+    }
+
+    const std::vector<std::pair<uint32_t, std::string>> expected_effects = {
+        {0x81000500, "SYS_A"},     {0x82800300, "PLY_B"},       {0x83200101, "EV_C"},     {0x83100601, "EV_E"},
+        {0x81001900, "system-19"}, {0x82800c00, "player-800c"}, {0x84000000, "formation"}};
+    Check(with_effects.size() == 10 && with_effects[2].label == "fourteen" && listed == expected_effects,
+          "the effects follow the pieces: the catalogue's rows by their names, then the other effects by their kinds");
+    Check(with_effects.size() == 10 && !with_effects[3].music && with_effects[3].section == "SE" &&
+              with_effects[9].waves == profile.effect_groups,
+          "an effect isn't music and plays the profile's wave groups for the effects");
+
+    std::vector<uint8_t> bad_kind = effects_dol;
+    xsflib::StoreBe32(&bad_kind[bad_kind.size() - effects.size() + 16], 9);
+    Check(ThrowsFormatError([&] { rip::ReadJacSounds(bad_kind, profile); }),
+          "a catalogue's row of an unknown kind is refused");
+    profile.effect_count = 17;
+    Check(ThrowsFormatError([&] { rip::ReadJacSounds(effects_dol, profile); }),
+          "a catalogue that runs past its section is refused");
+    profile = rip::JAudioProfile{.library = rip::JAudioLibrary::kJac, .sequence_index = kIndex};
+
     // The index holds the count of files at offset 0xc. Seven files run past the end of the section.
     std::vector<uint8_t> short_index = dol;
     xsflib::StoreBe32(&short_index[0x100 + 0x20 + 0xc], 7);
@@ -710,7 +806,10 @@ void TestPikmin2Sounds()
 
     const std::vector<rip::JAudioSound> sounds =
         rip::ReadPikmin2Sounds(aaf, files::RarcFile(archive_files), names, *profile);
-    if (!Check(sounds.size() == 48 + 3, "the pieces come first, then the effects, without the table's sequences"))
+    constexpr std::size_t kVariants = 11 + 12 + 12 + 2;
+    constexpr std::size_t kFirstEffect = 48 + kVariants;
+    if (!Check(sounds.size() == kFirstEffect + 3,
+               "the pieces come first, then their variants and the effects, without the table's sequences"))
     {
         return;
     }
@@ -720,11 +819,40 @@ void TestPikmin2Sounds()
     Check(sounds[3].waves == std::vector<uint32_t>{0, 6} && sounds[31].waves == std::vector<uint32_t>{0},
           "a piece plays group 0 and the group of its scene");
     Check(sounds[0].waves.empty(), "a piece that the game never plays has no groups. The ripper finds them");
-    Check(sounds[48].id == 0x800 && sounds[48].label == "se0-0000" && sounds[49].id == 0x801 &&
-              sounds[49].label == "PSSE_SECOND" && sounds[50].id == 0x6800 && sounds[50].label == "HOMESE_TEST",
+    Check(sounds[48].id == 0x80000030 && sounds[48].label == "caveconc_05_0" && sounds[48].music &&
+              sounds[48].waves == std::vector<uint32_t>{0, 31},
+          "a cave piece's variant is named after its conductor, and plays the group that the conductor's name gives");
+    Check(sounds[59].id == 0x8000003b && sounds[59].label == "m_boss-0" &&
+              sounds[59].waves == std::vector<uint32_t>{0} && sounds[kFirstEffect - 3].label == "l_boss-13" &&
+              sounds[kFirstEffect - 3].waves == std::vector<uint32_t>{0, 35},
+          "a boss piece's variant is named after its part");
+    Check(sounds[kFirstEffect - 2].id == 0x80000053 && sounds[kFirstEffect - 2].label == "l_boss-4-near" &&
+              sounds[kFirstEffect - 1].id == 0x80000054 && sounds[kFirstEffect - 1].label == "l_boss-11-near" &&
+              sounds[kFirstEffect - 1].waves == std::vector<uint32_t>{0, 35},
+          "the variants of l_boss with the tension director on follow the parts");
+    Check(sounds[kFirstEffect].id == 0x800 && sounds[kFirstEffect].label == "se0-0000" &&
+              sounds[kFirstEffect + 1].id == 0x801 && sounds[kFirstEffect + 1].label == "PSSE_SECOND" &&
+              sounds[kFirstEffect + 2].id == 0x6800 && sounds[kFirstEffect + 2].label == "HOMESE_TEST",
           "the name table names an effect, and an effect without a name is named by its category and index");
-    Check(!sounds[48].music && sounds[48].section == "SE" && sounds[48].waves == profile->static_waves,
+    Check(!sounds[kFirstEffect].music && sounds[kFirstEffect].section == "SE" &&
+              sounds[kFirstEffect].waves == profile->static_waves,
           "an effect plays in the groups that the global scene loads");
+
+    // Three effects end at once on the generator's first draw. The profile gives each the draws before the first draw
+    // on which it plays, and an effect's ID gives its draws to the driver.
+    Check(profile->random_starts.size() == 3 && profile->random_starts[0].id == 0x5829 &&
+              profile->random_starts[0].draws == 3 && profile->random_starts[1].id == 0x58fc &&
+              profile->random_starts[1].draws == 1 && profile->random_starts[2].id == 0x58fe &&
+              profile->random_starts[2].draws == 1,
+          "Pikmin 2's three random effects draw 3, 1 and 1 numbers before they start");
+    rip::JAudioProfile drawn = *profile;
+    drawn.random_starts = {{0x801, 3}};
+    const std::vector<rip::JAudioSound> drawn_sounds =
+        rip::ReadPikmin2Sounds(aaf, files::RarcFile(archive_files), names, drawn);
+    Check(drawn_sounds.size() == sounds.size() &&
+              drawn_sounds[kFirstEffect + 1].id == (0x801u | 3u << rip::kRandomDrawsShift) &&
+              drawn_sounds[kFirstEffect].id == 0x800,
+          "a listed effect's ID gives its draws from bit 20, and the others' IDs stay as they are");
 
     const std::vector<uint8_t> short_names(names.begin(), names.begin() + 0x10 + 17 * 0x20);
     Check(
@@ -735,10 +863,12 @@ void TestPikmin2Sounds()
           "a sequence archive without a piece is refused");
 
     // The pieces whose conductors pick what the tracks play never repeat.
-    Check(!rip::WatchOf(*profile, 0x80000006).idle_in_calls && !rip::WatchOf(*profile, 0x80000001).idle_in_calls,
-          "the root track of an AutoBgm piece doesn't idle in its polling routine");
-    Check(rip::WatchOf(*profile, 0x80000003).idle_in_calls && rip::WatchOf(*profile, 0x806).idle_in_calls,
-          "the root tracks of the other pieces and the effects idle in calls");
+    Check(!rip::WatchOf(*profile, 0x80000006).idle_in_calls && !rip::WatchOf(*profile, 0x80000001).idle_in_calls &&
+              !rip::WatchOf(*profile, 0x80000030).idle_in_calls,
+          "the root track of an AutoBgm piece or of its variant doesn't idle in its polling routine");
+    Check(rip::WatchOf(*profile, 0x80000003).idle_in_calls && rip::WatchOf(*profile, 0x8000003b).idle_in_calls &&
+              rip::WatchOf(*profile, 0x806).idle_in_calls,
+          "the root tracks of the other pieces, their variants and the effects idle in calls");
 }
 
 // An archive that MakeGroupedArchive builds, with where its FILE block starts and where its INFO block holds each

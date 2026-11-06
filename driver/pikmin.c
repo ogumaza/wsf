@@ -24,6 +24,22 @@
  * track that plays the part. For a part, the driver loads the part's wave group in step 4. In step 5, the driver
  * writes the part's number to the port. A cutscene does the same. The driver then watches the track that plays the
  * part.
+ * The sound library plays the effects' sequence and the events' sequence from its start-up too. Tracks of those
+ * sequences poll ports, and the game's functions for effects write to them. For an effect, in place of steps 4 and 5:
+ *   7. the effects' other wave groups, as the game's set-up of its first scene of play loads them;
+ *   8. the wait for the tracks that play the effects;
+ *   9. the effect, started by the game's function for its kind. An event's effect plays by an action of an event that
+ *      the driver creates at the camera;
+ *   10. the wait for the track that plays the effect.
+ * The driver sets the game's scene to the play of a stage first. The game plays two of the system's effects only
+ * there. Once a frame, the driver then calls the game's update of the camera, as the game's frame does. That update
+ * gives each event its volume and pan by its place against the camera. The driver doesn't run the game's check of its
+ * events. The event then stays as long as the effect plays, as an event that the game updates each frame does. The
+ * driver watches the track that plays the effect.
+ * The sound of the formation plays in a track of the effects sequence while the player moves the formation. The
+ * game's function for the formation takes the move as x and y, -127 to 127, once a frame. It writes x and the move's
+ * length to ports of the track. The driver passes a full move straight ahead each frame: x 0 and y 127.
+ * These steps also apply to the GameCube release.
  * WSF's machine raises no video interrupts. The driver waits between its polls with the OS's sleep instead.
  * `driver_params.status` reports the driver's progress to the player (see docs/wsf.md).
  *
@@ -57,17 +73,49 @@ typedef unsigned int u32;
 #define SOUND_PIECE(id) ((id) & 0xffu)
 #define SOUND_PART(id) (((id) >> 8) & 0xffu)
 
-/* The DVD task's pass for a piece's files. The game's scene set-up makes it the same way. */
+/* An effect's ID: 0x80000000 | kind << 24 | number << 8 | sequence. The sequence field holds 0 or 1, the effects'
+   sequence or the events'. Pieces start at FIRST_PIECE. The kind gives the game's function that starts the effect. An
+   event's number holds the event's type and the action (EVENT_TYPE). */
+#define FIRST_PIECE 2u
+#define EFFECT_KIND(id) (((id) >> 24) & 0x7fu)
+#define EFFECT_NUMBER(id) (((id) >> 8) & 0xffffu)
+#define EFFECT_SYSTEM 1u
+#define EFFECT_PLAYER 2u
+#define EFFECT_EVENT 3u
+#define EFFECT_FORMATION 4u
+#define EVENT_TYPE(number) ((number) >> 12)
+#define EVENT_ACTION(number) ((number) & 0xfffu)
+
+/* The wave system of the effects. The game's set-up of its first scene of play (Jac_SceneSetup, from 0x8001d5a0)
+   loads groups 1 to 3 of that system without making them the system's scene. It makes group 0 of systems 14, 15 and 2
+   their systems' scenes. An effect's wave groups in the block are those groups, in that order. The set-up also loads
+   group 0 of wave system 22, which the bank file lacks. */
+#define EFFECTS_SYSTEM 0u
+
+/* The game's scene of a stage's play, and the system's effect that closes the menu. Jac_PlaySystemSe plays that effect
+   only while the menu's flag is set. The effect that opens the menu sets it. */
+#define SCENE_OF_PLAY 5u
+#define EFFECT_CLOSES_MENU 7u
+
+/* The move that the driver passes to the game's function for the formation each frame: straight ahead, at full
+   length. */
+#define FORMATION_X 0u
+#define FORMATION_Y 127u
+
+/* The DVD task's passes for a piece's files and for the effects' wave groups. The game's scene set-up makes them the
+   same way. */
 #define PASS_OF_PIECE 0x10000u
+#define PASS_OF_EFFECTS 0x20000u
 
 /* The port that a cutscene writes its part to, and the word of a track that holds the track's first child. The root
    track opens the track that plays the part as its first child. */
 #define PART_PORT 0u
 #define TRACK_FIRST_CHILD 0x44u
 
-/* A track's state, a byte: 0 while the track is free. */
+/* A track's state, a byte: 0 while the track is free. A track has 16 children, in words from TRACK_FIRST_CHILD. */
 #define TRACK_STATE 0x3cu
 #define TRACK_FREE 0u
+#define TRACK_CHILDREN 16u
 
 struct Params
 {
@@ -107,6 +155,20 @@ struct Params
     u32 handle_to_sequence; /* seqp_* Jaf_HandleToSeq(u32 handle) */
     u32 get_track_handle;   /* seqp_* Jam_GetTrackHandle(u32 name) */
     u32 write_port;         /* u32 Jam_WritePortAppDirect(seqp_* track, u32 port, u16 value) */
+    /* the game profile for effects */
+    u32 load_wave_scene;    /* void WaveScene_Load(u32 system, u32 group) */
+    u32 scene;              /* the sound library's variable: the game's scene */
+    u32 menu;               /* the sound library's flag: the menu is open */
+    u32 play_system_effect; /* void Jac_PlaySystemSe(u32 number) */
+    u32 play_player_effect; /* void Jac_PlayOrimaSe(u32 number) */
+    u32 create_event;       /* s32 Jac_CreateEvent(u8 type, Vector3D* position) */
+    u32 play_event_action;  /* u32 Jac_PlayEventAction(s32 event, u32 action) */
+    u32 update_camera;      /* void Jac_UpdateCamera(void) */
+    u32 system_track;       /* the name of the track that plays the system's effects */
+    u32 player_track;       /* the name of the track that plays the player's effects */
+    u32 events_track;       /* the name of the events' root track. Its children play the events */
+    u32 move_formation;     /* void Jac_Orima_Formation(s32 x, s32 y) */
+    u32 formation_track;    /* the name of the effects sequence's track for the formation */
 };
 
 __attribute__((section(".params"), used)) volatile struct Params driver_params = {
@@ -150,16 +212,157 @@ __attribute__((noreturn)) static void fail(u32 step)
 static volatile u32 piece_read;
 static volatile u32 piece_root;
 
-/* The wait for ever. The sound ends when its track is free again. */
+/* The end of the sound: once its track is free again. */
+static void check_end(volatile struct Params* p)
+{
+    if (p->status == STATUS_PLAYING && byte(piece_root + TRACK_STATE) == TRACK_FREE)
+    {
+        p->sound = 0;
+        p->status = STATUS_FINISHED;
+    }
+}
+
+/* The wait for ever. */
 __attribute__((noreturn)) static void watch_piece(volatile struct Params* p)
 {
     for (;;)
     {
-        if (p->status == STATUS_PLAYING && byte(piece_root + TRACK_STATE) == TRACK_FREE)
+        check_end(p);
+        wait_frame();
+    }
+}
+
+/* An event's place against the camera, as Jac_CreateEvent takes it: three floats. An event at the camera gets the full
+   volume and the pan of the middle. */
+static const u32 at_camera[3];
+
+/* The first child of the `count` tracks at `parents` that plays, or 0. */
+static u32 playing_child(const u32* parents, u32 count)
+{
+    for (u32 i = 0; i < count; i++)
+    {
+        for (u32 n = 0; n < TRACK_CHILDREN; n++)
         {
-            p->sound = 0;
-            p->status = STATUS_FINISHED;
+            const u32 child = word(parents[i] + TRACK_FIRST_CHILD + 4 * n);
+            if (child && byte(child + TRACK_STATE) != TRACK_FREE)
+            {
+                return child;
+            }
         }
+    }
+
+    return 0;
+}
+
+/* One frame of the formation's move, as the game's frame passes the player's move. */
+static void move_formation(volatile struct Params* p)
+{
+    ((fn2)p->move_formation)(FORMATION_X, FORMATION_Y);
+}
+
+/* Steps 7 to 10: an effect. */
+__attribute__((noreturn)) static void play_effect(volatile struct Params* p)
+{
+    /* The effects' other wave groups, then a pass on the disc after them. The groups of the effects' system load
+       without becoming its scene. */
+    for (u32 i = 0; i < p->wave_count; i++)
+    {
+        const u32 system = p->waves[i] >> 16;
+        ((fn2)(system == EFFECTS_SYSTEM ? p->load_wave_scene : p->set_wave_scene))(system, p->waves[i] & 0xffffu);
+    }
+    ((fn3)p->check_pass)(PASS_OF_EFFECTS, (u32)&piece_read, 0);
+    for (u32 polls = 0; !piece_read; polls++)
+    {
+        if (polls > SETUP_POLLS)
+        {
+            fail(7);
+        }
+        wait_frame();
+    }
+
+    /* The tracks that play the effects. The game's functions for effects drop an effect while their track is missing.
+       The events' tracks are the children of the events' root track. */
+    u32 system_track = 0, player_track = 0, events_track = 0;
+    for (u32 polls = 0; !system_track || !player_track || !events_track; polls++)
+    {
+        if (polls > SETUP_POLLS)
+        {
+            fail(8);
+        }
+        wait_frame();
+        system_track = ((fn1)p->get_track_handle)(p->system_track);
+        player_track = ((fn1)p->get_track_handle)(p->player_track);
+        events_track = ((fn1)p->get_track_handle)(p->events_track);
+    }
+
+    /* The effect. The track that plays it becomes a child of the track for its kind. One of the system's effects plays
+       one of the player's. */
+    *(volatile u32*)p->scene = SCENE_OF_PLAY;
+    const u32 number = EFFECT_NUMBER(p->sound_id);
+    const u32 kind = EFFECT_KIND(p->sound_id);
+    u32 parents[2] = {system_track, player_track};
+    u32 count = 2;
+    switch (kind)
+    {
+    case EFFECT_SYSTEM:
+        if (number == EFFECT_CLOSES_MENU)
+        {
+            *(volatile u32*)p->menu = 1;
+        }
+        ((fn1)p->play_system_effect)(number);
+        break;
+    case EFFECT_PLAYER:
+        ((fn1)p->play_player_effect)(number);
+        break;
+    case EFFECT_EVENT:
+        {
+            const u32 event = ((fn2)p->create_event)(EVENT_TYPE(number), (u32)at_camera);
+            if (event >= TRACK_CHILDREN)
+            {
+                fail(9);
+            }
+            ((fn2)p->play_event_action)(event, EVENT_ACTION(number));
+            parents[0] = word(events_track + TRACK_FIRST_CHILD + 4 * event);
+            count = 1;
+            break;
+        }
+    case EFFECT_FORMATION:
+        parents[0] = ((fn1)p->get_track_handle)(p->formation_track);
+        if (!parents[0])
+        {
+            fail(9);
+        }
+        move_formation(p);
+        count = 1;
+        break;
+    default:
+        fail(9);
+    }
+
+    p->status = STATUS_PLAYING;
+    for (u32 polls = 0; !(piece_root = playing_child(parents, count)); polls++)
+    {
+        if (polls > SETUP_POLLS)
+        {
+            fail(10);
+        }
+        if (kind == EFFECT_FORMATION)
+        {
+            move_formation(p);
+        }
+        ((fn0)p->update_camera)();
+        wait_frame();
+    }
+
+    p->sound = (u32)&piece_root;
+    for (;;)
+    {
+        if (kind == EFFECT_FORMATION)
+        {
+            move_formation(p);
+        }
+        ((fn0)p->update_camera)();
+        check_end(p);
         wait_frame();
     }
 }
@@ -204,6 +407,10 @@ __attribute__((noreturn)) void driver_main(void)
     /* The piece's sequence and the wave groups, then a pass on the disc after them. The pass sets `piece_read` once the
        disc has read them. A part's piece is in memory from the sound library's start-up. */
     const u32 piece = SOUND_PIECE(p->sound_id);
+    if (piece < FIRST_PIECE)
+    {
+        play_effect(p);
+    }
     const u32 part = SOUND_PART(p->sound_id);
     if (!part)
     {

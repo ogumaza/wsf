@@ -438,7 +438,7 @@ void TestEffects()
     // isn't A, B or C, is skipped too.
     std::vector<uint8_t> odd = raw;
     const std::size_t first_effect = dry.Serialize().size() + 4;
-    odd[first_effect + 1] = 9;
+    odd[first_effect + 1] = 0xff;
     const auto skipped = ArchiveDescriptor::Parse(odd);
 
     XSFLIB_CHECK(skipped && skipped->effects.setups.size() == 1 &&
@@ -480,6 +480,48 @@ void TestReverbHi2008()
     XSFLIB_CHECK(back && back->effects.setups.size() == 1 && back->effects.setups[0].bus == 0 &&
                  back->effects.setups[0].type == nw4r::EffectType::kReverbHi2008 &&
                  back->effects.setups[0].params == reverb.params);
+}
+
+void TestEffects2009()
+{
+    // FxChorus and FxDelay of 2009 take five words each. Their setups read back with their buses, words and sounds, in
+    // a descriptor of version 1.
+    ArchiveDescriptor d;
+    d.archive_path = "files/sound/d.brsar";
+    d.microcode_path = "ax_microcode.bin";
+    d.snd_build = 20090924;
+
+    nw4r::EffectSetup delay;
+    delay.bus = 1;
+    delay.type = nw4r::EffectType::kDelay2009;
+    nw4r::EffectSetup chorus;
+    chorus.bus = 2;
+    chorus.type = nw4r::EffectType::kChorus2009;
+    for (std::size_t i = 0; i < 5; i++)
+    {
+        delay.params[i] = std::bit_cast<uint32_t>(10.0f * static_cast<float>(i + 1));
+        chorus.params[i] = std::bit_cast<uint32_t>(0.125f * static_cast<float>(i + 1));
+    }
+
+    delay.sounds = {7, 9};
+    chorus.sounds = {9};
+    d.effects.setups = {delay, chorus};
+
+    ArchiveDescriptor dry = d;
+    dry.effects.setups.clear();
+    const std::vector<uint8_t> raw = d.Serialize();
+    const auto back = ArchiveDescriptor::Parse(raw);
+
+    // 4 for the count, 12 + 5 * 4 + 2 * 4 and 12 + 5 * 4 + 4 for the effects, and 4 for a count of 0 sends.
+    XSFLIB_CHECK(raw.size() == dry.Serialize().size() + 4 + 40 + 36 + 4);
+    XSFLIB_CHECK(back && back->version == 1 && !back->Check() && back->effects.setups.size() == 2);
+    XSFLIB_CHECK(back && back->effects.setups[0].bus == 1 &&
+                 back->effects.setups[0].type == nw4r::EffectType::kDelay2009 &&
+                 back->effects.setups[0].params == delay.params && back->effects.setups[0].sounds == delay.sounds);
+    XSFLIB_CHECK(back && back->effects.setups[1].bus == 2 &&
+                 back->effects.setups[1].type == nw4r::EffectType::kChorus2009 &&
+                 back->effects.setups[1].params == chorus.params && back->effects.setups[1].sounds == chorus.sounds);
+    XSFLIB_CHECK(!nw4r::RequiresMoodVersion(d.effects));
 }
 
 void TestMoodEffect()
@@ -656,6 +698,7 @@ int main()
     TestSoundsThatPlayTogether();
     TestEffects();
     TestReverbHi2008();
+    TestEffects2009();
     TestMoodEffect();
     TestEffectsBySound();
     TestTracks();

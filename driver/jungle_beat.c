@@ -20,8 +20,8 @@
  *      come from another file than the TV's;
  *   6. the wave groups that the .miniwsf lists, one group of a wave bank each. The game loads its waves per stage;
  *   7. the sound, by its JAudio sound ID. Music starts in the game's BGM player, the way the game starts it. A chord
- *      effect plays over a stage's music with the music's tracks off (see play_over_music). The sound manager starts
- *      other sounds;
+ *      effect plays over a stage's music with the music's tracks off (see play_over_music). An effect that the game
+ *      starts with a count starts with that count (see play_with_count). The sound manager starts other sounds;
  *   8. the audio system's frame process, once a frame, forever. While a chord effect plays, the rhythm's frame process
  *      follows it.
  * A frame of the game is a sleep of the game's frame time. WSF's machine raises no video interrupts. A step that fails
@@ -83,6 +83,12 @@ typedef int s32;
 
 /* The effects that some stages play in place of another effect (Params.swaps). */
 #define SWAPS 2u
+
+/* The effects that the game starts with a count (Params.counts), and those that a game object gives a value at port 0xb
+   after it starts them (Params.ports). A slot without an effect holds NO_EFFECT. */
+#define COUNTS 5u
+#define PORTS 1u
+#define NO_EFFECT 0xffffffffu
 
 /* The stage object holds the stage's number at +4 and its row of the stage table at +0xc. */
 #define STAGE_NUMBER 0x4u
@@ -154,6 +160,12 @@ struct Params
     u32 start_with_count;   /* JAISoundHandle* (system, JAISoundID*, s32 count): starts a sound with a count */
     /* written by the driver */
     u32 music; /* the JAISound of the music that a chord effect plays over, or 0 */
+    /* the game profile: effects whose sequences work out a key from a value that the game writes to port 0xb as it
+       starts them. start_with_count writes its count there for some effects. Some game objects write a value there
+       after they start an effect. Each pair gives the effect, then the value that the game's code gives it first */
+    u32 write_port;         /* bool (system, JAISoundHandle*, u32 port, u16 value): writes a port of a sound */
+    u32 counts[COUNTS * 2]; /* the effects that start with a count */
+    u32 ports[PORTS * 2];   /* the effects that a game object gives a value after the start */
 };
 
 __attribute__((section(".params"), used)) volatile struct Params driver_params = {
@@ -431,6 +443,31 @@ __attribute__((noreturn)) static void play_over_music(u32 system, u32 id, u32 re
     }
 }
 
+/* Plays effect `id` the way the game starts it with `count`: through the audio system's start of a sound with a
+   count, which writes the count to port 0xb of the effect. */
+__attribute__((noreturn)) static void play_with_count(u32 system, u32 id, u32 count)
+{
+    volatile struct Params* p = &driver_params;
+    const u32 handle = ((fn3)p->start_with_count)(system, (u32)&id, count);
+    if (!handle || !word(handle))
+    {
+        fail(7);
+    }
+    p->sound = word(handle);
+    p->status = STATUS_PLAYING;
+
+    for (;;)
+    {
+        ((fn1)p->audio_frame)(system);
+        p->sound = word(handle);
+        if (p->status == STATUS_PLAYING && p->sound == 0)
+        {
+            p->status = STATUS_FINISHED;
+        }
+        wait_frame();
+    }
+}
+
 __attribute__((noreturn)) void driver_main(void)
 {
     volatile struct Params* p = &driver_params;
@@ -522,7 +559,8 @@ __attribute__((noreturn)) void driver_main(void)
        startSound(JAISoundID*, JAISoundHandle*, const TVec3*) at 0xc. The player holds its sound's handle. The driver
        copies the handle to `sound` once a frame. A chord effect plays over a stage's music. Some stages play another
        effect in place of `swapped_effect`, with the records of `swapped_effect`. Such an effect plays at its stage.
-       Every other chord effect plays at stage 0, the first row of the stage table. */
+       Every other chord effect plays at stage 0, the first row of the stage table. An effect that the game starts
+       with a count starts with the count that the game gives it first. */
     const u32 id = p->sound_id;
     u32 effect = id;
     u32 stage_number = 0;
@@ -538,6 +576,13 @@ __attribute__((noreturn)) void driver_main(void)
     if (record != NO_RECORD || id == p->combo_effect)
     {
         play_over_music(system, id, record, stage_number);
+    }
+    for (u32 i = 0; i < COUNTS; i++)
+    {
+        if (p->counts[i * 2] != NO_EFFECT && id == p->counts[i * 2])
+        {
+            play_with_count(system, id, p->counts[i * 2 + 1]);
+        }
     }
 
     const u32 player = (id >> 24) == p->music_section ? system + p->music_player_offset : 0;
@@ -557,6 +602,17 @@ __attribute__((noreturn)) void driver_main(void)
     else if (!(((fn4)virtual_function(system, 0xc))(system, (u32)&id, (u32)&p->sound, 0) & 0xff))
     {
         fail(7);
+    }
+    else
+    {
+        /* A game object writes a value to port 0xb of some effects after it starts them. */
+        for (u32 i = 0; i < PORTS; i++)
+        {
+            if (p->ports[i * 2] != NO_EFFECT && id == p->ports[i * 2])
+            {
+                ((fn4)p->write_port)(system, (u32)&p->sound, 0xb, p->ports[i * 2 + 1] & 0xffff);
+            }
+        }
     }
     p->status = STATUS_PLAYING;
 

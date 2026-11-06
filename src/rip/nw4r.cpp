@@ -83,6 +83,15 @@ constexpr uint32_t kParamsSeqTracksOffset = kParamsEffectsEnd;
 constexpr uint32_t kParamsTrackVolumeOffset = kParamsEffectsEnd + 4;
 constexpr uint32_t kParamsSilencedTracksOffset = kParamsEffectsEnd + 8;
 
+// The variables that the game sets on the sound (see EffectProfile): the offset of the SeqPlayer's local variables in
+// SeqSound, then the variables that are set, a bit for each, and their values, which a .miniwsf patches. The driver
+// writes local variables only.
+constexpr uint32_t kParamsSeqVariablesOffset = kParamsEffectsEnd + 12;
+constexpr uint32_t kParamsSetVariablesOffset = kParamsEffectsEnd + 16;
+constexpr uint32_t kParamsVariablesOffset = kParamsEffectsEnd + 20;
+constexpr int kDriverVariables = 16;
+static_assert(kParamsVariablesOffset == kParamsSetVariablesOffset + 4);
+
 // The driver's settings besides the length of a frame (kFrameTicks): nw4r::snd's default thread priorities, and room
 // for each object that the driver creates.
 constexpr uint32_t kSoundThreadPriority = 4;
@@ -91,6 +100,34 @@ constexpr uint32_t kObjectSize = 0x2000;
 
 // Room in the sound heap beyond a group's data: the heap's block headers and alignment.
 constexpr uint32_t kHeapSlack = 0x10000;
+
+// A piece that a channel plays as a base sequence and a layer: the piece's name and the two sequences' labels. A piece
+// with an empty layer is the base alone.
+struct LayeredPiece
+{
+    std::string_view name;
+    std::string_view base;
+    std::string_view layer;
+};
+
+// The Forecast and News channels start their pieces on separate players. A fader sets each piece's volume every frame,
+// to targets that each view sets: 0 or 1.
+// - The News Channel (USA, version 7) plays NEW_BGM_NEWS (labelled SMF_bgm_news_anytime) in every view but the slide
+//   show. The news screens add NEW_BGM_READ (read_only) at 1 (0x80030720). The archive gives NEW_BGM_READ a volume of
+//   0. The news screens therefore sound as NEW_BGM_NEWS alone. The globe adds NEW_BGM_CIKYU (cikyu_only) at 1, with
+//   READ at 0 (0x80030650). The fader is at 0x8002fb34. The slide show's pieces play alone (0x80030854).
+// - The Forecast Channel (USA, version 7) starts WTR_BGM_MORNING_YOHOU and WTR_BGM_MORNING_CIKYU together, and plays
+//   both at 1 on the globe (0x8000f4b8). The forecasts take the layer to 0 (0x8000ed20). At night the pieces are
+//   WTR_BGM_NIGHT_YOHOU and WTR_BGM_NIGHT_CIKYU. The fader is at 0x8000dec4. The other pieces play alone.
+// Each pair has one tempo. A layer never plays without its base.
+constexpr std::array<LayeredPiece, 6> kLayeredPieces = {{
+    {"NEW_BGM_NEWS", "NEW_BGM_NEWS", ""},
+    {"NEW_BGM_NEWS globe", "NEW_BGM_NEWS", "NEW_BGM_CIKYU"},
+    {"WTR_BGM_MORNING_YOHOU", "WTR_BGM_MORNING_YOHOU", ""},
+    {"WTR_BGM_MORNING_YOHOU globe", "WTR_BGM_MORNING_YOHOU", "WTR_BGM_MORNING_CIKYU"},
+    {"WTR_BGM_NIGHT_YOHOU", "WTR_BGM_NIGHT_YOHOU", ""},
+    {"WTR_BGM_NIGHT_YOHOU globe", "WTR_BGM_NIGHT_YOHOU", "WTR_BGM_NIGHT_CIKYU"},
+}};
 
 } // namespace
 
@@ -275,9 +312,9 @@ bool GetsOtherEffects(const std::vector<nw4r::EffectSetup>& setups, uint32_t sou
 }
 
 // Fills in driver/driver.c's parameters in the driver's block at `params`: the settings, the archive at `archive_path`,
-// the game's profile, the effects and the silenced tracks. The functions for the effects come from `effect_profile`.
-// Returns nothing, or the error: the driver's block doesn't have the layout that the ripper expects, or the driver
-// can't set up the game's effects or silence its tracks.
+// the game's profile, the effects, the silenced tracks and the offset for the variables. The functions for the effects
+// come from `effect_profile`. Returns nothing, or the error: the driver's block doesn't have the layout that the ripper
+// expects, or the driver can't set up the game's effects, silence its tracks or set its variables.
 std::optional<std::string> PutDriverParams(uint8_t* params, const GameProfile& profile, const std::string& archive_path,
                                            const ntdlib::rsar::SoundArchive& archive,
                                            const std::optional<EffectProfile>& effect_profile,
@@ -356,6 +393,24 @@ std::optional<std::string> PutDriverParams(uint8_t* params, const GameProfile& p
 
         put(kParamsSeqTracksOffset, effect_profile->seq_tracks);
         put(kParamsTrackVolumeOffset, effect_profile->track_volume);
+    }
+
+    // The variables that the game sets on some sounds. A .miniwsf gives the driver its sound's (see BuildMini). The
+    // driver writes local variables (0 to 15) alone.
+    if (!effects.variables.empty())
+    {
+        const auto local = [](const nw4r::SoundVariables& entry)
+        {
+            return std::all_of(entry.variables.begin(), entry.variables.end(), [](const auto& variable)
+                               { return variable.first >= 0 && variable.first < kDriverVariables; });
+        };
+        if (!effect_profile || effect_profile->seq_variables == 0 ||
+            !std::all_of(effects.variables.begin(), effects.variables.end(), local))
+        {
+            return "the driver can't set this game's variables";
+        }
+
+        put(kParamsSeqVariablesOffset, effect_profile->seq_variables);
     }
 
     return std::nullopt;
@@ -453,9 +508,37 @@ std::vector<uint8_t> BuildMini(uint32_t index, const SoundData& data, const std:
         program.AddMemory(DriverBlock::kAddress + kParamsSilencedTracksOffset, silenced, sizeof(silenced));
     }
 
+    // The variables that the game sets on the sound: the bits of those that are set, then the 16 values.
+    if (const xsflib::psf::Variables variables = nw4r::VariablesOf(effects.variables, index); !variables.empty())
+    {
+        uint8_t set_variables[4 + kDriverVariables * 2] = {};
+        uint32_t set = 0;
+        for (const auto& [number, value] : variables)
+        {
+            if (number >= 0 && number < kDriverVariables)
+            {
+                set |= 1u << number;
+                xsflib::StoreBe16(&set_variables[4 + number * 2], static_cast<uint16_t>(value));
+            }
+        }
+
+        xsflib::StoreBe32(&set_variables[0], set);
+        program.AddMemory(DriverBlock::kAddress + kParamsSetVariablesOffset, set_variables, sizeof(set_variables));
+    }
+
     tags["_lib"] = lib_name;
 
     return xsflib::psf::WritePsf(kPsfVersionWsf, {}, program.Data(), tags);
+}
+
+void AddSoundVariables(const nw4r::ArchiveEffects& effects, uint32_t sound, Tags& tags)
+{
+    xsflib::psf::Variables variables = ArrangementFromTags(tags).variables;
+    variables.merge(nw4r::VariablesOf(effects.variables, sound));
+    if (!variables.empty())
+    {
+        tags[kVariablesTag] = xsflib::psf::FormatVariables(variables);
+    }
 }
 
 ArchiveDescriptor BuildArchiveDescriptor(const std::string& archive_path, const std::string& microcode_path,
@@ -1003,6 +1086,31 @@ std::vector<Piece> FindPieces(const ntdlib::rsar::SoundArchive& archive)
         }
     }
 
+    // A layered piece requires each of its sequences.
+    for (const LayeredPiece& layered : kLayeredPieces)
+    {
+        const auto base = sequences.find(layered.base);
+        const auto layer = sequences.find(layered.layer);
+        if (base == sequences.end() || (!layered.layer.empty() && layer == sequences.end()))
+        {
+            continue;
+        }
+
+        Piece piece{std::string(layered.name), {base->second}};
+        if (!layered.layer.empty())
+        {
+            piece.sounds.push_back(layer->second);
+        }
+
+        pieces.push_back(std::move(piece));
+    }
+
+    const auto by_first_sound = [](const Piece& a, const Piece& b)
+    {
+        return a.sounds.front() < b.sounds.front();
+    };
+    std::stable_sort(pieces.begin(), pieces.end(), by_first_sound);
+
     return pieces;
 }
 
@@ -1379,9 +1487,11 @@ LengthAnalyzer::~LengthAnalyzer() = default;
 
 std::optional<Timing> LengthAnalyzer::Analyze(uint32_t sound_index, std::optional<uint32_t> effects_sound) const
 {
-    // The tracks that the game plays of the sound narrow the arrangement's.
+    // The tracks that the game plays of the sound narrow the arrangement's. The variables that the game sets on the
+    // sound fill in those that the arrangement doesn't set.
     nw4r::Arrangement arrangement = impl_->arrangement;
     arrangement.tracks = static_cast<uint16_t>(arrangement.tracks & nw4r::TracksOf(impl_->effects.tracks, sound_index));
+    arrangement.variables.merge(nw4r::VariablesOf(impl_->effects.variables, sound_index));
 
     // A sequence that the model can't play, such as one with a damaged bank, gets no length (xsflib::rip::TryMeasure).
     const uint32_t effects_of = effects_sound.value_or(sound_index);

@@ -18,9 +18,9 @@
  * game starts its system effects, without a position. Some effects ask the game about its state: the story's flags and
  * the captains' marching horns (see play_data and rappas).
  *
- * GCSF's driver for the GameCube's Pikmin 2 takes the same steps with that release's functions. The Wii's release keeps
- * its files in a folder of the disc, makes a root heap in each of the Wii's two memories, and loads the Home Button
- * menu's waves with the global scene. A frame of the game is a sleep of the game's frame time. WSF's machine raises no
+ * The same steps apply to the GameCube's Pikmin 2, with that release's functions. The Wii's release keeps its files in
+ * a folder of the disc, makes a root heap in each of the Wii's two memories, and loads the Home Button menu's waves
+ * with the global scene. A frame of the game is a sleep of the game's frame time. WSF's machine raises no
  * video interrupts.
  *
  * The profile in `driver_params` gives the game's addresses and sizes, and a table of the pieces. The ripper fills it
@@ -35,7 +35,8 @@
  *   5. a piece's object (see Piece), in a scene with no game objects. An effect gets no scene;
  *   6. the scene's resources: the piece's sequence, its conductor, and the wave groups that the .miniwsf lists;
  *   7. the sound: the scene starts the piece's first sequence. A boss's music starts as the boss starts it, at a part
- *      of the music. The sound system starts an effect;
+ *      of the music. The sound system starts an effect. Before step 2, the driver draws the sound library's random
+ *      numbers that an effect's value names. The effect's first draw then comes later in the generator's run;
  *   8. the sound layer's frame work, once a frame, forever.
  * A step that fails stops the driver with its number in the status word. Step 1 is the check of the block.
  * `driver_params.status` reports the driver's progress to the player (see docs/wsf.md).
@@ -66,7 +67,12 @@ typedef unsigned char u8;
 /* The most wave groups that a .miniwsf lists, and the most pieces in the profile's table. ntdlib's Z2Params has the
    same limit of wave groups. */
 #define MAX_WAVES 64u
-#define MAX_PIECES 64u
+#define MAX_PIECES 96u
+
+/* An effect's value holds the random numbers to draw before the start in these bits, and its sound ID in the others.
+   The game's effect IDs leave bits 16 to 30 clear. */
+#define DRAWS_SHIFT 20
+#define DRAWS_MASK 0xffu
 
 /* A scene loads at most two groups of wave system 0, one in each of its areas. 255 names none. */
 #define NO_WAVE_SCENE 255u
@@ -82,6 +88,8 @@ typedef unsigned char u8;
 #define PIECE_BATTLE 4u    /* a DirectedBgm with the 2-player battle directors that newDirectedBgm gives battle_t */
 #define PIECE_FREE 5u      /* a DirectedBgm without directors */
 #define PIECE_AUTO_FREE 6u /* an AutoBgm without directors or the arrangement of its melody */
+#define PIECE_BIG_BOSS 7u  /* newDirectedBgm on the final boss's floor, with the final boss's sound object in place */
+#define PIECE_BIG_BOSS_NEAR 8u /* PIECE_BIG_BOSS with the tension director on: a captain stands near the boss */
 
 /* One piece of the profile's table. */
 struct Piece
@@ -98,7 +106,8 @@ struct Params
     u32 magic;
     u32 version;
     u32 status;   /* written by the driver */
-    u32 sound_id; /* 0x80000000 | the piece's number in `pieces`, or an effect's ID; patched by each .miniwsf */
+    u32 sound_id; /* 0x80000000 | the piece's number in `pieces`, or an effect's ID and the draws before it
+                     (DRAWS_SHIFT); patched by each .miniwsf */
     u32 sound;    /* the sound's JAISound: 0 once the sound has ended. The driver copies a piece's from the game once a
                      frame. The sound library keeps an effect's here */
     u32 wave_count;       /* the wave groups to load; patched by each .miniwsf */
@@ -167,8 +176,10 @@ struct Params
     u32 play_system_se;        /* void PSSystem::SysIF::playSystemSe(u32 id, JAISound** handle, u32 flag) */
     u32 play_data;             /* the variable that holds the game's play data, Game::PlayData */
     u32 rappas;                /* PSGame::Rappa::sRappa: the two captains' marching horns */
+    u32 big_boss;              /* PSM::EnemyBigBoss::sBigBoss: the final boss's sound object */
     u32 load_wave_scene;       /* void PSSystem::WaveScene::load(u8 wave_system, u8 group, u8 area, TaskChecker*) */
     u32 menu_waves;            /* the Home Button menu's wave group: (wave system << 16) | group */
+    u32 get_random;            /* s32 JASPlayer::getRandomS32(void): the sound library's random numbers */
     /* the pieces */
     u32 piece_count;
     struct Piece pieces[MAX_PIECES];
@@ -206,9 +217,15 @@ typedef u32 (*fn7)(u32, u32, u32, u32, u32, u32, u32);
 #define SEQ_VTABLE 0x10           /* PSSystem::SeqBase: its vtable pointer, after its JSULink */
 #define SEQ_INIT 0x0c             /* its vtable's init */
 #define SEQ_HANDLE 0x3c           /* its vtable's getHandleP */
+#define BGM_DIRECTORS 0x6c        /* DirectedBgm: its DirectorMgrBase */
 #define BGM_ROOT_TRACK 0x70       /* DirectedBgm: its SeqTrackRoot */
+#define DIRECTORS_LIST 0x04       /* DirectorMgrBase: its array of directors */
+#define DIRECTOR_ON 0x10          /* a director's vtable's directOn */
+#define TENSION_DIRECTOR 1u       /* tentionD's place among the directors of a boss's music */
 #define ROOT_BEAT_INTERVAL 0x3e   /* SeqTrackRoot: the beat interval (a halfword) */
 #define TASK_COUNT 0x18           /* TaskChecker: the loads in flight (a byte), after its OSMutex */
+#define BOSS_SEQ_BOSS 0x134       /* PSM::MiddleBossSeq and BigBossSeq: the boss whose actions pick the parts */
+#define BOSS_SIZE 0x100           /* enough of a boss for the sound layer: onJump sets the byte at +0xff */
 
 /* A TaskChecker. It counts a scene's loads in flight. */
 static u32 task[8] __attribute__((aligned(8)));
@@ -224,6 +241,12 @@ static u32 play_data[0x40];
 #define RAPPA_WAIT 0x2c
 #define RAPPA_SHORTEST_WAIT 3u
 static u32 rappas[2][RAPPA_SIZE / 4];
+
+/* A stand-in for the boss of a boss's music. As the music jumps to an attack, the game's onJump (MiddleBossSeq's at
+   0x804e1b54, BigBossSeq's at 0x804e2168) marks the boss with the byte at +0xff. Without a boss, onJump stops the game
+   with an assertion, and the attack plays nothing. Every byte of the stand-in starts clear. It also stands in for the
+   final boss's sound object: the game only tests that sBigBoss is set. */
+static u32 boss[BOSS_SIZE / 4];
 
 static u32 word(u32 address)
 {
@@ -305,6 +328,13 @@ static u32 make_piece(volatile struct Piece* piece, u32 manager, u32 info, u32 h
     case PIECE_DIRECTED:
         seq = ((fn3)p->new_directed_bgm)(manager, sequence, sound_info);
         break;
+    case PIECE_BIG_BOSS:
+    case PIECE_BIG_BOSS_NEAR:
+        /* The game makes the final boss's music only while the boss's sound object exists (initBossBgm, 0x803b5740).
+           The music's directors then take tracks 14 and 15 in place of 10 and 11 (0x804f5d24). */
+        *(volatile u32*)p->big_boss = (u32)boss;
+        seq = ((fn3)p->new_directed_bgm)(manager, sequence, sound_info);
+        break;
     case PIECE_AUTO:
         /* newAndSetCurrentScene gives the conductors the current heap first. */
         *(volatile u32*)p->conductor_heap = heap;
@@ -379,6 +409,20 @@ __attribute__((noreturn)) void driver_main(void)
         fail(1);
     }
     volatile struct Piece* piece = &p->pieces[effect ? 0 : number];
+
+    /* The draws that an effect's value names, and the effect's ID without them. A sequence's command draws a random
+       number from the sound library's generator. From the state at the game's start, the first draw ends some effects
+       at once. In the game, every earlier draw moves the generator on. The draws come before the set-up. The sound
+       then starts at the same time as without them. */
+    if (effect)
+    {
+        const u32 draws = p->sound_id >> DRAWS_SHIFT & DRAWS_MASK;
+        for (u32 i = 0; i < draws; i++)
+        {
+            ((fn0)p->get_random)();
+        }
+        p->sound_id &= ~(DRAWS_MASK << DRAWS_SHIFT);
+    }
 
     /* The disc. The game's main enters the game's folder, and the game's paths start there. */
     ((fn0)p->dvd_init)();
@@ -546,6 +590,7 @@ __attribute__((noreturn)) void driver_main(void)
         const u32 start_point = (piece->kind >> 8) & 0xff;
         if (start_point)
         {
+            *(volatile u32*)(seq + BOSS_SEQ_BOSS) = (u32)boss;
             ((fn2)p->start_jump_bgm)(seq, start_point);
         }
         else
@@ -557,6 +602,7 @@ __attribute__((noreturn)) void driver_main(void)
     /* An effect starts as the game's system effects start: in two dimensions, with no actor. The sound library keeps
        the effect's JAISound in `sound`, and clears it when the effect ends. */
     u32 handle = (u32)&p->sound;
+    u32 tension = 0;
     if (effect)
     {
         ((fn4)p->play_system_se)(sys_if, p->sound_id, handle, 0);
@@ -564,6 +610,10 @@ __attribute__((noreturn)) void driver_main(void)
     else
     {
         handle = call_virtual(seq, SEQ_VTABLE, SEQ_HANDLE, 0);
+        if ((piece->kind & 0xff) == PIECE_BIG_BOSS_NEAR)
+        {
+            tension = word(word(word(seq + BGM_DIRECTORS) + DIRECTORS_LIST) + 4 * TENSION_DIRECTOR);
+        }
     }
     p->sound = word(handle);
     if (!p->sound)
@@ -575,6 +625,13 @@ __attribute__((noreturn)) void driver_main(void)
     for (;;)
     {
         ((fn1)p->main_loop)(sys_if);
+        /* The game turns the tension director on while a captain stands within 300 units of the boss (0x804f2130).
+           directOn does nothing until the sequence has linked the director's track and the frame work has powered the
+           director on. It does nothing once the director is on. */
+        if (tension)
+        {
+            call_virtual(tension, 0, DIRECTOR_ON, 0);
+        }
         p->sound = word(handle);
         if (p->status == STATUS_PLAYING && p->sound == 0)
         {

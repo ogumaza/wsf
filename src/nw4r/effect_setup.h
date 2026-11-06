@@ -45,6 +45,12 @@ enum class EffectType : uint8_t
 
     // The Photo Channel 1.1's mood effect (axfx::PhotoMood), turned on: the mode that SetMode takes.
     kPhotoMood = 7,
+
+    // FxChorus of 2009 (Pokémon Rumble): delayTime (ms), depth, rate (Hz), feedback, outGain.
+    kChorus2009 = 8,
+
+    // FxDelay of 2009 (Pokémon Rumble): delay (ms), feedback, outGain, maxDelay (ms), lpf.
+    kDelay2009 = 9,
 };
 
 // The most words that a parameter structure has.
@@ -68,6 +74,9 @@ constexpr int EffectParamWords(EffectType type)
         return 10;
     case EffectType::kPhotoMood:
         return 1;
+    case EffectType::kChorus2009:
+    case EffectType::kDelay2009:
+        return 5;
     }
 
     return 0;
@@ -217,26 +226,28 @@ inline float MainSendOf(const std::vector<SoundSend>& sends, uint32_t sound)
 struct EffectVariant
 {
     std::string name;
-    std::vector<uint32_t> sounds;
-    std::vector<EffectSetup> setups;
-    std::vector<SoundSend> sends;
+    std::vector<uint32_t> sounds = {};
+    std::vector<EffectSetup> setups = {};
+    std::vector<SoundSend> sends = {};
 
     // The arrangement that the sounds play in, if the variant has one. The variant's rips hold it as tags (docs/wsf.md,
     // "Tags"). Its tracks replace the tracks that the archive's effects give the sounds.
-    std::optional<Arrangement> arrangement;
+    std::optional<Arrangement> arrangement = {};
 };
 
 // The effects that a game puts on the aux buses for the sounds of one of its sound archives, and what it sets on some
-// of those sounds as they start: sends to the buses (docs/wsf.md, "Effects"), and the volumes of the tracks that it
-// silences (docs/wsf.md, "Tracks that the game silences"). A game's effect profile gives them. The archive descriptor
-// holds them for archive mode. It doesn't hold the variants. The descriptor of a variant's rip holds the effects that
-// WithVariant gives.
+// of those sounds as they start: sends to the buses (docs/wsf.md, "Effects"), the volumes of the tracks that it
+// silences (docs/wsf.md, "Tracks that the game silences") and the values that it gives their variables (docs/wsf.md,
+// "Variables that the game sets"). A game's effect profile gives them. The archive descriptor holds all but the
+// variables for archive mode. A rip's tags give archive mode the variables. The descriptor doesn't hold the variants.
+// The descriptor of a variant's rip holds the effects that WithVariant gives.
 struct ArchiveEffects
 {
-    std::vector<EffectSetup> setups;
-    std::vector<SoundSend> sends;
-    std::vector<SoundTracks> tracks;
-    std::vector<EffectVariant> variants;
+    std::vector<EffectSetup> setups = {};
+    std::vector<SoundSend> sends = {};
+    std::vector<SoundTracks> tracks = {};
+    std::vector<SoundVariables> variables = {};
+    std::vector<EffectVariant> variants = {};
 };
 
 // The effects of `effects` with those of `variant` added after them, and without variants. The result leaves out the

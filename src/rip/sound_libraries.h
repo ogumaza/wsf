@@ -41,9 +41,9 @@ struct GameLibrary
     uint32_t entry;
     uint32_t main;
     uint32_t ios_version;
-    std::vector<std::string> paths;
-    std::vector<std::pair<std::string, std::vector<uint8_t>>> files;
-    std::string too_large_advice;
+    std::vector<std::string> paths = {};
+    std::vector<std::pair<std::string, std::vector<uint8_t>>> files = {};
+    std::string too_large_advice = {};
 };
 
 // Builds a game-mode library. It holds the game's code and data from `dol`, section by section, with the game's main

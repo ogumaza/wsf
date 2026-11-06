@@ -13,7 +13,8 @@
  *   - before the heaps, the reset data that the game's main allocates. The audio set-up reads the disc only once the
  *     reset data's flag says that the game has started;
  *   - a frame of the game, as a sleep of the game's frame time. WSF's machine raises no video interrupts;
- *   - the ARAM manager and its transfer buffer. The game keeps its "ARAM" in MEM2, and the calls are the GameCube's.
+ *   - the ARAM manager and its transfer buffer. The game keeps its "ARAM" in MEM2, and the calls are the GameCube's;
+ *   - the sound's start, once the DSP's extra frames of the audio driver's start-up have run (see start_sound).
  * `driver_params.status` reports the driver's progress to the player (see docs/wsf.md).
  *
  * Some games lack functions that the profile names. Link's Crossbow Training has no JFWDisplay::threadSleep. The
@@ -78,6 +79,10 @@ struct Params
     z2_fn3 driver_wave_status;
     z2_fn2 driver_erase_bgm_wave;
     z2_fn2 driver_erase_se_wave;
+    /* the sound's start (see start_sound) */
+    u32 game_start_sound; /* bool Z2AudioMgr::startSound(JAISoundID, JAISoundHandle*, const TVec3*) */
+    u32 full_ring_count;  /* JASDriver::finishDSPFrame's count of the frames that found the DSP's buffers full */
+    z2_fn4 driver_start_sound;
 };
 
 static void alarm_sleep(u32 object, u32 pad, u32 high, u32 low);
@@ -86,6 +91,7 @@ static u32 load_bgm_wave(u32 scene, u32 group);
 static u32 wave_status(u32 scene, u32 group, u32 bank);
 static u32 erase_bgm_wave(u32 scene, u32 group);
 static u32 erase_se_wave(u32 scene, u32 group);
+static u32 start_sound(u32 manager, u32 id, u32 handle, u32 position);
 
 __attribute__((section(".params"), used)) volatile struct Params driver_params = {
     .magic = PARAMS_MAGIC,
@@ -96,10 +102,14 @@ __attribute__((section(".params"), used)) volatile struct Params driver_params =
     .driver_wave_status = wave_status,
     .driver_erase_bgm_wave = erase_bgm_wave,
     .driver_erase_se_wave = erase_se_wave,
+    .driver_start_sound = start_sound,
 };
 
 /* The reset data, in the driver's memory. The game's main would allocate it from the arena. */
 static volatile unsigned char reset_data[RESET_DATA_SIZE];
+
+/* The count of full_ring_count that comes after the DSP's extra frames (see start_sound). */
+#define FULL_RING_SETTLED 8u
 
 /* The alarm of the driver's sleep, and the thread that it resumes. */
 static volatile u32 alarm[ALARM_WORDS] __attribute__((aligned(8)));
@@ -189,6 +199,26 @@ static u32 erase_se_wave(u32 scene, u32 group)
     (void)scene;
     const u32 arc = wave_arc(0, group);
     return arc ? ((z2_fn1)driver_params.erase_wave_arc)(arc) : 0;
+}
+
+/* The driver's start of the sound, for a game whose profile names finishDSPFrame's count. The Wii's
+   JASDriver::finishDSPFrame counts the DSP frames that find the DSP's ring of output buffers full. At the seventh, it
+   starts one more DSP frame anyway. The DSP then runs three frames back to back. JASDriver::updateDSP measures the time
+   between the DSP's sub-frames. It takes the short gaps of those frames for a DSP that can't keep up, and kills the
+   lowest active channel at each sub-frame, for about 6 ms. That happens early in the audio driver's start-up, about
+   0.16 s after the set-up starts in WSF. A sound that the driver started in that time lost the notes that it began
+   with. The count reaches 8 at the end of the last of those frames. Until then, the driver runs the game's frames, and
+   then it starts the sound. For a sound that starts later, the driver calls the game's start at once. */
+static u32 start_sound(u32 manager, u32 id, u32 handle, u32 position)
+{
+    volatile struct Params* p = &driver_params;
+    for (u32 frames = 0; z2_word(p->full_ring_count) < FULL_RING_SETTLED && frames < Z2_SETUP_FRAMES; frames++)
+    {
+        ((z2_fn1)p->z2.audio_frame)(manager);
+        z2_wait_frame(&p->z2);
+    }
+
+    return ((z2_fn4)p->game_start_sound)(manager, id, handle, position);
 }
 
 static void z2_create_aram(volatile struct Z2Params* p)

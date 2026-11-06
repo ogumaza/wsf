@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "ntdlib/flipper/z2_params.h"
 #include "ntdlib/jaudio/wave_system.h"
 #include "xsflib/rip/length.h"
 
@@ -24,16 +25,17 @@ namespace wsf::rip
 // Plays sound `sound_id` of `library`, a .wsflib from BuildJAudioLibrary, with the wave groups `waves` loaded, and
 // works out its length. The waves that the sound's notes look up go in `found` if it isn't null. Returns nothing if the
 // set can't start or a render fails. When the set can't start, `start_error` gets the player's message if it isn't
-// null.
+// null. `state`, if given, is the piece's state, as in BuildJAudioMini.
 std::optional<xsflib::rip::Timing> AnalyzeJAudioSound(const std::vector<uint8_t>& library, const JAudioProfile& profile,
                                                       uint32_t sound_id, std::span<const uint32_t> waves,
                                                       std::set<ntdlib::jaudio::WaveUse>* found = nullptr,
-                                                      std::string* start_error = nullptr);
+                                                      std::string* start_error = nullptr,
+                                                      const ntdlib::flipper::z2::PieceState* state = nullptr);
 
 // Wave discovery: plays sound `sound_id` of `library` with no wave group loaded, and puts the waves that its notes
 // look up in `found`. The notes play no samples then. Each lookup counts as sound instead. Returns false if the set
-// can't start or a render fails.
+// can't start or a render fails. `state` is as in AnalyzeJAudioSound.
 bool FindJAudioWaves(const std::vector<uint8_t>& library, const JAudioProfile& profile, uint32_t sound_id,
-                     std::set<ntdlib::jaudio::WaveUse>& found);
+                     std::set<ntdlib::jaudio::WaveUse>& found, const ntdlib::flipper::z2::PieceState* state = nullptr);
 
 } // namespace wsf::rip

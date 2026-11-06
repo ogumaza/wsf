@@ -32,6 +32,17 @@ namespace wsf::nw4r
 // 2008 on, and that of December 2006 for an older one.
 axfx::Build AxfxBuild(const SndBuild& build, ax::Build ax_build);
 
+// FxChorus::SetParam of 2009 (Pokémon Rumble, 0x8027b800): ChorusExp's parameters for the five words of a
+// kChorus2009. The class holds delayTime to 0.1 to 50 ms, depth to 0 to 1, rate to 0.1 to 2 Hz, feedback to 0 to 0.99
+// and outGain to 0 to 1. It sets no other bus and no send. The class of 2009 runs AXFX's ChorusExp of February 2009.
+axfx::ChorusExp::Params Chorus2009Params(const EffectParams& params);
+
+// FxDelay::SetParam of 2009 (Pokémon Rumble, 0x8027bc20): DelayExp's parameters for the five words of a kDelay2009.
+// The longest delay is at least 0.04 ms. The delay is the longest delay as given where it's longer, and otherwise at
+// least 0.04 ms. The class holds feedback to 0 to 0.99, and lpf and outGain to 0 to 1. It sets no other bus and no
+// send.
+axfx::DelayExp::Params Delay2009Params(const EffectParams& params);
+
 // An object of one of NW4R SND's effect classes (FxBase), on the model of the AXFX effect that it wraps. The Photo
 // Channel 1.1's class holds its effect itself. A copy holds the whole state of the effect.
 //
@@ -62,7 +73,8 @@ private:
     };
 
     using Slots = std::variant<Slot<axfx::ReverbHi>, Slot<axfx::ReverbHiExp>, Slot<axfx::Chorus>, Slot<axfx::Delay>,
-                               Slot<axfx::ReverbStd>, Slot<axfx::ReverbStdExp>, Slot<axfx::PhotoMood>>;
+                               Slot<axfx::ReverbStd>, Slot<axfx::ReverbStdExp>, Slot<axfx::PhotoMood>,
+                               Slot<axfx::ChorusExp>, Slot<axfx::DelayExp>>;
 
     static Slots MakeSlot(EffectType type, axfx::Build build);
 

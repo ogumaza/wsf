@@ -21,8 +21,10 @@ does the Japanese release of WarioWare: Smooth Moves. Archive mode follows the v
 lists them.
 
 Mega Man 9 (WiiWare) plays each piece of its music as four sequences, one for each channel of the NES's sound chip.
-`wsfrip` rips each piece as one `.miniwsf`. Like the game, the `.miniwsf` starts the four together. Such rips require a
-player newer than WSF 1.5.0. WSF 1.5.0 refuses them. `docs/wsf.md` describes them under "Sounds that play together".
+`wsfrip` rips each piece as one `.miniwsf`. Like the game, the `.miniwsf` starts the four together. The Forecast Channel
+and the News Channel play a layer over the base of a piece in some views. Each view's mix of the two rips as one
+`.miniwsf`. A rip whose title ends in `globe` plays the globe's mix. Such rips require a player newer than WSF 1.5.0.
+WSF 1.5.0 refuses them. `docs/wsf.md` describes them under "Sounds that play together".
 
 WSF plays the reverb and other effects that Wii Sports, Wii Play, WarioWare: Smooth Moves, Animal Crossing: City Folk,
 Mario Kart Wii and Wii Music (all USA) put on the Wii's auxiliary buses, in both modes. The European releases of all six
@@ -34,28 +36,72 @@ in archive mode only. While a photo with a mood is shown, the Photo Channel play
 effect. The channel defines that effect in its code. `wsfrip` rips each piece of that music once more in each of the
 four moods. A mood's rip requires a player newer than WSF 1.7.0. WSF 1.7.0 refuses such a rip but plays the channel's
 other rips. The Mii Channel plays its music with other tracks or at a faster tempo in some of its scenes. `wsfrip` rips
-the music once more in each of four such states. Rips of other NintendoWare games play without effects. `docs/wsf.md`
-describes the effects under "Effects". It describes the Mii Channel's states under "Tracks that the game silences".
+the music once more in each of four such states. Mario Kart Wii's menus play two pieces of their music with other
+tracks by the page on screen. `wsfrip` rips each piece once more in each of those states. Pokémon Rumble (WiiWare,
+USA) plays its music through a reverb. Most of its pieces also play through a delay, and some through a chorus as well.
+Its rips have those effects, in archive mode only. WSF 1.8.2 and older play them with the reverb alone. Rips of other
+NintendoWare games play without effects. `docs/wsf.md` describes the effects under "Effects". It describes the states
+of the Mii Channel and of Mario Kart Wii's menus under "Tracks that the game silences".
+Wii Sports' golf plays its wind only while the hole has wind. The game gives the wind's sound a speed and a direction.
+A rip of the wind plays a speed of 8 (`docs/wsf.md`, "Variables that the game sets").
+Mario Kart Wii gives seven of its sound effects a value for each play. Six of them rip with the value of their
+first play in the game. The same section of `docs/wsf.md` lists them.
+Smooth Moves plays its microgames' music through the reverb of their stage. A rip of such a piece plays the reverb of
+the stage that plays it first.
 
-Game mode also plays four games whose sound library is JAudio2: The Legend of Zelda: Twilight Princess (USA,
-revision 2), Link's Crossbow Training (USA, revision 1), Super Mario Galaxy and Super Mario Galaxy 2 (both USA). The
-rips of Twilight Princess and Link's Crossbow Training have the games' echo. The rips of these games require a player
-newer than WSF 1.1.0. WSF 1.1.0 refuses them. They take more processing to play than other games' rips. A slow computer
-may not play them in real time. The two Galaxy games stream most of their music. `wsfrip` rips the pieces that the games
-play from sequences, such as the jingles and the music of the power-ups. Game mode also plays New Play Control! Donkey
-Kong Jungle Beat (USA), another JAudio2 game. Its rips require WSF 1.4.0 or later. The game plays many of its effects in
-the chords of the music. A rip plays each such effect over a stage's music as the game does. The music stays silent.
-Archive mode doesn't play JAudio2.
-`wsfrip` therefore can't rip another JAudio2 game or another release of these games. It stops with an error that says
-so.
+Wii Music's main menu plays its music with other tracks in some of its states. `wsfrip` rips that music once more with
+the tracks of each of three such states, in both modes. The game starts the menu in a state that plays tracks 0 to 7.
+There, the menu's carousel plays tracks 1 to 6 at 0.74 or 0.51 of their volume (-2.6 or -5.8 dB). The rips play them at
+full volume. Pitch Perfect plays its beats with more tracks at higher levels. One more track joins near the end of a
+round. `wsfrip` rips the beats with the tracks of the lowest levels, and once more with each other set of tracks.
+Pitch Perfect also sends its phrases and the jingles of its pictures to the reverb. Their rips do the same.
+`docs/wsf.md` describes the states and the levels under "Tracks that the game silences".
+
+Five of Wii Play's minigames add or swap tracks of their music as a game goes on: Table Tennis, Laser Hockey, Billiards,
+Find Mii and Tanks. `wsfrip` rips each piece with the tracks that sound as the minigame starts it. It rips the piece
+once more with each later set of tracks, in both modes. Billiards plays two of its states at half the sound's volume (-6
+dB). The rips play at full volume. `docs/wsf.md` describes the states under "Tracks that the game silences".
+
+Animal Crossing: City Folk plays its outdoor and town music with other tracks in rain and in snow. Its museum's music
+plays other tracks in some rooms. `wsfrip` rips each such piece once more in each of those weathers and rooms, in both
+modes. `docs/wsf.md` describes them under "Tracks that the game silences".
+
+Twilight Princess mutes some tracks of five pieces as it starts them. A rip mutes the same tracks. Hyrule
+Field's day music plays one arrangement while Link walks and another while he rides. A rip holds both:
+`Z2BGM_FIELD_LINK_DAY` and `Z2BGM_FIELD_LINK_DAY_riding`. The game's scenes, its fights and its other starters give 17
+pieces more states. Some states play a track at a volume between 0 and 1. A rip starts a piece in the state that the
+game starts it in, such as Castle Town's music in its first room. It holds each other state too, named after the piece
+and the state, for example `Z2BGM_TOAL_VILLEGE_status1`.
+Hyrule Field's day music also follows the field's code: what Link does, the enemies near him and the time of day. A rip
+holds each way through the piece, in each arrangement. `_status12` plays the sections of a long walk or ride, `_status4`
+to `_status7` a fight's sections by their four entries, `_status10` and `_status11` the two endings of a day, `_status8`
+and `_status9` the starts that the field's code makes once no music plays, and `_riding_status3` the section of Link
+standing on his horse.
+
+Game mode also plays four games whose sound library is JAudio2: The Legend of Zelda: Twilight Princess (USA revisions 0
+and 2, Europe and Japan), Link's Crossbow Training (USA revision 1, Europe and Japan), and Super Mario Galaxy and Super
+Mario Galaxy 2 (USA, Europe and Japan). The rips of Twilight Princess and Link's Crossbow Training have the games' echo.
+The rips of these games require a player newer than WSF 1.1.0. WSF 1.1.0 refuses them. They take more processing to play
+than other games' rips. A slow computer may not play them in real time. The two Galaxy games stream most of their music.
+`wsfrip` rips the pieces that the games play from sequences, such as the jingles and the music of the power-ups. Game
+mode also plays New Play Control! Donkey Kong Jungle Beat (USA), another JAudio2 game. Its rips require WSF 1.4.0 or
+later. The game plays many of its effects in the chords of the music. A rip plays each such effect over a stage's music
+as the game does. The music stays silent. Archive mode doesn't play JAudio2.
+`wsfrip` therefore can't rip another JAudio2 game, or a release of these games that isn't listed. It stops with an
+error that says so.
 
 Game mode also plays New Play Control! Pikmin (USA). The game's sound library is the early JAudio1 of the GameCube
-release. `wsfrip` rips the game's sequenced music: its pieces, and each part of the piece that the cutscenes play. The
-game's streamed music (`.stx`) isn't ripped. Like Twilight Princess's rips, these require a player newer than WSF 1.1.0.
+release. `wsfrip` rips the game's sequenced music and its sound effects. The music is the game's pieces, and each part
+of the piece that the cutscenes play. The effects are those of the game's catalogue, and six that the game's code plays
+itself. The game's streamed music (`.stx`) isn't ripped. Like Twilight Princess's rips, these require a player newer
+than WSF 1.1.0.
 
 Game mode also plays New Play Control! Pikmin 2 (USA). The game's sound library is the later JAudio1 of the GameCube
-release. `wsfrip` rips the game's 48 pieces of music and its sound effects. The game's streamed music (`.ast`) isn't
-ripped. Like Twilight Princess's rips, these require a player newer than WSF 1.1.0.
+release. `wsfrip` rips the game's 48 pieces of music and its sound effects. A cave's music changes with the floor, and a
+boss's music with the boss's actions. `wsfrip` rips a variant of the piece for each other floor's conductor and for each
+other part of the boss's music. Two parts of the final boss's music have a layer that plays only while a captain stands
+near the boss. They get one more variant each, labelled `-near`. The game's streamed music (`.ast`) isn't ripped. Like
+Twilight Princess's rips, these require a player newer than WSF 1.1.0.
 
 ## Tools
 
