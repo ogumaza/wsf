@@ -3223,7 +3223,13 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                     0x80027358, // AudSystem::initSceneVolume
                     0x9ec,      // AudSystem's AudSoundObject for system sound effects
                     0x8002b490, // AudSoundObject::setCutoffToPort
+                    0x80031fc8, // AudSceneMgr::setPlayerModeLuigi
+                    0,          // Luigi mode: set by a Luigi variant's .miniwsf
                 },
+            // AudSystem::startSound (0x80026d54) calls AudSystem::switchToLuigi (0x80027024). In Luigi mode, that
+            // function writes 20 to port 0xc of a sound of group 1, the player's voices.
+            .luigi_word = 42,
+            .luigi_group = 0x0001,
             .files = {"AudioRes/Seqs/JaiSeq.arc", "AudioRes/Info/JaiChord.arc", "AudioRes/Info/JaiMe.arc",
                       "AudioRes/Info/JaiRemixSeq.arc"},
         },
@@ -3301,7 +3307,13 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                     0x80027358, // AudSystem::initSceneVolume
                     0x9ec,      // AudSystem's AudSoundObject for system sound effects
                     0x8002b490, // AudSoundObject::setCutoffToPort
+                    0x80031fc8, // AudSceneMgr::setPlayerModeLuigi
+                    0,          // Luigi mode: set by a Luigi variant's .miniwsf
                 },
+            // AudSceneMgr::setPlayerModeLuigi and AudSystem::switchToLuigi are at the USA addresses. Their code is the
+            // USA code, apart from the targets of switchToLuigi's calls.
+            .luigi_word = 42,
+            .luigi_group = 0x0001,
             .files = {"AudioRes/Seqs/JaiSeq.arc", "AudioRes/Info/JaiChord.arc", "AudioRes/Info/JaiMe.arc",
                       "AudioRes/Info/JaiRemixSeq.arc"},
         },
@@ -3378,7 +3390,13 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                     0x80027358, // AudSystem::initSceneVolume
                     0x9ec,      // AudSystem's AudSoundObject for system sound effects
                     0x8002b490, // AudSoundObject::setCutoffToPort
+                    0x80031fc8, // AudSceneMgr::setPlayerModeLuigi
+                    0,          // Luigi mode: set by a Luigi variant's .miniwsf
                 },
+            // AudSceneMgr::setPlayerModeLuigi and AudSystem::switchToLuigi are at the USA addresses. Their code is the
+            // USA code, apart from the targets of switchToLuigi's calls.
+            .luigi_word = 42,
+            .luigi_group = 0x0001,
             .files = {"AudioRes/Seqs/JaiSeq.arc", "AudioRes/Info/JaiChord.arc", "AudioRes/Info/JaiMe.arc",
                       "AudioRes/Info/JaiRemixSeq.arc"},
         },
@@ -3461,7 +3479,13 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                     0x800793c0, // AudSystem::initSceneVolume
                     0x950,      // AudSystem's AudSoundObject for system sound effects
                     0x8007dbb0, // AudSoundObject::setCutoffToPort
+                    0x95c,      // AudSystem's AudSceneMgr
+                    0x800858d0, // AudSceneMgr::setPlayerModeLuigi
+                    0,          // Luigi mode: set by a Luigi variant's .miniwsf
                 },
+            // AudSystem::startSound (0x80078cc0) calls AudSystem::switchToLuigi (0x80079000), as in Galaxy.
+            .luigi_word = 49,
+            .luigi_group = 0x0001,
             // The archives that the audio wrapper requests, then the three tables that the driver has the audio
             // system read. ActionSound.arc in the same folder is read only for the particle effects.
             .files = {"AudioRes/Seqs/JaiSeq.arc", "AudioRes/Info/JaiChord.arc", "AudioRes/Info/JaiMe.arc",
@@ -3548,7 +3572,13 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                     0x800793c0, // AudSystem::initSceneVolume
                     0x950,      // AudSystem's AudSoundObject for system sound effects
                     0x8007dbb0, // AudSoundObject::setCutoffToPort
+                    0x95c,      // AudSystem's AudSceneMgr
+                    0x800858d0, // AudSceneMgr::setPlayerModeLuigi
+                    0,          // Luigi mode: set by a Luigi variant's .miniwsf
                 },
+            // AudSceneMgr::setPlayerModeLuigi and AudSystem::switchToLuigi are the USA code at the USA addresses.
+            .luigi_word = 49,
+            .luigi_group = 0x0001,
             // The archives that the audio wrapper requests, then the three tables that the driver has the audio
             // system read. ActionSound.arc in the same folder is read only for the particle effects.
             .files = {"AudioRes/Seqs/JaiSeq.arc", "AudioRes/Info/JaiChord.arc", "AudioRes/Info/JaiMe.arc",
@@ -3634,7 +3664,13 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                     0x800793c0, // AudSystem::initSceneVolume
                     0x950,      // AudSystem's AudSoundObject for system sound effects
                     0x8007dbb0, // AudSoundObject::setCutoffToPort
+                    0x95c,      // AudSystem's AudSceneMgr
+                    0x800858d0, // AudSceneMgr::setPlayerModeLuigi
+                    0,          // Luigi mode: set by a Luigi variant's .miniwsf
                 },
+            // AudSceneMgr::setPlayerModeLuigi and AudSystem::switchToLuigi are the USA code at the USA addresses.
+            .luigi_word = 49,
+            .luigi_group = 0x0001,
             // The archives that the audio wrapper requests, then the three tables that the driver has the audio
             // system read. ActionSound.arc in the same folder is read only for the particle effects.
             .files = {"AudioRes/Seqs/JaiSeq.arc", "AudioRes/Info/JaiChord.arc", "AudioRes/Info/JaiMe.arc",

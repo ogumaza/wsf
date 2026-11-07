@@ -263,7 +263,7 @@ checked. The model takes them as the older kind.
   level then swings above full level as well as below. AX's envelope stops at twice full level. Older builds hold the
   volume and the envelope to full level.
 - Builds from September 2009 on also move a track's pitch bend (command 0xc4) over the time that the commands 0xa3,
-  0xa4 and 0xa5 give. The model doesn't yet. It sets the bend at once.
+  0xa4 and 0xa5 give.
 
 The model also follows an older pair of builds: AX of October 2006 and the build of `nw4r::snd` that comes with it.
 WarioWare: Smooth Moves links them. That build of `nw4r::snd` has no version banner. The archive descriptor gives a
@@ -1044,7 +1044,7 @@ profile follows:
 ```
 0x118  u32  time-base ticks in one frame of the game (1,012,500: 60 Hz)
 0x11C  ...  the sizes that the game's start-up gives, and the addresses and offsets of the game's functions, variables
-            and paths (40 words, in the order of driver/galaxy.c's Params)
+            and paths (42 words, in the order of driver/galaxy.c's Params)
 ```
 
 The driver repeats the game's start-up for sound with the game's functions: the root heaps, the game's heaps, the ARAM
@@ -1057,10 +1057,13 @@ manager then loads the wave groups that the game loads before its first scene. T
 groups and starts the sound. Music starts in the game's BGM manager. The manager sets each track of a piece to the
 piece's first state from a table in the game's code. Other sounds start in the audio system. The game starts its sound
 effects through sound objects. A sound object writes the effect's low-pass cutoff to port 0xa of the effect's track: 127
-unless the sound table marks the effect for the stage's filter. The driver writes the port with the game's function. The
-driver calls the audio frame process once a frame and sleeps for a frame between calls. On an error, the low byte of the
-status gives the step: 1 the block's header, 2 the game's heaps, 4 the sound files, 5 the audio system, 6 the wave
-groups, 7 the start of the sound. Each of step 6's three waits gives up after 600 frames.
+unless the sound table marks the effect for the stage's filter. The driver writes the port with the game's function. A
+Luigi variant's `.miniwsf` sets the profile's last word to 1. The driver then puts the game's scene manager in Luigi
+mode before it starts the sound. As the audio system then starts one of the player's voices, it writes 20 to port 0xc of
+the voice. The game does the same when the player plays as Luigi. The driver calls the audio frame process once a frame
+and sleeps for a frame between calls. On an error, the low byte of the status gives the step: 1 the block's header, 2
+the game's heaps, 4 the sound files, 5 the audio system, 6 the wave groups, 7 the start of the sound. Each of step 6's
+three waits gives up after 600 frames.
 
 ### Super Mario Galaxy 2's driver (version 2)
 
@@ -1070,7 +1073,7 @@ address. The first 0x118 bytes of its block match those of the other two blocks.
 ```
 0x118  u32  time-base ticks in one frame of the game (1,012,500: 60 Hz)
 0x11C  ...  the sizes that the game's start-up gives, the game's number for the disc's language, and the addresses and
-            offsets of the game's functions and variables (46 words, in the order of driver/galaxy2.c's Params)
+            offsets of the game's functions and variables (49 words, in the order of driver/galaxy2.c's Params)
 ```
 
 The game's sound code is the same as Super Mario Galaxy's. Its start-up for sound differs. Super Mario Galaxy 2 loads

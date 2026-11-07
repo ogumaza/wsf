@@ -33,8 +33,8 @@
  *      particle effects and loads no stationed waves. Then the wave groups that the .miniwsf lists, one group of a
  *      wave bank each. The game loads them per stage and per scenario;
  *   7. the sound, by its JAudio sound ID. Music starts in the BGM manager's stage slot, the way the game starts a
- *      stage's music. Other sounds start in the audio system, and the driver writes the low-pass cutoff that
- *      the game's sound objects give an effect;
+ *      stage's music. Other sounds start in the audio system, in Luigi mode for a Luigi variant, and the driver
+ *      writes the low-pass cutoff that the game's sound objects give an effect;
  *   8. the audio system's frame process, once a frame, forever.
  * A frame of the game is a sleep of the game's frame time. WSF's machine raises no video interrupts. A step that fails
  * stops the driver with its number in the status word. Step 1 is the check of the block's header.
@@ -130,6 +130,9 @@ struct Params
     u32 scene_volume;           /* void (audio system): the volumes that the game sets as each scene starts */
     u32 effect_object_offset;   /* the audio system's pointer to its sound object for system sound effects */
     u32 set_cutoff_to_port;     /* void (sound object, JAISoundHandle*, JAISoundID*): an effect's cutoff */
+    u32 scene_offset;           /* the audio system's pointer to its scene manager */
+    u32 set_player_luigi;       /* void (scene manager): Luigi mode, in which the player's voices are Luigi's */
+    u32 luigi;                  /* 1 to start the sound in Luigi mode; patched by a Luigi variant's .miniwsf */
 };
 
 __attribute__((section(".params"), used)) volatile struct Params driver_params = {
@@ -321,6 +324,14 @@ __attribute__((noreturn)) void driver_main(void)
     }
     else
     {
+        /* When the player plays as Luigi, the scene manager is in Luigi mode. As the audio system then starts one of
+           the player's voices, it writes 20 to port 0xc of the voice. A voice that reads the port plays Luigi's waves.
+           A Luigi variant's .miniwsf sets `luigi`. The driver then puts the scene manager in Luigi mode with the
+           game's function before the start. The game does that before it loads a stage's waves. */
+        if (p->luigi)
+        {
+            ((fn1)p->set_player_luigi)(word(system + p->scene_offset));
+        }
         if (!(((fn4)p->start_sound)(system, (u32)&id, (u32)&p->sound, 0) & 0xff))
         {
             fail(7);

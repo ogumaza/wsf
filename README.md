@@ -17,7 +17,7 @@ for WarioWare: Smooth Moves, Mario Kart Wii, Wii Music and Animal Crossing: City
 games and loose sound archives are ripped in archive mode. Another release of one of these games gets game mode too
 when its code matches. The European releases of all six get it that way (Wii Sports and Wii Play in revision 1). So
 does the Japanese release of WarioWare: Smooth Moves. Archive mode follows the versions of the sound library from 2006
-(WarioWare: Smooth Moves) to 2008 (Wii Music). Archive mode also follows two changes in later versions. `docs/wsf.md`
+(WarioWare: Smooth Moves) to 2008 (Wii Music). Archive mode also follows three changes in later versions. `docs/wsf.md`
 lists them.
 
 Mega Man 9 (WiiWare) plays each piece of its music as four sequences, one for each channel of the NES's sound chip.
@@ -83,10 +83,11 @@ and 2, Europe and Japan), Link's Crossbow Training (USA revision 1, Europe and J
 Mario Galaxy 2 (USA, Europe and Japan). The rips of Twilight Princess and Link's Crossbow Training have the games' echo.
 The rips of these games require a player newer than WSF 1.1.0. WSF 1.1.0 refuses them. They take more processing to play
 than other games' rips. A slow computer may not play them in real time. The two Galaxy games stream most of their music.
-`wsfrip` rips the pieces that the games play from sequences, such as the jingles and the music of the power-ups. Game
-mode also plays New Play Control! Donkey Kong Jungle Beat (USA), another JAudio2 game. Its rips require WSF 1.4.0 or
-later. The game plays many of its effects in the chords of the music. A rip plays each such effect over a stage's music
-as the game does. The music stays silent. Archive mode doesn't play JAudio2.
+`wsfrip` rips the pieces that the games play from sequences, such as the jingles and the music of the power-ups. It rips
+each of the player's voices once more in Luigi's voice. That rip's name ends in `_Luigi`. A voice that plays the same
+waves for both players gets one rip. Game mode also plays New Play Control! Donkey Kong Jungle Beat (USA), another
+JAudio2 game. Its rips require WSF 1.4.0 or later. The game plays many of its effects in the chords of the music. A rip
+plays each such effect over a stage's music as the game does. The music stays silent. Archive mode doesn't play JAudio2.
 `wsfrip` therefore can't rip another JAudio2 game, or a release of these games that isn't listed. It stops with an
 error that says so.
 
@@ -184,7 +185,7 @@ Windows, use the commands above.
 src/ax/       AX's CPU side, and the exchange with its microcode
 src/axfx/     the models of the SDK's effects for AX's aux buses (AXFX)
 src/nw4r/     the model of nw4r::snd that plays archive mode
-src/wii/      the Wii for game mode: its hardware, IOS, and a disc made of a rip's files
+src/wii/      the Wii for game mode: its hardware and IOS
 src/wsf/      the format and the player
 src/rip/      the ripper: the parts that every game shares, the game profiles, a file for each sound library
               and the drivers' images

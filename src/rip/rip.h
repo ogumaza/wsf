@@ -389,6 +389,13 @@ struct JAudioProfile
     int32_t background_sound = -1;
     uint32_t track_parent_offset = 0;
 
+    // A driver that can start a sound with the player as Luigi reads a word of `params` at index `luigi_word`. The
+    // .miniwsf of a Luigi variant sets it to 1. The sounds of `luigi_group` (the section in the high byte and the group
+    // in the low byte) get the variants, labelled with "_Luigi". -1 for a driver without such a word. In Luigi mode,
+    // the player's voices in the Galaxy games play Luigi's waves.
+    int32_t luigi_word = -1;
+    uint16_t luigi_group = 0;
+
     // The sound files that the driver loads besides the start-up archive and the wave archives, by their paths on the
     // disc. A rip's library holds them. With none listed, it holds the archives that FindJAudioFiles finds.
     std::vector<std::string> files = {};
@@ -460,9 +467,12 @@ std::optional<std::vector<uint8_t>> BuildJAudioLibrary(const ntdlib::disc::GameF
 
 // Game mode for a JAudio game: a .miniwsf that plays sound `sound_id` from `lib_name`, with the wave groups `waves`
 // loaded, each (system << 16) | group. `state`, if given, is the state that driver/jaudio.c gives the piece after it
-// starts the sound (JAudioSound::piece_state). Throws std::invalid_argument for more than ntdlib's 64 groups.
+// starts the sound (JAudioSound::piece_state). With a `luigi_word` of 0 or more, the .miniwsf sets that word of the
+// profile's `params` to 1: it plays the sound's Luigi variant (JAudioProfile::luigi_word). Throws std::invalid_argument
+// for more than ntdlib's 64 groups.
 std::vector<uint8_t> BuildJAudioMini(uint32_t sound_id, std::span<const uint32_t> waves, const std::string& lib_name,
-                                     Tags tags, const ntdlib::flipper::z2::PieceState* state = nullptr);
+                                     Tags tags, const ntdlib::flipper::z2::PieceState* state = nullptr,
+                                     int32_t luigi_word = -1);
 
 // A sound of a JAudio game that a rip can play. `id` is the ID that the game passes to the sound library. `section` is
 // the sound's section in the name table, or empty. `music` is true if `--bgm` selects the sound, and `stream` is true

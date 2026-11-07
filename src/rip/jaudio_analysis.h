@@ -25,17 +25,20 @@ namespace wsf::rip
 // Plays sound `sound_id` of `library`, a .wsflib from BuildJAudioLibrary, with the wave groups `waves` loaded, and
 // works out its length. The waves that the sound's notes look up go in `found` if it isn't null. Returns nothing if the
 // set can't start or a render fails. When the set can't start, `start_error` gets the player's message if it isn't
-// null. `state`, if given, is the piece's state, as in BuildJAudioMini.
+// null. `state`, if given, is the piece's state, as in BuildJAudioMini. With `luigi`, the sound plays as its Luigi
+// variant (JAudioProfile::luigi_word).
 std::optional<xsflib::rip::Timing> AnalyzeJAudioSound(const std::vector<uint8_t>& library, const JAudioProfile& profile,
                                                       uint32_t sound_id, std::span<const uint32_t> waves,
                                                       std::set<ntdlib::jaudio::WaveUse>* found = nullptr,
                                                       std::string* start_error = nullptr,
-                                                      const ntdlib::flipper::z2::PieceState* state = nullptr);
+                                                      const ntdlib::flipper::z2::PieceState* state = nullptr,
+                                                      bool luigi = false);
 
 // Wave discovery: plays sound `sound_id` of `library` with no wave group loaded, and puts the waves that its notes
 // look up in `found`. The notes play no samples then. Each lookup counts as sound instead. Returns false if the set
-// can't start or a render fails. `state` is as in AnalyzeJAudioSound.
+// can't start or a render fails. `state` and `luigi` are as in AnalyzeJAudioSound.
 bool FindJAudioWaves(const std::vector<uint8_t>& library, const JAudioProfile& profile, uint32_t sound_id,
-                     std::set<ntdlib::jaudio::WaveUse>& found, const ntdlib::flipper::z2::PieceState* state = nullptr);
+                     std::set<ntdlib::jaudio::WaveUse>& found, const ntdlib::flipper::z2::PieceState* state = nullptr,
+                     bool luigi = false);
 
 } // namespace wsf::rip

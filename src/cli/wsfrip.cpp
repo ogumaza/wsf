@@ -1057,7 +1057,17 @@ struct JAudioJob
 
     // The state that the driver gives a piece (rip::JAudioSound::piece_state).
     ntdlib::flipper::z2::PieceState piece_state;
+
+    bool luigi = false;    // the sound's Luigi variant (rip::JAudioProfile::luigi_word)
+    bool as_mario = false; // a Luigi variant that looks up the same waves as its sound
 };
+
+// Takes out the Luigi variants that look up the same waves as their sounds (JAudioJob::as_mario). Their rips would
+// play as the sounds' rips do. Returns the number taken out.
+std::size_t SkipSameAsMario(std::vector<JAudioJob>& jobs)
+{
+    return std::erase_if(jobs, [](const JAudioJob& job) { return job.as_mario; });
+}
 
 // Takes out the sounds that the length pass couldn't start with their wave groups loaded. No player could start their
 // rips. Returns the number taken out.
@@ -1079,8 +1089,11 @@ std::size_t SkipUnstartable(std::vector<JAudioJob>& jobs)
 }
 
 // A JAudio game's sounds that --only and --bgm pick. Streams are out of scope. A sound's number is its place in the
-// list without the sounds that share the number before them (rip::JAudioSound::shares_number).
-std::vector<JAudioJob> SelectJAudioSounds(const std::vector<rip::JAudioSound>& sounds, const Options& o)
+// list without the sounds that share the number before them (rip::JAudioSound::shares_number). A sound of the profile's
+// group for Luigi (rip::JAudioProfile::luigi_word) is followed by its Luigi variant, labelled with "_Luigi", with the
+// same number. --only picks each of the two by its label.
+std::vector<JAudioJob> SelectJAudioSounds(const std::vector<rip::JAudioSound>& sounds,
+                                          const rip::JAudioProfile* profile, const Options& o)
 {
     std::vector<JAudioJob> jobs;
     uint32_t index = 0;
@@ -1092,9 +1105,21 @@ std::vector<JAudioJob> SelectJAudioSounds(const std::vector<rip::JAudioSound>& s
             index++;
         }
 
-        if (!sound.stream && std::regex_search(sound.label, o.only) && (!o.bgm || sound.music))
+        if (sound.stream || (o.bgm && !sound.music))
+        {
+            continue;
+        }
+
+        if (std::regex_search(sound.label, o.only))
         {
             jobs.push_back({index, sound.id, sound.label, std::nullopt, sound.waves, {}, sound.piece_state});
+        }
+
+        const std::string luigi = sound.label + "_Luigi";
+        if (profile && profile->luigi_word >= 0 && (sound.id >> 16) == profile->luigi_group &&
+            std::regex_search(luigi, o.only))
+        {
+            jobs.push_back({index, sound.id, luigi, std::nullopt, sound.waves, {}, sound.piece_state, true});
         }
     }
 
@@ -1274,10 +1299,22 @@ bool DiscoverWaves(std::vector<JAudioJob>& jobs, const ntdlib::disc::GameFiles& 
         }
 
         std::set<ntdlib::jaudio::WaveUse> found;
-        if (!rip::FindJAudioWaves(*base, profile, job.sound_id, found, &job.piece_state))
+        if (!rip::FindJAudioWaves(*base, profile, job.sound_id, found, &job.piece_state, job.luigi))
         {
             std::fprintf(stderr, "warning: the waves of %s can't be found; it plays without them\n", job.label.c_str());
             return false;
+        }
+
+        // A Luigi variant that looks up the same waves as its sound plays as the sound does. It's left out
+        // (SkipSameAsMario).
+        if (job.luigi)
+        {
+            std::set<ntdlib::jaudio::WaveUse> mario;
+            if (rip::FindJAudioWaves(*base, profile, job.sound_id, mario, &job.piece_state) && mario == found)
+            {
+                job.as_mario = true;
+                return false;
+            }
         }
 
         job.waves = ntdlib::jaudio::WaveGroups(systems, {found.begin(), found.end()});
@@ -1308,8 +1345,8 @@ void AnalyzeLengths(std::vector<JAudioJob>& jobs, const std::vector<uint8_t>& li
     const auto analyze = [&](JAudioJob& job)
     {
         std::set<ntdlib::jaudio::WaveUse> played;
-        job.timing =
-            rip::AnalyzeJAudioSound(lib, profile, job.sound_id, job.waves, &played, &job.start_error, &job.piece_state);
+        job.timing = rip::AnalyzeJAudioSound(lib, profile, job.sound_id, job.waves, &played, &job.start_error,
+                                             &job.piece_state, job.luigi);
         if (!job.start_error.empty())
         {
             return false;
@@ -1372,7 +1409,7 @@ int RipJAudioGame(const std::string& input, const fs::path& out_dir, const ntdli
         return 0;
     }
 
-    std::vector<JAudioJob> jobs = SelectJAudioSounds(*sounds, o);
+    std::vector<JAudioJob> jobs = SelectJAudioSounds(*sounds, profile, o);
     if (jobs.empty())
     {
         if (!o.only_text.empty() || o.bgm)
@@ -1395,6 +1432,11 @@ int RipJAudioGame(const std::string& input, const fs::path& out_dir, const ntdli
     if (!DiscoverWaves(jobs, game, *profile, paths, systems, o.jobs))
     {
         return 1;
+    }
+
+    if (const std::size_t same = SkipSameAsMario(jobs))
+    {
+        std::fprintf(stderr, "left out %s: they play Mario's waves\n", Counted(same, "Luigi variant").c_str());
     }
 
     for (const JAudioJob& job : jobs)
@@ -1431,9 +1473,10 @@ int RipJAudioGame(const std::string& input, const fs::path& out_dir, const ntdli
     }
 
     xsflib::rip::FileNames& names = xsflib::cli::NamesIn(registries, out_dir, ".wsflib", ".miniwsf");
-    const auto build_mini = [](const std::string& lib_name, const JAudioJob& job, const Tags& tags)
+    const auto build_mini = [profile](const std::string& lib_name, const JAudioJob& job, const Tags& tags)
     {
-        return rip::BuildJAudioMini(job.sound_id, job.waves, lib_name, tags, &job.piece_state);
+        return rip::BuildJAudioMini(job.sound_id, job.waves, lib_name, tags, &job.piece_state,
+                                    job.luigi ? profile->luigi_word : -1);
     };
     const std::string source = xsflib::rip::InputPath(input).filename().string();
     const int count = WriteSet(out_dir, names, game_name, *lib, jobs, common, build_mini, source, skipped_text);

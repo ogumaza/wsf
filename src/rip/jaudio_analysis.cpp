@@ -157,15 +157,16 @@ ntdlib::jaudio::GameLengthRules JAudioLengthRules()
 
 // Runs ntdlib's analysis of the game's code (see AnalyzeJAudioSound) on the set of `library` and a mini for sound
 // `sound_id`, with `waves` loaded and the piece's `state`. With `lookups_sound`, each lookup of a wave counts as a
-// sound (see FindJAudioWaves).
+// sound (see FindJAudioWaves). With `luigi`, the mini plays the sound's Luigi variant.
 std::optional<xsflib::rip::Timing> PlayAndWatch(const std::vector<uint8_t>& library, const JAudioProfile& profile,
                                                 uint32_t sound_id, std::span<const uint32_t> waves,
                                                 std::set<ntdlib::jaudio::WaveUse>* found, bool lookups_sound,
-                                                std::string* start_error, const ntdlib::flipper::z2::PieceState* state)
+                                                std::string* start_error, const ntdlib::flipper::z2::PieceState* state,
+                                                bool luigi)
 {
     const std::map<std::string, std::vector<uint8_t>> files = {
         {kLibName, library},
-        {kMiniName, BuildJAudioMini(sound_id, waves, kLibName, {}, state)},
+        {kMiniName, BuildJAudioMini(sound_id, waves, kLibName, {}, state, luigi ? profile.luigi_word : -1)},
     };
     const FileReader reader = [&files](const std::string& path, std::vector<uint8_t>& data)
     {
@@ -204,15 +205,15 @@ std::optional<xsflib::rip::Timing> AnalyzeJAudioSound(const std::vector<uint8_t>
                                                       uint32_t sound_id, std::span<const uint32_t> waves,
                                                       std::set<ntdlib::jaudio::WaveUse>* found,
                                                       std::string* start_error,
-                                                      const ntdlib::flipper::z2::PieceState* state)
+                                                      const ntdlib::flipper::z2::PieceState* state, bool luigi)
 {
-    return PlayAndWatch(library, profile, sound_id, waves, found, false, start_error, state);
+    return PlayAndWatch(library, profile, sound_id, waves, found, false, start_error, state, luigi);
 }
 
 bool FindJAudioWaves(const std::vector<uint8_t>& library, const JAudioProfile& profile, uint32_t sound_id,
-                     std::set<ntdlib::jaudio::WaveUse>& found, const ntdlib::flipper::z2::PieceState* state)
+                     std::set<ntdlib::jaudio::WaveUse>& found, const ntdlib::flipper::z2::PieceState* state, bool luigi)
 {
-    return PlayAndWatch(library, profile, sound_id, {}, &found, true, nullptr, state).has_value();
+    return PlayAndWatch(library, profile, sound_id, {}, &found, true, nullptr, state, luigi).has_value();
 }
 
 } // namespace wsf::rip

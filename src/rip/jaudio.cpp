@@ -704,7 +704,7 @@ std::optional<std::vector<uint8_t>> BuildJAudioLibrary(const ntdlib::disc::GameF
 }
 
 std::vector<uint8_t> BuildJAudioMini(uint32_t sound_id, std::span<const uint32_t> waves, const std::string& lib_name,
-                                     Tags tags, const ntdlib::flipper::z2::PieceState* state)
+                                     Tags tags, const ntdlib::flipper::z2::PieceState* state, int32_t luigi_word)
 {
     uint8_t sound[4];
     xsflib::StoreBe32(sound, sound_id);
@@ -718,6 +718,14 @@ std::vector<uint8_t> BuildJAudioMini(uint32_t sound_id, std::span<const uint32_t
     {
         program.AddMemory(DriverBlock::kAddress + kJAudioZ2Offset + ntdlib::flipper::z2::kMutedChildrenOffset,
                           words.data(), words.size());
+    }
+
+    if (luigi_word >= 0)
+    {
+        uint8_t on[4];
+        xsflib::StoreBe32(on, 1);
+        program.AddMemory(DriverBlock::kAddress + kJAudioParamsOffset + static_cast<uint32_t>(luigi_word) * 4, on,
+                          sizeof(on));
     }
 
     tags["_lib"] = lib_name;
