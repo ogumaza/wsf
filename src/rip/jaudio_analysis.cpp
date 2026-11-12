@@ -7,7 +7,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <optional>
 #include <set>
 #include <span>
@@ -115,8 +114,7 @@ private:
             return false;
         }
 
-        const uint32_t sound = Word(kJAudioZ2Address + ntdlib::flipper::z2::kProfileOffset +
-                                    4 * static_cast<uint32_t>(profile_.background_sound));
+        const uint32_t sound = Word(kJAudioParamsAddress + 4 * static_cast<uint32_t>(profile_.background_sound));
         if (sound == 0 || Word(sound + watch.vtable_offset) != watch.sequence_vtable)
         {
             return false;
@@ -164,19 +162,18 @@ std::optional<xsflib::rip::Timing> PlayAndWatch(const std::vector<uint8_t>& libr
                                                 std::string* start_error, const ntdlib::flipper::z2::PieceState* state,
                                                 bool luigi)
 {
-    const std::map<std::string, std::vector<uint8_t>> files = {
-        {kLibName, library},
-        {kMiniName, BuildJAudioMini(sound_id, waves, kLibName, {}, state, luigi ? profile.luigi_word : -1)},
-    };
-    const FileReader reader = [&files](const std::string& path, std::vector<uint8_t>& data)
+    // The reader copies the library straight into the player's set. A copy in a map of files first would hold a
+    // second copy of the library for each analysis that runs.
+    const std::vector<uint8_t> mini =
+        BuildJAudioMini(sound_id, waves, kLibName, {}, state, luigi ? profile.luigi_word : -1);
+    const FileReader reader = [&library, &mini](const std::string& path, std::vector<uint8_t>& data)
     {
-        const auto file = files.find(path);
-        if (file == files.end())
+        if (path != kLibName && path != kMiniName)
         {
             return false;
         }
 
-        data = file->second;
+        data = path == kLibName ? library : mini;
 
         return true;
     };

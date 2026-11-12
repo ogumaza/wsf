@@ -17,15 +17,19 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <vector>
 
-#include "axfx/axfx.h"
-#include "nw4r/effect_setup.h"
-#include "nw4r/effects.h"
+#include "ntdlib/ppc/cpu.h"
+#include "ntdlib/rvl/axfx/axfx.h"
+#include "ntdlib/rvl/snd/effect_setup.h"
+#include "ntdlib/rvl/snd/effects.h"
+
+#include "wsf/models.h"
 
 namespace wsf
 {
@@ -100,6 +104,12 @@ private:
     };
 
     NativeEffects(wii::System& system, axfx::Build build, std::vector<Class> classes, std::vector<Hook> hooks);
+
+    // Adds the hooks of class `class_index` to `hooks`: one at each of its `functions`, in the order of Function.
+    // Returns false if a function's address is 0, its first instruction can't be read or doesn't make a stack frame, or
+    // another hook has its address.
+    static bool AddHooks(ntdlib::ppc::Cpu& cpu, std::size_t class_index, const std::array<uint32_t, 4>& functions,
+                         std::vector<Hook>& hooks);
 
     // Does what the replaced first instruction of `hook`'s function does, and goes on at the second.
     bool RunFirstInstruction(const Hook& hook);

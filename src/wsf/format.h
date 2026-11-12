@@ -12,13 +12,14 @@
 #include <string_view>
 #include <vector>
 
+#include "ntdlib/rvl/snd/arrangement.h"
+#include "ntdlib/rvl/snd/effect_setup.h"
 #include "xsflib/psf/descriptor.h"
 #include "xsflib/psf/program.h"
 #include "xsflib/psf/psf.h"
 #include "xsflib/psf/set.h"
 
-#include "nw4r/arrangement.h"
-#include "nw4r/effect_setup.h"
+#include "wsf/models.h"
 
 namespace wsf
 {
@@ -184,6 +185,10 @@ struct SetFormat
                                                                  .version_offset = DriverBlock::kVersionOffset,
                                                                  .big_endian = true};
 };
+
+// Whether `effects` holds an effect or a send that only version 3 of the archive descriptor may hold: the Photo
+// Channel 1.1's mood effect, or a send to the main mix.
+bool RequiresMoodVersion(const nw4r::ArchiveEffects& effects);
 
 // A complete set: the chunks of a file and its libraries in loading order, the effective descriptor (exactly one of
 // `descriptor` and `archive`) and the tags of the top-level file. LoadSet loads a WSF or miniWSF file with its _lib and

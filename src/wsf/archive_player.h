@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-// Archive mode (docs/wsf.md): one sequence from a sound archive, or several that play together. WSF's model of the
-// SDK's sound player (nw4r::snd and AX's CPU side, src/nw4r and src/ax) plays them. The game's AX microcode runs on the
-// emulated DSP. Used when a rip is made from a sound archive rather than from the game's code.
+// Archive mode (docs/wsf.md): one sequence from a sound archive, or several that play together. The model of the SDK
+// sound player in ntdlib (nw4r::snd and the CPU side of AX, in ntdlib/rvl/snd and ntdlib/rvl/ax) plays them. The game's
+// AX microcode runs on the emulated DSP. Used when a rip is made from a sound archive rather than from the game's code.
 
 #pragma once
 

@@ -12,15 +12,16 @@
 #include <vector>
 
 #include "ntdlib/rsar/formats.h"
+#include "ntdlib/rvl/snd/arrangement.h"
+#include "ntdlib/rvl/snd/effect_setup.h"
+#include "ntdlib/rvl/snd/engine.h"
+#include "ntdlib/rvl/snd/rsar_options.h"
+#include "ntdlib/rvl/snd/util.h"
 #include "ntdlib/sound_build.h"
 #include "xsflib/bytes.h"
 #include "xsflib/player/archive_source.h"
 
-#include "nw4r/arrangement.h"
-#include "nw4r/effect_setup.h"
-#include "nw4r/engine.h"
-#include "nw4r/rsar_options.h"
-#include "nw4r/util.h"
+#include "wsf/models.h"
 
 namespace wsf
 {
@@ -63,9 +64,15 @@ struct ArchiveTraits
         }
 
         const std::vector<uint8_t>* microcode_bytes = set.File(d.microcode_path);
-        if (!microcode_bytes || microcode_bytes->size() != ntdlib::kMicrocodeWords * 2)
+        if (!microcode_bytes)
         {
             return "AX's microcode (" + d.microcode_path + ") is missing";
+        }
+
+        if (microcode_bytes->size() != ntdlib::kMicrocodeWords * 2)
+        {
+            return "AX's microcode (" + d.microcode_path + ") has " + std::to_string(microcode_bytes->size()) +
+                   " bytes, not " + std::to_string(ntdlib::kMicrocodeWords * 2);
         }
 
         prepared.sounds = SoundsToPlay(set);
@@ -81,7 +88,6 @@ struct ArchiveTraits
         }
 
         // The tracks that the game plays of each sound, unless the tags give others. The tags apply to every sound.
-        prepared.arrangements.clear();
         for (const uint32_t sound : prepared.sounds)
         {
             prepared.arrangements.push_back(ArrangementFromTags(set.tags, nw4r::TracksOf(d.effects.tracks, sound)));

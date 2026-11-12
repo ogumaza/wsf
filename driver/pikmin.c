@@ -67,55 +67,12 @@ typedef unsigned int u32;
 /* The most wave groups that a .miniwsf can list. Z2Params has the same limit. */
 #define MAX_WAVES 64u
 
-/* The fields of Params.sound_id: 0x80000000 | part << 8 | piece. The piece field holds the piece's number in the
-   sequence index. Part 0 plays the piece in the game's slot for music. Any other part goes to the piece that the sound
-   library plays from its start-up. */
-#define SOUND_PIECE(id) ((id) & 0xffu)
-#define SOUND_PART(id) (((id) >> 8) & 0xffu)
-
-/* An effect's ID: 0x80000000 | kind << 24 | number << 8 | sequence. The sequence field holds 0 or 1, the effects'
-   sequence or the events'. Pieces start at FIRST_PIECE. The kind gives the game's function that starts the effect. An
-   event's number holds the event's type and the action (EVENT_TYPE). */
-#define FIRST_PIECE 2u
-#define EFFECT_KIND(id) (((id) >> 24) & 0x7fu)
-#define EFFECT_NUMBER(id) (((id) >> 8) & 0xffffu)
-#define EFFECT_SYSTEM 1u
-#define EFFECT_PLAYER 2u
-#define EFFECT_EVENT 3u
-#define EFFECT_FORMATION 4u
-#define EVENT_TYPE(number) ((number) >> 12)
-#define EVENT_ACTION(number) ((number) & 0xfffu)
-
-/* The wave system of the effects. The game's set-up of its first scene of play (Jac_SceneSetup, from 0x8001d5a0)
-   loads groups 1 to 3 of that system without making them the system's scene. It makes group 0 of systems 14, 15 and 2
-   their systems' scenes. An effect's wave groups in the block are those groups, in that order. The set-up also loads
-   group 0 of wave system 22, which the bank file lacks. */
-#define EFFECTS_SYSTEM 0u
-
-/* The game's scene of a stage's play, and the system's effect that closes the menu. Jac_PlaySystemSe plays that effect
-   only while the menu's flag is set. The effect that opens the menu sets it. */
-#define SCENE_OF_PLAY 5u
-#define EFFECT_CLOSES_MENU 7u
+#include "jaudio/pikmin.h"
 
 /* The move that the driver passes to the game's function for the formation each frame: straight ahead, at full
    length. */
 #define FORMATION_X 0u
 #define FORMATION_Y 127u
-
-/* The DVD task's passes for a piece's files and for the effects' wave groups. The game's scene set-up makes them the
-   same way. */
-#define PASS_OF_PIECE 0x10000u
-#define PASS_OF_EFFECTS 0x20000u
-
-/* The port that a cutscene writes its part to, and the word of a track that holds the track's first child. The root
-   track opens the track that plays the part as its first child. */
-#define PART_PORT 0u
-#define TRACK_FIRST_CHILD 0x44u
-
-/* A track's state, a byte: 0 while the track is free. A track has 16 children, in words from TRACK_FIRST_CHILD. */
-#define TRACK_STATE 0x3cu
-#define TRACK_FREE 0u
-#define TRACK_CHILDREN 16u
 
 struct Params
 {
@@ -263,8 +220,9 @@ static void move_formation(volatile struct Params* p)
 /* Steps 7 to 10: an effect. */
 __attribute__((noreturn)) static void play_effect(volatile struct Params* p)
 {
-    /* The effects' other wave groups, then a pass on the disc after them. The groups of the effects' system load
-       without becoming its scene. */
+    /* The effects' other wave groups, then a pass on the disc after them. An effect's groups in the block are those
+       that the game's set-up of its first scene of play loads, in that order (EFFECTS_SYSTEM). The groups of the
+       effects' system load without becoming its scene. */
     for (u32 i = 0; i < p->wave_count; i++)
     {
         const u32 system = p->waves[i] >> 16;

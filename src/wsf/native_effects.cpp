@@ -110,24 +110,9 @@ std::unique_ptr<NativeEffects> NativeEffects::Attach(wii::System& system)
         }
 
         classes.push_back(c);
-        for (std::size_t f = 0; f < functions.size(); f++)
+        if (!AddHooks(cpu, classes.size() - 1, functions, hooks))
         {
-            Hook hook{functions[f], classes.size() - 1, static_cast<Function>(f), 0};
-            if (hook.address == 0 || !ReadWord(cpu, hook.address, hook.instruction) ||
-                (hook.instruction & kStackFrameMask) != kStackFrame)
-            {
-                return nullptr;
-            }
-
-            for (const Hook& other : hooks)
-            {
-                if (other.address == hook.address)
-                {
-                    return nullptr;
-                }
-            }
-
-            hooks.push_back(hook);
+            return nullptr;
         }
     }
 
@@ -138,6 +123,32 @@ std::unique_ptr<NativeEffects> NativeEffects::Attach(wii::System& system)
 
     return std::unique_ptr<NativeEffects>(
         new NativeEffects(system, static_cast<axfx::Build>(build), std::move(classes), std::move(hooks)));
+}
+
+bool NativeEffects::AddHooks(ntdlib::ppc::Cpu& cpu, std::size_t class_index, const std::array<uint32_t, 4>& functions,
+                             std::vector<Hook>& hooks)
+{
+    for (std::size_t f = 0; f < functions.size(); f++)
+    {
+        Hook hook{functions[f], class_index, static_cast<Function>(f), 0};
+        if (hook.address == 0 || !ReadWord(cpu, hook.address, hook.instruction) ||
+            (hook.instruction & kStackFrameMask) != kStackFrame)
+        {
+            return false;
+        }
+
+        for (const Hook& other : hooks)
+        {
+            if (other.address == hook.address)
+            {
+                return false;
+            }
+        }
+
+        hooks.push_back(hook);
+    }
+
+    return true;
 }
 
 NativeEffects::NativeEffects(wii::System& system, axfx::Build build, std::vector<Class> classes,

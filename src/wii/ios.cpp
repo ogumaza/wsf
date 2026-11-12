@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <map>
 #include <memory>
 #include <span>
 #include <string>
@@ -82,6 +81,43 @@ std::span<uint8_t> Buffer(ntdlib::dsp::WiiMemory& memory, uint32_t address, uint
 
     uint8_t* bytes = memory.At(ntdlib::dsp::ToPhysical(address), size);
     return bytes != nullptr ? std::span<uint8_t>(bytes, size) : std::span<uint8_t>();
+}
+
+// The path that a request names at `address`: up to 64 characters, ending before a zero byte or memory that isn't
+// there.
+std::string PathAt(ntdlib::dsp::WiiMemory& memory, uint32_t address)
+{
+    std::string path;
+    for (uint32_t at = address; path.size() < 64; at++)
+    {
+        const uint8_t* c = memory.At(ntdlib::dsp::ToPhysical(at), 1);
+        if (c == nullptr || *c == 0)
+        {
+            break;
+        }
+
+        path += static_cast<char>(*c);
+    }
+
+    return path;
+}
+
+// The buffers of an Ioctlv's vectors in the table at `table`: `in_count` inputs, then `io_count` buffers that IOS
+// writes. A vector is an address and a size. A table that isn't in memory gives no buffers.
+std::pair<std::vector<std::span<uint8_t>>, std::vector<std::span<uint8_t>>>
+IoctlvBuffers(ntdlib::dsp::WiiMemory& memory, uint32_t table, uint32_t in_count, uint32_t io_count)
+{
+    std::vector<std::span<uint8_t>> in;
+    std::vector<std::span<uint8_t>> io;
+    const uint8_t* vectors = memory.At(ntdlib::dsp::ToPhysical(table), (in_count + io_count) * 8);
+    for (uint32_t i = 0; vectors != nullptr && i < in_count + io_count; i++)
+    {
+        const std::span<uint8_t> buffer =
+            Buffer(memory, xsflib::LoadBe32(&vectors[i * 8]), xsflib::LoadBe32(&vectors[i * 8 + 4]));
+        (i < in_count ? in : io).push_back(buffer);
+    }
+
+    return {std::move(in), std::move(io)};
 }
 
 // The console's settings file, /shared2/sys/SYSCONF: "SCv0", the item count and each item's offset, then the items.
@@ -425,48 +461,14 @@ public:
             return true;
 
         case 0x71: // Read: length, then the partition offset >> 2
-            {
-                const uint32_t length = in.size() >= 8 ? xsflib::LoadBe32(&in[4]) : 0;
-                const uint64_t offset = in.size() >= 12 ? uint64_t{xsflib::LoadBe32(&in[8])} * 4 : 0;
-                if (length > out.size() || !ios_.disc_.Read(offset, out.data(), length))
-                {
-                    result = 2;
-                }
+            result = ReadPartition(in, out);
 
-                return true;
-            }
+            return true;
 
         case 0x8d: // UnencryptedRead: length, then the disc offset >> 2, outside the partition
-            {
-                // The disc's header is the partition's header. The rest of the disc outside the partition reads as
-                // zeros.
-                const uint32_t length = in.size() >= 8 ? xsflib::LoadBe32(&in[4]) : 0;
-                const uint64_t offset = in.size() >= 12 ? uint64_t{xsflib::LoadBe32(&in[8])} * 4 : 0;
-                if (length > out.size())
-                {
-                    result = 2;
+            result = UnencryptedRead(in, out);
 
-                    return true;
-                }
-
-                if (offset + length > kDiscSize)
-                {
-                    error_ = kDriveOutOfRange;
-                    result = 2;
-
-                    return true;
-                }
-
-                std::fill(out.begin(), out.begin() + length, uint8_t{0});
-                if (offset < ntdlib::disc::kHeaderSize)
-                {
-                    const auto size =
-                        static_cast<std::size_t>(std::min<uint64_t>(length, ntdlib::disc::kHeaderSize - offset));
-                    ios_.disc_.Read(offset, out.data(), size);
-                }
-
-                return true;
-            }
+            return true;
 
         case 0x88: // GetCoverStatus: closed, with a disc
             if (out.size() >= 4)
@@ -504,6 +506,51 @@ public:
     }
 
 private:
+    // A request's length and its offset in bytes, from its words 1 and 2. The offset's word counts in units of 4 bytes.
+    static std::pair<uint32_t, uint64_t> LengthAndOffset(std::span<const uint8_t> in)
+    {
+        const uint32_t length = in.size() >= 8 ? xsflib::LoadBe32(&in[4]) : 0;
+        const uint64_t offset = in.size() >= 12 ? uint64_t{xsflib::LoadBe32(&in[8])} * 4 : 0;
+
+        return {length, offset};
+    }
+
+    // Read (0x71): reads from the partition into `out`. Returns the result: 1, or 2 when the read fails.
+    int32_t ReadPartition(std::span<const uint8_t> in, std::span<uint8_t> out)
+    {
+        const auto [length, offset] = LengthAndOffset(in);
+
+        return length > out.size() || !ios_.disc_.Read(offset, out.data(), length) ? 2 : 1;
+    }
+
+    // UnencryptedRead: reads from the disc outside the partition into `out`. The disc's header is the partition's
+    // header. The rest of the disc outside the partition reads as zeros. Returns the result: 1, or 2 when the request
+    // is rejected.
+    int32_t UnencryptedRead(std::span<const uint8_t> in, std::span<uint8_t> out)
+    {
+        const auto [length, offset] = LengthAndOffset(in);
+        if (length > out.size())
+        {
+            return 2;
+        }
+
+        if (offset + length > kDiscSize)
+        {
+            error_ = kDriveOutOfRange;
+
+            return 2;
+        }
+
+        std::fill(out.begin(), out.begin() + length, uint8_t{0});
+        if (offset < ntdlib::disc::kHeaderSize)
+        {
+            const auto size = static_cast<std::size_t>(std::min<uint64_t>(length, ntdlib::disc::kHeaderSize - offset));
+            ios_.disc_.Read(offset, out.data(), size);
+        }
+
+        return 1;
+    }
+
     uint32_t error_ = 0; // the last rejected request's error, for RequestError
 };
 
@@ -708,19 +755,7 @@ bool Ios::Execute(ntdlib::PAddr address, int32_t& result)
 
     if (command == kOpen)
     {
-        std::string path;
-        for (uint32_t at = arg(0); path.size() < 64; at++)
-        {
-            const uint8_t* c = memory_.At(ntdlib::dsp::ToPhysical(at), 1);
-            if (c == nullptr || *c == 0)
-            {
-                break;
-            }
-
-            path += static_cast<char>(*c);
-        }
-
-        result = Open(path);
+        result = Open(PathAt(memory_, arg(0)));
 
         return true;
     }
@@ -755,16 +790,7 @@ bool Ios::Execute(ntdlib::PAddr address, int32_t& result)
 
     case kIoctlv:
         {
-            // The vectors: the inputs, then the buffers that IOS writes.
-            std::vector<std::span<uint8_t>> in;
-            std::vector<std::span<uint8_t>> io;
-            const uint8_t* vectors = memory_.At(ntdlib::dsp::ToPhysical(arg(3)), (arg(1) + arg(2)) * 8);
-            for (uint32_t i = 0; vectors != nullptr && i < arg(1) + arg(2); i++)
-            {
-                const std::span<uint8_t> buffer =
-                    Buffer(memory_, xsflib::LoadBe32(&vectors[i * 8]), xsflib::LoadBe32(&vectors[i * 8 + 4]));
-                (i < arg(1) ? in : io).push_back(buffer);
-            }
+            auto [in, io] = IoctlvBuffers(memory_, arg(3), arg(1), arg(2));
 
             return device.Ioctlv(arg(0), in, io, result);
         }

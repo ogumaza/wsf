@@ -17,6 +17,7 @@
 #include "ntdlib/jaudio/wave_system.h"
 #include "xsflib/rip/length.h"
 
+#include "rip/jaudio.h"
 #include "rip/rip.h"
 
 namespace wsf::rip

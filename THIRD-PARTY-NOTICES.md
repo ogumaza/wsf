@@ -39,9 +39,10 @@ their copyright holders.
 ntdlib's `include/ntdlib/nwsnd/tables.h` holds numeric tables that NW4R SND uses: powers of two, decibel levels, pan
 curves, the envelope's attack multipliers, the LFO's sine, the low-pass filter's cutoffs and the coefficients of the
 biquad filter's presets.
-`src/ax/tables.h` holds the gains of AX's output compressor. ntdlib's `include/ntdlib/dsp/coef_rom.h` holds the DSP's
-coefficient ROM. Every GameCube and Wii has the same ROM. It holds the 4-tap filters that AX's resampler reads: 128
-phases for each of three cutoffs. The player uses the exact values to reproduce the console's output.
+The gains of the AX output compressor are in ntdlib's `include/ntdlib/rvl/ax/tables.h`. The DSP coefficient ROM is in
+`include/ntdlib/dsp/coef_rom.h`. Every GameCube and Wii has the same ROM. It holds the 4-tap filters that AX's
+resampler reads: 128 phases for each of three cutoffs. The player uses the exact values to reproduce the console's
+output.
 
 ## Licence texts
 

@@ -16,13 +16,14 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/rvl/ax/pb.h"
 #include "xsflib/bytes.h"
 #include "xsflib/psf/descriptor.h"
 #include "xsflib/psf/psf.h"
 #include "xsflib/psf/streaming.h"
 #include "xsflib/text.h"
 
-#include "ax/pb.h"
+#include "wsf/models.h"
 
 namespace wsf
 {
@@ -181,17 +182,11 @@ bool ParseEffects(const std::vector<uint8_t>& data, std::size_t pos, nw4r::Archi
 
 std::optional<uint16_t> ParseTracks(std::string_view text)
 {
-    constexpr std::string_view kSeparators = ", \t\r\n";
     constexpr xsflib::IntegerRules kTrackRules{.base = 10, .minus = false};
 
     uint32_t tracks = 0;
-    std::size_t at = 0;
-    while ((at = text.find_first_not_of(kSeparators, at)) != std::string_view::npos)
+    for (const std::string_view part : xsflib::SplitList(text))
     {
-        const std::size_t end = std::min(text.find_first_of(kSeparators, at), text.size());
-        const std::string_view part = text.substr(at, end - at);
-        at = end;
-
         // A track, or a range of tracks: "8" or "8-14".
         const std::size_t dash = part.find('-');
         const std::optional<int64_t> first = xsflib::ParseInteger(part.substr(0, dash), kTrackRules);
@@ -320,10 +315,12 @@ Tags ArrangementTags(const nw4r::Arrangement& arrangement)
 {
     Tags tags;
     tags[kTracksTag] = FormatTracks(arrangement.tracks);
+
     if (arrangement.tempo_ratio != 1.0f)
     {
         tags[kTempoTag] = FormatTempo(arrangement.tempo_ratio);
     }
+
     if (!arrangement.variables.empty())
     {
         tags[kVariablesTag] = xsflib::psf::FormatVariables(arrangement.variables);
@@ -502,6 +499,20 @@ std::optional<std::string> ArchiveDescriptor::Check() const
     }
 
     return xsflib::psf::CheckDescriptorOutputMode("archive", output_mode);
+}
+
+bool RequiresMoodVersion(const nw4r::ArchiveEffects& effects)
+{
+    const auto is_mood = [](const nw4r::EffectSetup& setup)
+    {
+        return setup.type == nw4r::EffectType::kPhotoMood;
+    };
+    const auto is_main = [](const nw4r::SoundSend& send)
+    {
+        return send.bus == nw4r::kMainSendBus;
+    };
+    return std::any_of(effects.setups.begin(), effects.setups.end(), is_mood) ||
+           std::any_of(effects.sends.begin(), effects.sends.end(), is_main);
 }
 
 std::vector<uint32_t> SoundsToPlay(const LoadedSet& set)

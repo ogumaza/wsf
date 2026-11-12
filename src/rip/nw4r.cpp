@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-// The ripper's parts for games whose sound library is NW4R SND: game mode's driver block, library and minis, archive
-// mode's library and minis with the data that they keep, the checks of an archive's sounds, and the length analysis on
-// WSF's model of NW4R SND and AX.
+// The ripper's parts for games whose sound library is NW4R SND: the driver block, library and minis of game mode, the
+// library and minis of archive mode, the pieces that play together, and the length analysis on the model of NW4R SND
+// and AX.
 
 #include <algorithm>
 #include <array>
@@ -14,8 +14,6 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <set>
-#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -23,28 +21,30 @@
 
 #include "ntdlib/disc/game.h"
 #include "ntdlib/dol.h"
+#include "ntdlib/nwsnd/length_model.h"
 #include "ntdlib/nwsnd/sequence.h"
+#include "ntdlib/rsar/cut.h"
 #include "ntdlib/rsar/formats.h"
-#include "ntdlib/rsar/reference.h"
+#include "ntdlib/rvl/ax/pb.h"
+#include "ntdlib/rvl/ax/system.h"
+#include "ntdlib/rvl/snd/arrangement.h"
+#include "ntdlib/rvl/snd/effect_setup.h"
+#include "ntdlib/rvl/snd/engine.h"
+#include "ntdlib/rvl/snd/rsar_options.h"
+#include "ntdlib/rvl/snd/sequence.h"
+#include "ntdlib/rvl/snd/util.h"
 #include "ntdlib/sound_build.h"
-#include "xsflib/ascii.h"
+#include "ntdlib/sound_pieces.h"
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
 #include "xsflib/psf/psf.h"
 #include "xsflib/rip/length.h"
 
-#include "ax/pb.h"
-#include "ax/system.h"
-#include "nw4r/arrangement.h"
-#include "nw4r/effect_setup.h"
-#include "nw4r/engine.h"
-#include "nw4r/rsar_options.h"
-#include "nw4r/sequence.h"
-#include "nw4r/util.h"
 #include "rip/driver_blob.h"
 #include "rip/rip.h"
 #include "rip/sound_libraries.h"
 #include "wsf/format.h"
+#include "wsf/models.h"
 
 namespace wsf::rip
 {
@@ -198,6 +198,71 @@ std::optional<SoundData> FindSoundData(const ntdlib::rsar::SoundArchive& archive
 namespace
 {
 
+// Puts effect `i` of the driver's parameter block, `effect`, in `block`, with the functions of its class in
+// `profile`. Its parameters, or each of its presets, go in the effects' words from word `first` on. `first` then
+// gives the next free word. Returns false if the profile has no class for the effect, the words run out, or the effect
+// has presets and the game reads no variables.
+bool PutEffect(std::array<uint8_t, kParamsEffectsEnd>& block, const EffectProfile& profile,
+               const nw4r::EffectSetup& effect, uint32_t i, uint32_t& first)
+{
+    const auto put = [&block](uint32_t offset, uint32_t value)
+    {
+        xsflib::StoreBe32(&block[offset], value);
+    };
+
+    const auto found = std::find_if(profile.classes.begin(), profile.classes.end(),
+                                    [&effect](const EffectClass& c) { return c.type == effect.type; });
+    const auto words = static_cast<uint32_t>(nw4r::EffectParamWords(effect.type));
+    const auto sets = static_cast<uint32_t>(std::max<std::size_t>(effect.presets.size(), 1));
+    if (found == profile.classes.end() || first + words * sets > kDriverEffectWords ||
+        (!effect.presets.empty() && profile.read_variable == 0))
+    {
+        return false;
+    }
+
+    const uint32_t at = kParamsEffectsOffset + i * DriverBlock::kEffectSize;
+    const uint32_t effect_words[] = {static_cast<uint32_t>(effect.bus),
+                                     found->ctor,
+                                     found->mem_size,
+                                     found->assign,
+                                     found->set_param,
+                                     words,
+                                     static_cast<uint32_t>(effect.presets.size()),
+                                     first};
+    for (std::size_t w = 0; w < std::size(effect_words); w++)
+    {
+        put(at + static_cast<uint32_t>(w * 4), effect_words[w]);
+    }
+
+    static_assert(std::size(effect_words) * 4 == DriverBlock::kEffectSize);
+
+    const uint32_t native_at = DriverBlock::kNativeOffset + i * DriverBlock::kNativeSize;
+    put(native_at, static_cast<uint32_t>(effect.type));
+    put(native_at + 4, found->start_up);
+    put(native_at + 8, found->shutdown);
+    put(native_at + 12, found->update_buffer);
+
+    const auto put_params = [&](const nw4r::EffectParams& set)
+    {
+        for (uint32_t w = 0; w < words; w++)
+        {
+            put(kParamsEffectWordsOffset + (first++) * 4, set[w]);
+        }
+    };
+
+    if (effect.presets.empty())
+    {
+        put_params(effect.params);
+    }
+
+    for (const nw4r::EffectParams& preset : effect.presets)
+    {
+        put_params(preset);
+    }
+
+    return true;
+}
+
 // The driver's parameter block up to the end of the effects, for a sound without a send, with `setups` filled in. They
 // are effects of the game with the effect profile `profile`. `sends` says whether the game sets sends on sounds.
 // Returns nullopt if the driver can't set the effects up.
@@ -237,55 +302,9 @@ std::optional<std::array<uint8_t, kParamsEffectsEnd>> EffectsBlock(const std::op
     uint32_t first = 0;
     for (std::size_t i = 0; i < setups.size(); i++)
     {
-        const nw4r::EffectSetup& effect = setups[i];
-        const auto found = std::find_if(profile->classes.begin(), profile->classes.end(),
-                                        [&effect](const EffectClass& c) { return c.type == effect.type; });
-        const auto words = static_cast<uint32_t>(nw4r::EffectParamWords(effect.type));
-        const auto sets = static_cast<uint32_t>(std::max<std::size_t>(effect.presets.size(), 1));
-        if (found == profile->classes.end() || first + words * sets > kDriverEffectWords ||
-            (!effect.presets.empty() && profile->read_variable == 0))
+        if (!PutEffect(block, *profile, setups[i], static_cast<uint32_t>(i), first))
         {
             return std::nullopt;
-        }
-
-        const uint32_t at = kParamsEffectsOffset + static_cast<uint32_t>(i) * DriverBlock::kEffectSize;
-        const uint32_t effect_words[] = {static_cast<uint32_t>(effect.bus),
-                                         found->ctor,
-                                         found->mem_size,
-                                         found->assign,
-                                         found->set_param,
-                                         words,
-                                         static_cast<uint32_t>(effect.presets.size()),
-                                         first};
-        for (std::size_t w = 0; w < std::size(effect_words); w++)
-        {
-            put(at + static_cast<uint32_t>(w * 4), effect_words[w]);
-        }
-
-        static_assert(std::size(effect_words) * 4 == DriverBlock::kEffectSize);
-
-        const uint32_t native_at = DriverBlock::kNativeOffset + static_cast<uint32_t>(i) * DriverBlock::kNativeSize;
-        put(native_at, static_cast<uint32_t>(effect.type));
-        put(native_at + 4, found->start_up);
-        put(native_at + 8, found->shutdown);
-        put(native_at + 12, found->update_buffer);
-
-        const auto put_params = [&](const nw4r::EffectParams& set)
-        {
-            for (uint32_t w = 0; w < words; w++)
-            {
-                put(kParamsEffectWordsOffset + (first++) * 4, set[w]);
-            }
-        };
-
-        if (effect.presets.empty())
-        {
-            put_params(effect.params);
-        }
-
-        for (const nw4r::EffectParams& preset : effect.presets)
-        {
-            put_params(preset);
         }
     }
 
@@ -311,28 +330,9 @@ bool GetsOtherEffects(const std::vector<nw4r::EffectSetup>& setups, uint32_t sou
     return false;
 }
 
-// Fills in driver/driver.c's parameters in the driver's block at `params`: the settings, the archive at `archive_path`,
-// the game's profile, the effects, the silenced tracks and the offset for the variables. The functions for the effects
-// come from `effect_profile`. Returns nothing, or the error: the driver's block doesn't have the layout that the ripper
-// expects, or the driver can't set up the game's effects, silence its tracks or set its variables.
-std::optional<std::string> PutDriverParams(uint8_t* params, const GameProfile& profile, const std::string& archive_path,
-                                           const ntdlib::rsar::SoundArchive& archive,
-                                           const std::optional<EffectProfile>& effect_profile,
-                                           const nw4r::ArchiveEffects& effects)
+// Puts the functions and the init flag of the game's driver profile `profile` in the driver's block at `params`.
+void PutProfileFunctions(uint8_t* params, const GameProfile& profile)
 {
-    const auto put = [params](uint32_t offset, uint32_t value)
-    {
-        xsflib::StoreBe32(params + offset, value);
-    };
-
-    put(kParamsFrameTicksOffset, kFrameTicks);
-    put(kParamsInfoSizeOffset, archive.InfoSize());
-    put(kParamsPrioritiesOffset, kSoundThreadPriority);
-    put(kParamsPrioritiesOffset + 4, kDvdThreadPriority);
-
-    const std::string dvd_path = "/" + archive_path;
-    std::memcpy(params + kParamsPathOffset, dvd_path.c_str(), dvd_path.size() + 1);
-
     const uint32_t functions[] = {
         profile.ai_init,
         profile.ax_init,
@@ -356,11 +356,76 @@ std::optional<std::string> PutDriverParams(uint8_t* params, const GameProfile& p
     };
     for (std::size_t i = 0; i < std::size(functions); i++)
     {
-        put(kParamsProfileOffset + static_cast<uint32_t>(i * 4), functions[i]);
+        xsflib::StoreBe32(params + kParamsProfileOffset + i * 4, functions[i]);
     }
 
     static_assert(kParamsProfileOffset + std::size(functions) * 4 == kParamsBankGroupOffset);
-    put(kParamsInitFlagOffset, profile.init_flag);
+    xsflib::StoreBe32(params + kParamsInitFlagOffset, profile.init_flag);
+}
+
+// Puts the offsets that the driver uses to silence tracks and set variables in the driver's block at `params`, from
+// `effect_profile`, when `effects` has tracks or variables. Returns nothing, or the error: the driver can't silence
+// the game's tracks or set its variables.
+std::optional<std::string> PutTrackAndVariableOffsets(uint8_t* params,
+                                                      const std::optional<EffectProfile>& effect_profile,
+                                                      const nw4r::ArchiveEffects& effects)
+{
+    // The tracks that the game silences on some sounds. A .miniwsf gives the driver its sound's (see BuildMini).
+    if (!effects.tracks.empty())
+    {
+        if (!effect_profile || effect_profile->seq_tracks == 0)
+        {
+            return "the driver can't silence this game's tracks";
+        }
+
+        xsflib::StoreBe32(params + kParamsSeqTracksOffset, effect_profile->seq_tracks);
+        xsflib::StoreBe32(params + kParamsTrackVolumeOffset, effect_profile->track_volume);
+    }
+
+    // The variables that the game sets on some sounds. A .miniwsf gives the driver its sound's (see BuildMini). The
+    // driver writes local variables (0 to 15) alone.
+    if (!effects.variables.empty())
+    {
+        const auto local = [](const nw4r::SoundVariables& entry)
+        {
+            return std::all_of(entry.variables.begin(), entry.variables.end(), [](const auto& variable)
+                               { return variable.first >= 0 && variable.first < kDriverVariables; });
+        };
+        if (!effect_profile || effect_profile->seq_variables == 0 ||
+            !std::all_of(effects.variables.begin(), effects.variables.end(), local))
+        {
+            return "the driver can't set this game's variables";
+        }
+
+        xsflib::StoreBe32(params + kParamsSeqVariablesOffset, effect_profile->seq_variables);
+    }
+
+    return std::nullopt;
+}
+
+// Fills in driver/driver.c's parameters in the driver's block at `params`: the settings, the archive at `archive_path`,
+// the game's profile, the effects, the silenced tracks and the offset for the variables. The functions for the effects
+// come from `effect_profile`. Returns nothing, or the error: the driver's block doesn't have the layout that the ripper
+// expects, or the driver can't set up the game's effects, silence its tracks or set its variables.
+std::optional<std::string> PutDriverParams(uint8_t* params, const GameProfile& profile, const std::string& archive_path,
+                                           const ntdlib::rsar::SoundArchive& archive,
+                                           const std::optional<EffectProfile>& effect_profile,
+                                           const nw4r::ArchiveEffects& effects)
+{
+    const auto put = [params](uint32_t offset, uint32_t value)
+    {
+        xsflib::StoreBe32(params + offset, value);
+    };
+
+    put(kParamsFrameTicksOffset, kFrameTicks);
+    put(kParamsInfoSizeOffset, archive.InfoSize());
+    put(kParamsPrioritiesOffset, kSoundThreadPriority);
+    put(kParamsPrioritiesOffset + 4, kDvdThreadPriority);
+
+    const std::string dvd_path = "/" + archive_path;
+    std::memcpy(params + kParamsPathOffset, dvd_path.c_str(), dvd_path.size() + 1);
+
+    PutProfileFunctions(params, profile);
 
     // The driver's layout must be the one that these offsets describe: its block has no bus for the sound's send.
     if (xsflib::LoadBe32(params + kParamsSoundEffectsOffset + 4) != kNoBus)
@@ -383,37 +448,7 @@ std::optional<std::string> PutDriverParams(uint8_t* params, const GameProfile& p
               params + kParamsEffectFunctionsOffset);
     std::copy(unlisted->begin() + kParamsEffectCountOffset, unlisted->end(), params + kParamsEffectCountOffset);
 
-    // The tracks that the game silences on some sounds. A .miniwsf gives the driver its sound's (see BuildMini).
-    if (!effects.tracks.empty())
-    {
-        if (!effect_profile || effect_profile->seq_tracks == 0)
-        {
-            return "the driver can't silence this game's tracks";
-        }
-
-        put(kParamsSeqTracksOffset, effect_profile->seq_tracks);
-        put(kParamsTrackVolumeOffset, effect_profile->track_volume);
-    }
-
-    // The variables that the game sets on some sounds. A .miniwsf gives the driver its sound's (see BuildMini). The
-    // driver writes local variables (0 to 15) alone.
-    if (!effects.variables.empty())
-    {
-        const auto local = [](const nw4r::SoundVariables& entry)
-        {
-            return std::all_of(entry.variables.begin(), entry.variables.end(), [](const auto& variable)
-                               { return variable.first >= 0 && variable.first < kDriverVariables; });
-        };
-        if (!effect_profile || effect_profile->seq_variables == 0 ||
-            !std::all_of(effects.variables.begin(), effects.variables.end(), local))
-        {
-            return "the driver can't set this game's variables";
-        }
-
-        put(kParamsSeqVariablesOffset, effect_profile->seq_variables);
-    }
-
-    return std::nullopt;
+    return PutTrackAndVariableOffsets(params, effect_profile, effects);
 }
 
 } // namespace
@@ -600,358 +635,10 @@ std::vector<uint8_t> BuildArchiveMini(const std::vector<uint32_t>& indices, cons
                                  program.Data(), tags);
 }
 
-namespace
-{
-
-// An RSAR's FILE block keeps each file at a multiple of 32 bytes.
-constexpr std::size_t kFileAlignment = 0x20;
-
-// The largest archive whose offsets fit RSAR's 32-bit fields.
-constexpr std::size_t kMaxArchiveSize = 0xFFFFFFFF;
-
-// The bytes at the archive's start that DvdSoundArchive::LoadFileHeader reads: the header's 0x28 bytes, rounded up to a
-// multiple of 32.
-constexpr uint64_t kHeaderRead = 0x40;
-
-// Pads `data` with zeros to a multiple of kFileAlignment.
-void PadToFileAlignment(std::vector<uint8_t>& data)
-{
-    data.resize((data.size() + kFileAlignment - 1) / kFileAlignment * kFileAlignment, 0);
-}
-
-// The fields of an RSAR that KeepSequenceData and KeepLoadedGroups read, by their offsets. KeepSequenceData rewrites
-// some of them.
-struct RsarLayout
-{
-    // The header: the archive's size, the INFO block's offset and size, and the FILE block's offset and size.
-    static constexpr std::size_t kArchiveSize = 0x08;
-    static constexpr std::size_t kInfoBlock = 0x18;
-    static constexpr std::size_t kInfoBlockSize = 0x1c;
-    static constexpr std::size_t kFileBlock = 0x20;
-    static constexpr std::size_t kFileBlockSize = 0x24;
-
-    // A block's header: its magic, then its size. The INFO block's references count from the end of its header.
-    static constexpr std::size_t kBlockSize = 0x04;
-    static constexpr std::size_t kBlockHeader = 0x08;
-
-    // A reference (ntdlib::rsar::Reference), and the reference to the groups' table in the INFO block. A table holds
-    // a count, then a reference to each entry.
-    static constexpr std::size_t kReference = 0x08;
-    static constexpr std::size_t kGroupTable = 0x20;
-
-    // A group's entry: the offset and size of its files in the archive, the same for their wave data, the reference
-    // to the table of its items, and the size of the entry.
-    static constexpr std::size_t kGroupOffset = 0x10;
-    static constexpr std::size_t kGroupSize = 0x14;
-    static constexpr std::size_t kGroupWaveDataOffset = 0x18;
-    static constexpr std::size_t kGroupWaveDataSize = 0x1c;
-    static constexpr std::size_t kGroupItems = 0x20;
-    static constexpr std::size_t kGroupEntrySize = 0x28;
-
-    // An item's entry: the offset of its file from its group's files, that of its wave data from the group's wave
-    // data, and the size of the entry.
-    static constexpr std::size_t kItemOffset = 0x04;
-    static constexpr std::size_t kItemWaveDataOffset = 0x0c;
-    static constexpr std::size_t kItemEntrySize = 0x14;
-};
-
-// Where an archive's INFO block holds a group's entry and its items' entries (SoundArchiveFileReader::ReadGroupInfo,
-// main.dol 0x80042ac4, and ReadGroupItemInfo, 0x80042bd4).
-struct GroupEntries
-{
-    std::size_t group = 0;
-    std::vector<std::size_t> items;
-};
-
-// The groups' entries, in the order of SoundArchive::Groups. The INFO block's payload starts with references to its
-// tables. The groups' table is the fifth. A table holds a count, then a reference to each entry. The references count
-// from the payload.
-std::vector<GroupEntries> FindGroupEntries(const xsflib::Reader& r)
-{
-    const std::size_t base = std::size_t{r.U32(RsarLayout::kInfoBlock)} + RsarLayout::kBlockHeader;
-    const auto entries = [&r, base](std::size_t table_ref)
-    {
-        std::vector<std::size_t> found;
-        const ntdlib::rsar::Reference table = ntdlib::rsar::ReadRef(r, table_ref);
-        if (table.IsOffset())
-        {
-            const std::size_t at = base + table.offset;
-            const uint32_t count = r.U32(at);
-            for (uint32_t i = 0; i < count; i++)
-            {
-                found.push_back(base + ntdlib::rsar::ReadRef(r, at + 4 + i * RsarLayout::kReference).offset);
-            }
-        }
-
-        return found;
-    };
-
-    std::vector<GroupEntries> groups;
-    for (const std::size_t group : entries(base + RsarLayout::kGroupTable))
-    {
-        groups.push_back({group, entries(group + RsarLayout::kGroupItems)});
-    }
-
-    return groups;
-}
-
-// True if `entries` hold each of `groups` and its items, and lie before the FILE block at `file_block`.
-bool EntriesBeforeFiles(const std::vector<GroupEntries>& entries,
-                        const std::vector<ntdlib::rsar::SoundArchive::Group>& groups, std::size_t file_block)
-{
-    if (entries.size() != groups.size())
-    {
-        return false;
-    }
-
-    for (std::size_t g = 0; g < groups.size(); g++)
-    {
-        if (entries[g].items.size() != groups[g].items.size() ||
-            entries[g].group + RsarLayout::kGroupEntrySize > file_block)
-        {
-            return false;
-        }
-
-        for (const std::size_t item : entries[g].items)
-        {
-            if (item + RsarLayout::kItemEntrySize > file_block)
-            {
-                return false;
-            }
-        }
-    }
-
-    return true;
-}
-
-// The files that the model reads for the sequences at `indices`: each sequence's file, and its bank's file and wave
-// data (Engine::StartSequence and Engine::GetBank).
-std::vector<uint32_t> SequenceFiles(const ntdlib::rsar::SoundArchive& archive, const std::vector<uint32_t>& indices)
-{
-    std::vector<uint32_t> files;
-    for (const uint32_t index : indices)
-    {
-        if (index >= archive.Sounds().size())
-        {
-            continue;
-        }
-
-        const ntdlib::rsar::SoundInfo& sound = archive.Sounds()[index];
-        files.push_back(sound.file_id);
-        if (sound.bank < archive.Banks().size())
-        {
-            files.push_back(archive.Banks()[sound.bank].file_id);
-        }
-    }
-
-    return files;
-}
-
-// For each group, which of its items SoundArchive::File reads for `files`. File returns spans into the archive's bytes.
-// An item whose file and wave data have those offsets and sizes holds them. Like File, the test ignores the item's
-// file ID.
-std::vector<std::vector<bool>> ItemsRead(const ntdlib::rsar::SoundArchive& archive, const std::vector<uint32_t>& files)
-{
-    const std::vector<ntdlib::rsar::SoundArchive::Group>& groups = archive.Groups();
-    std::vector<std::vector<bool>> read(groups.size());
-    for (std::size_t g = 0; g < groups.size(); g++)
-    {
-        read[g].resize(groups[g].items.size());
-    }
-
-    const auto offset = [start = archive.Bytes().data()](std::span<const uint8_t> data)
-    {
-        return static_cast<uint64_t>(data.data() - start);
-    };
-
-    for (const uint32_t file_id : files)
-    {
-        const std::optional<ntdlib::rsar::FileData> file = archive.File(file_id);
-        for (std::size_t g = 0; file && g < groups.size(); g++)
-        {
-            for (std::size_t i = 0; i < groups[g].items.size(); i++)
-            {
-                const ntdlib::rsar::SoundArchive::Group::Item& item = groups[g].items[i];
-                read[g][i] = read[g][i] ||
-                             (groups[g].internal && uint64_t{groups[g].offset} + item.offset == offset(file->file) &&
-                              item.size == file->file.size() &&
-                              uint64_t{groups[g].wave_data_offset} + item.wave_data_offset == offset(file->wave_data) &&
-                              item.wave_data_size == file->wave_data.size());
-            }
-        }
-    }
-
-    return read;
-}
-
-// Where a group's kept items lie in the copy that KeepSequenceData makes: the group's files, then their wave data.
-struct GroupPlace
-{
-    std::size_t offset = 0, size = 0, wave_data_offset = 0, wave_data_size = 0;
-    std::vector<std::size_t> files, waves; // each kept item's offsets, from the group's two offsets
-};
-
-// Appends each group's kept items to `copy`: their files, then their wave data, each at a multiple of 32 bytes. Items
-// of a group that hold the same bytes share one copy of them. Banks often share a wave archive. A group outside the
-// archive keeps its place.
-std::vector<GroupPlace> AppendKeptItems(const ntdlib::rsar::SoundArchive& archive,
-                                        const std::vector<std::vector<bool>>& kept, std::vector<uint8_t>& copy)
-{
-    // The offsets and sizes of a group's bytes that the copy holds, and where each copy starts from the group's offset.
-    using Copies = std::map<std::pair<uint64_t, uint32_t>, std::size_t>;
-
-    // Appends the bytes at `offset` in the archive, unless `copies` holds them already. Returns where they start from
-    // `base` in the copy.
-    const std::span<const uint8_t> all = archive.Bytes();
-    const auto append = [&all, &copy](Copies& copies, uint64_t offset, uint32_t size, std::size_t base)
-    {
-        const auto [at, added] = copies.try_emplace({offset, size}, 0);
-        if (added)
-        {
-            PadToFileAlignment(copy);
-            at->second = copy.size() - base;
-            const std::span<const uint8_t> data = all.subspan(static_cast<std::size_t>(offset), size);
-            copy.insert(copy.end(), data.begin(), data.end());
-        }
-
-        return at->second;
-    };
-
-    const std::vector<ntdlib::rsar::SoundArchive::Group>& groups = archive.Groups();
-    std::vector<GroupPlace> places(groups.size());
-    for (std::size_t g = 0; g < groups.size(); g++)
-    {
-        if (!groups[g].internal)
-        {
-            continue;
-        }
-
-        const ntdlib::rsar::SoundArchive::Group& group = groups[g];
-        GroupPlace& place = places[g];
-        place.files.resize(group.items.size());
-        place.waves.resize(group.items.size());
-        PadToFileAlignment(copy);
-        place.offset = copy.size();
-        Copies files;
-        for (std::size_t i = 0; i < group.items.size(); i++)
-        {
-            if (kept[g][i])
-            {
-                place.files[i] =
-                    append(files, uint64_t{group.offset} + group.items[i].offset, group.items[i].size, place.offset);
-            }
-        }
-
-        place.size = copy.size() - place.offset;
-        PadToFileAlignment(copy);
-        place.wave_data_offset = copy.size();
-        Copies waves;
-        for (std::size_t i = 0; i < group.items.size(); i++)
-        {
-            if (kept[g][i])
-            {
-                place.waves[i] = append(waves, uint64_t{group.wave_data_offset} + group.items[i].wave_data_offset,
-                                        group.items[i].wave_data_size, place.wave_data_offset);
-            }
-        }
-
-        place.wave_data_size = copy.size() - place.wave_data_offset;
-    }
-
-    PadToFileAlignment(copy);
-
-    return places;
-}
-
-// Writes the copy's size into its header and its FILE block's header, and each group's place and each item's into its
-// INFO block. An item that isn't kept starts at the copy's end.
-void WritePlaces(const ntdlib::rsar::SoundArchive& archive, const std::vector<std::vector<bool>>& kept,
-                 const std::vector<GroupEntries>& entries, const std::vector<GroupPlace>& places,
-                 std::size_t file_block, std::vector<uint8_t>& copy)
-{
-    const auto put = [&copy](std::size_t at, std::size_t value)
-    {
-        xsflib::StoreBe32(&copy[at], static_cast<uint32_t>(value));
-    };
-
-    const std::size_t end = copy.size();
-    put(RsarLayout::kArchiveSize, end);
-    put(RsarLayout::kFileBlockSize, end - file_block);
-    put(file_block + RsarLayout::kBlockSize, end - file_block);
-    for (std::size_t g = 0; g < places.size(); g++)
-    {
-        if (!archive.Groups()[g].internal)
-        {
-            continue;
-        }
-
-        const GroupPlace& place = places[g];
-        put(entries[g].group + RsarLayout::kGroupOffset, place.offset);
-        put(entries[g].group + RsarLayout::kGroupSize, place.size);
-        put(entries[g].group + RsarLayout::kGroupWaveDataOffset, place.wave_data_offset);
-        put(entries[g].group + RsarLayout::kGroupWaveDataSize, place.wave_data_size);
-        for (std::size_t i = 0; i < entries[g].items.size(); i++)
-        {
-            put(entries[g].items[i] + RsarLayout::kItemOffset, kept[g][i] ? place.files[i] : end - place.offset);
-            put(entries[g].items[i] + RsarLayout::kItemWaveDataOffset,
-                kept[g][i] ? place.waves[i] : end - place.wave_data_offset);
-        }
-    }
-}
-
-// Whether two files hold the same bytes, wave data included, or neither is there.
-bool SameFile(const std::optional<ntdlib::rsar::FileData>& a, const std::optional<ntdlib::rsar::FileData>& b)
-{
-    return a.has_value() == b.has_value() &&
-           (!a || (std::ranges::equal(a->file, b->file) && std::ranges::equal(a->wave_data, b->wave_data)));
-}
-
-} // namespace
-
-std::vector<uint8_t> KeepSequenceData(const ntdlib::rsar::SoundArchive& archive, const std::vector<uint32_t>& indices)
-{
-    // The copy keeps the archive up to its files: the header, the SYMB and INFO blocks and the FILE block's header. The
-    // groups' entries must lie there.
-    const std::span<const uint8_t> all = archive.Bytes();
-    const xsflib::Reader r(all, true);
-    const std::size_t file_block = r.U32(RsarLayout::kFileBlock);
-    const std::size_t files_start = file_block + RsarLayout::kBlockHeader;
-    const std::vector<GroupEntries> entries = FindGroupEntries(r);
-    if (files_start > all.size() || !EntriesBeforeFiles(entries, archive.Groups(), file_block))
-    {
-        throw xsflib::FormatError("the archive's tables of groups don't come before its files");
-    }
-
-    // The FILE block then holds the items that the model reads.
-    const std::vector<uint32_t> files = SequenceFiles(archive, indices);
-    const std::vector<std::vector<bool>> kept = ItemsRead(archive, files);
-    std::vector<uint8_t> copy(all.begin(), all.begin() + static_cast<std::ptrdiff_t>(files_start));
-    const std::vector<GroupPlace> places = AppendKeptItems(archive, kept, copy);
-    if (copy.size() > kMaxArchiveSize)
-    {
-        throw xsflib::FormatError("the files that the sequences play are too large for a sound archive");
-    }
-
-    WritePlaces(archive, kept, entries, places, file_block, copy);
-
-    // The model reads each sequence's files from the copy. They must hold the archive's bytes.
-    const ntdlib::rsar::SoundArchive cut = ntdlib::rsar::SoundArchive::Load(copy, nw4r::kRsarOptions);
-    for (const uint32_t file_id : files)
-    {
-        if (!SameFile(archive.File(file_id), cut.File(file_id)))
-        {
-            throw xsflib::FormatError("the files that the sequences play can't be cut out of the archive");
-        }
-    }
-
-    return copy;
-}
-
 std::vector<uint8_t> KeepLoadedGroups(const ntdlib::rsar::SoundArchive& archive, const std::vector<uint32_t>& indices)
 {
     // The groups that the driver loads for the sequences.
-    const std::vector<ntdlib::rsar::SoundArchive::Group>& groups = archive.Groups();
-    std::vector<bool> loaded(groups.size());
+    std::vector<bool> loaded(archive.Groups().size());
     for (const uint32_t index : indices)
     {
         if (const std::optional<SoundData> data = FindSoundData(archive, index))
@@ -961,92 +648,14 @@ std::vector<uint8_t> KeepLoadedGroups(const ntdlib::rsar::SoundArchive& archive,
         }
     }
 
-    // The ranges that the driver reads: the header's first bytes, the INFO block, then each loaded group's files and
-    // wave data. The loader skips wave data of no bytes.
-    const std::span<const uint8_t> all = archive.Bytes();
-    const xsflib::Reader r(all, true);
-    const uint64_t info = r.U32(RsarLayout::kInfoBlock);
-    std::vector<std::pair<uint64_t, uint64_t>> read = {{0, kHeaderRead},
-                                                       {info, info + r.U32(RsarLayout::kInfoBlockSize)}};
-    for (std::size_t g = 0; g < groups.size(); g++)
-    {
-        if (!loaded[g])
-        {
-            continue;
-        }
-
-        // A stream of a group of no bytes reads on to the archive's end (DvdSoundArchive's DvdFileStream). The copy
-        // then keeps the whole archive.
-        if (groups[g].size == 0)
-        {
-            return {all.begin(), all.end()};
-        }
-
-        read.emplace_back(groups[g].offset, uint64_t{groups[g].offset} + groups[g].size);
-        if (groups[g].wave_data_size != 0)
-        {
-            read.emplace_back(groups[g].wave_data_offset,
-                              uint64_t{groups[g].wave_data_offset} + groups[g].wave_data_size);
-        }
-    }
-
-    // The copy keeps those ranges, rounded out to multiples of 32 bytes. The FILE block's other data becomes zeros.
-    std::vector<uint8_t> copy(all.begin(), all.end());
-    const uint64_t file_block = r.U32(RsarLayout::kFileBlock);
-    const uint64_t end = std::min<uint64_t>(file_block + r.U32(RsarLayout::kFileBlockSize), copy.size());
-    uint64_t at = file_block + RsarLayout::kBlockHeader;
-    const auto zero_until = [&copy, &at, end](uint64_t stop)
-    {
-        if (at < std::min(stop, end))
-        {
-            std::fill(copy.begin() + static_cast<std::ptrdiff_t>(at),
-                      copy.begin() + static_cast<std::ptrdiff_t>(std::min(stop, end)), uint8_t{0});
-        }
-    };
-
-    std::sort(read.begin(), read.end());
-    for (const auto& [start, stop] : read)
-    {
-        zero_until(start / kFileAlignment * kFileAlignment);
-        at = std::max(at, (stop + kFileAlignment - 1) / kFileAlignment * kFileAlignment);
-    }
-
-    zero_until(end);
-
-    return copy;
-}
-
-std::vector<std::string> MissingData(const ntdlib::rsar::SoundArchive& archive, uint32_t index)
-{
-    if (index >= archive.Sounds().size())
-    {
-        return {"the sound itself"};
-    }
-
-    const ntdlib::rsar::SoundInfo& sound = archive.Sounds()[index];
-    std::vector<std::string> missing;
-    if (!archive.File(sound.file_id))
-    {
-        missing.push_back("its sequence data");
-    }
-
-    if (sound.bank >= archive.Banks().size())
-    {
-        missing.push_back("its bank");
-    }
-    else if (!archive.File(archive.Banks()[sound.bank].file_id))
-    {
-        const std::string& name = archive.Banks()[sound.bank].name;
-        missing.push_back("bank " + (name.empty() ? "#" + std::to_string(sound.bank) : name));
-    }
-
-    return missing;
+    return ntdlib::rsar::KeepGroups(archive, loaded);
 }
 
 std::vector<Piece> FindPieces(const ntdlib::rsar::SoundArchive& archive)
 {
-    static constexpr std::array<std::string_view, 4> kSuffixes = {"_S1", "_S2", "_TR", "_NO"};
+    std::vector<Piece> pieces = ntdlib::FindSoundPieces(archive, ntdlib::kMegaMan9Channels);
 
+    // The sequences by label. A later sequence with an earlier one's label doesn't replace it.
     const auto& sounds = archive.Sounds();
     std::map<std::string, uint32_t, std::less<>> sequences;
     for (std::size_t i = 0; i < sounds.size(); i++)
@@ -1054,35 +663,6 @@ std::vector<Piece> FindPieces(const ntdlib::rsar::SoundArchive& archive)
         if (sounds[i].type == ntdlib::rsar::SoundType::kSequence)
         {
             sequences.emplace(sounds[i].name, static_cast<uint32_t>(i));
-        }
-    }
-
-    // Each piece starts at its first channel's sequence.
-    std::vector<Piece> pieces;
-    for (std::size_t i = 0; i < sounds.size(); i++)
-    {
-        const std::string& label = sounds[i].name;
-        if (sounds[i].type != ntdlib::rsar::SoundType::kSequence || label.size() <= kSuffixes[0].size() ||
-            !label.ends_with(kSuffixes[0]))
-        {
-            continue;
-        }
-
-        Piece piece{label.substr(0, label.size() - kSuffixes[0].size()), {}};
-        for (const std::string_view suffix : kSuffixes)
-        {
-            const auto found = sequences.find(piece.name + std::string(suffix));
-            if (found == sequences.end())
-            {
-                break;
-            }
-
-            piece.sounds.push_back(found->second);
-        }
-
-        if (piece.sounds.size() == kSuffixes.size() && piece.sounds.front() == i)
-        {
-            pieces.push_back(std::move(piece));
         }
     }
 
@@ -1114,73 +694,8 @@ std::vector<Piece> FindPieces(const ntdlib::rsar::SoundArchive& archive)
     return pieces;
 }
 
-std::optional<Timing> TimingOfPiece(const std::vector<std::optional<Timing>>& timings)
-{
-    if (timings.empty() || std::any_of(timings.begin(), timings.end(), [](const auto& t) { return !t; }))
-    {
-        return std::nullopt;
-    }
-
-    std::optional<Timing> piece;
-    for (const std::optional<Timing>& timing : timings)
-    {
-        if (timing->silent)
-        {
-            continue;
-        }
-
-        if (!piece)
-        {
-            piece = timing;
-            continue;
-        }
-
-        piece->length_ms = std::max(piece->length_ms, timing->length_ms);
-        piece->fade_ms = std::max(piece->fade_ms, timing->fade_ms);
-    }
-
-    return piece ? piece : timings.front();
-}
-
-bool IsMusic(const ntdlib::rsar::SoundArchive& archive, uint32_t index)
-{
-    if (index >= archive.Sounds().size() || archive.Sounds()[index].type != ntdlib::rsar::SoundType::kSequence)
-    {
-        return false;
-    }
-
-    const ntdlib::rsar::SoundInfo& sound = archive.Sounds()[index];
-    if (xsflib::AsciiLower(sound.name).find("bgm") != std::string::npos)
-    {
-        return true;
-    }
-
-    if (sound.player_id >= archive.Players().size())
-    {
-        return false;
-    }
-
-    // The player's name, word by word, each word without its trailing digits (PLAYER_BGM1).
-    bool music = false;
-    bool effects = false;
-    const std::string player = xsflib::AsciiLower(archive.Players()[sound.player_id].name);
-    for (std::size_t start = 0; start <= player.size();)
-    {
-        const std::size_t end = std::min(player.find('_', start), player.size());
-        std::string word = player.substr(start, end - start);
-        word.erase(word.find_last_not_of("0123456789") + 1);
-        music = music || word == "bgm" || word == "music" || word == "song" || word == "fanfare";
-        effects = effects || word == "se";
-        start = end + 1;
-    }
-
-    return music && !effects;
-}
-
 namespace
 {
-
-using ntdlib::nwsnd::kTrackCount;
 
 // The length analysis's rules. The model runs in 3 ms AX frames. xsflib's defaults count in frames of that length. They
 // give two loops and a 10 s fade, or the end, for at most 600 s. A sequence that stays busy without a sound for 180 s
@@ -1206,7 +721,7 @@ class LengthModel
 public:
     // `tracks` gives the tracks that play, a bit for each (nw4r::Arrangement). The others play at a volume of 0.
     LengthModel(nw4r::ArchiveModel& model, nw4r::SeqPlayer& player, bool dsp, uint16_t tracks)
-        : model_(model), player_(player), dsp_(dsp), tracks_(tracks)
+        : model_(model), player_(player), dsp_(dsp), tracks_(tracks), passes_(*model.engine, player)
     {
     }
 
@@ -1301,65 +816,20 @@ public:
         return model_.engine->Channels().ActiveCount();
     }
 
-    // Sets the hooks for the analysis's loops and for every track's passes. Only the passes that changed the sound
-    // count. A track that another track opens again also makes a pass as it starts its part again. The first open
-    // isn't a pass. On the Wii an open keeps the track's wait (SeqTrack::Open, 0x8003ffcc). The pass therefore counts
-    // at the track's next command. Two opens during one wait make one pass.
+    // Sets the hooks for the loops of the analysis and for the passes of every track
+    // (ntdlib::nwsnd::TrackPasses::SetHooks).
     template <typename Function>
     void OnLoop(Function function)
     {
         model_.engine->SetLoopHook(std::move(function));
-        const auto count_pass = [this](int track, uint32_t)
-        {
-            const auto* looping = player_.Track(track);
-            if (looping && !looping->IsIdle())
-            {
-                ++passes_[static_cast<std::size_t>(track)];
-            }
-        };
-        model_.engine->SetTrackLoopHook(count_pass);
-
-        const auto mark_open = [this](int, int opened, uint32_t)
-        {
-            const auto index = static_cast<std::size_t>(opened);
-            if (opened_[index])
-            {
-                reopened_[index] = true;
-            }
-
-            opened_[index] = true;
-        };
-        model_.engine->SetOpenTrackHook(mark_open);
-
-        const auto count_start = [this](int track, uint32_t)
-        {
-            const auto index = static_cast<std::size_t>(track);
-            if (reopened_[index])
-            {
-                ++passes_[index];
-                reopened_[index] = false;
-            }
-        };
-        model_.engine->SetCommandStartHook(count_start);
+        passes_.SetHooks();
     }
 
-    // Whether every open track other than `track` has made kLengthLoops passes that changed the sound. A track whose
-    // last pass changed nothing, that waits for ever or that plays at a volume of 0 doesn't hold the fade back.
+    // Whether every other track that plays has made kLengthLoops passes that changed the sound
+    // (ntdlib::nwsnd::TrackPasses::OthersLooped). A track that plays at a volume of 0 doesn't hold the fade back.
     bool OthersLooped(int track) const
     {
-        for (int i = 0; i < kTrackCount; ++i)
-        {
-            const auto* other = player_.Track(i);
-            const bool plays = (tracks_ & (1u << i)) != 0;
-            if (i != track && other && other->IsOpen() && plays && !other->IsIdle() &&
-                !other->WaitsForEver(*model_.engine) &&
-                passes_[static_cast<std::size_t>(i)] < xsflib::rip::kLengthLoops)
-            {
-                return false;
-            }
-        }
-
-        return true;
+        return passes_.OthersLooped(track, tracks_);
     }
 
 private:
@@ -1372,36 +842,10 @@ private:
     std::vector<int16_t> samples_;
     uint64_t frames_ = 0;
     int ringing_frames_ = 0;
-    std::array<int, kTrackCount> passes_{};    // each track's passes that changed the sound
-    std::array<bool, kTrackCount> opened_{};   // whether another track has opened the track
-    std::array<bool, kTrackCount> reopened_{}; // whether the track's next command starts its part again after an open
+
+    // On the Wii an open keeps the track's wait (SeqTrack::Open, 0x8003ffcc).
+    ntdlib::nwsnd::TrackPasses<nw4r::Engine, nw4r::SeqPlayer, true> passes_;
 };
-
-// The outermost counted loop that each open track of `player` is in: the track and the start of the loop's body. A
-// track in no counted loop gives none.
-std::set<std::pair<int, uint32_t>> OutermostCountedLoops(const nw4r::SeqPlayer& player)
-{
-    std::set<std::pair<int, uint32_t>> loops;
-    for (int i = 0; i < kTrackCount; ++i)
-    {
-        const auto* track = player.Track(i);
-        if (!track || !track->IsOpen())
-        {
-            continue;
-        }
-
-        for (const auto& entry : track->CallStack())
-        {
-            if (entry.is_loop && entry.loop_count != 0)
-            {
-                loops.insert({i, entry.address});
-                break;
-            }
-        }
-    }
-
-    return loops;
-}
 
 // Measures a sequence in `arrangement` on the model (xsflib::rip::MeasureLength), with the effects of `effects_sound`.
 // With `dsp` set, the microcode runs on the DSP. Otherwise the model runs without the DSP. The counted loops in
@@ -1409,7 +853,7 @@ std::set<std::pair<int, uint32_t>> OutermostCountedLoops(const nw4r::SeqPlayer& 
 std::optional<Timing> MeasureSequence(const ntdlib::rsar::SoundArchive& archive, const ntdlib::Microcode& microcode,
                                       nw4r::SndBuild build, uint32_t sound_index, uint32_t effects_sound,
                                       const nw4r::Arrangement& arrangement, const nw4r::ArchiveEffects& effects,
-                                      bool dsp, const std::set<std::pair<int, uint32_t>>& endless_loops = {})
+                                      bool dsp, const ntdlib::nwsnd::CountedLoopSet& endless_loops = {})
 {
     auto model = std::make_unique<nw4r::ArchiveModel>();
     model->build = build;
@@ -1441,11 +885,13 @@ std::optional<Timing> MeasureSequence(const ntdlib::rsar::SoundArchive& archive,
 
     // A track can repeat its part in a counted loop that the game plays for longer than the limit, such as 127 passes
     // of a whole piece. The loop's passes don't count. The fade then waits for that track until the limit. When the
-    // measure reaches the limit with tracks in counted loops, it runs again with each track's outermost counted loop
-    // endless. Their passes then count as those of a loop of count 0 do. Up to the limit, the tracks play the same.
+    // measure reaches the limit with tracks in counted loops, it runs again with each track's outermost loop endless
+    // where that loop is a counted one (ntdlib::nwsnd::OutermostCountedLoops). The passes of those loops then count as
+    // those of a loop of count 0 do. A track whose outermost loop is endless keeps its inner loops. It then plays as in
+    // the game. Up to the limit, the tracks play the same.
     if (timing && endless_loops.empty() && length_model.Frames() >= rules.max_frames)
     {
-        if (const auto running = OutermostCountedLoops(*player); !running.empty())
+        if (const auto running = ntdlib::nwsnd::OutermostCountedLoops(*player); !running.empty())
         {
             return MeasureSequence(archive, microcode, build, sound_index, effects_sound, arrangement, effects, dsp,
                                    running);

@@ -521,7 +521,7 @@ void TestEffects2009()
     XSFLIB_CHECK(back && back->effects.setups[1].bus == 2 &&
                  back->effects.setups[1].type == nw4r::EffectType::kChorus2009 &&
                  back->effects.setups[1].params == chorus.params && back->effects.setups[1].sounds == chorus.sounds);
-    XSFLIB_CHECK(!nw4r::RequiresMoodVersion(d.effects));
+    XSFLIB_CHECK(!RequiresMoodVersion(d.effects));
 }
 
 void TestMoodEffect()
@@ -549,17 +549,17 @@ void TestMoodEffect()
     XSFLIB_CHECK(back && back->effects.sends.size() == 3 && nw4r::MainSendOf(back->effects.sends, 2) == -1.0f &&
                  nw4r::MainSendOf(back->effects.sends, 3) == 0.0f &&
                  (nw4r::SendsOf(back->effects.sends, 2) == std::array<float, 3>{0.0f, 1.0f, -1.0f}));
-    XSFLIB_CHECK(nw4r::RequiresMoodVersion(d.effects));
+    XSFLIB_CHECK(RequiresMoodVersion(d.effects));
 
     nw4r::ArchiveEffects reverb_only;
     reverb_only.setups = {{.bus = 2, .type = nw4r::EffectType::kReverbHi, .params = {}, .presets = {}, .sounds = {}}};
 
-    XSFLIB_CHECK(!nw4r::RequiresMoodVersion(reverb_only));
+    XSFLIB_CHECK(!RequiresMoodVersion(reverb_only));
 
     nw4r::ArchiveEffects main_only;
     main_only.sends = {{2, nw4r::kMainSendBus, -1.0f}};
 
-    XSFLIB_CHECK(nw4r::RequiresMoodVersion(main_only));
+    XSFLIB_CHECK(RequiresMoodVersion(main_only));
 
     // A variant adds its effects and sends after the archive's.
     const nw4r::EffectVariant variant{.name = " mood 4", .sounds = {2}, .setups = {mood}, .sends = d.effects.sends};

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
 
 cmake_minimum_required(VERSION 3.20)
-# Shared version for wsfrip, wsfplay, the foobar2000 component, Windows file properties and macOS bundles
-# (xsflib_add_version below). For a release, update it here and add notes in docs/release-notes/.
-project(wsf VERSION 1.10.0 LANGUAGES C CXX)
+# Shared version for wsfrip, wsfplay, the foobar2000 component, the XMPlay plugin, Windows file properties and macOS
+# bundles (xsflib_add_version below). For a release, update it here and add notes in docs/release-notes/.
+project(wsf VERSION 1.11.0 LANGUAGES C CXX)
 
 # xsflib: the code that WSF shares with the other PSF players and with the converters, as a submodule. Its
 # XsflibProject.cmake sets what the projects built on it start with: C++20, a release build by default, the static C
@@ -15,6 +15,13 @@ if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/externals/xsflib/CMakeLists.txt")
 endif()
 include(externals/xsflib/cmake/XsflibProject.cmake)
 xsflib_project(CHECK_COMPILERS NAME WSF PREFIX WSF NOMINMAX)
+
+# clang-cl's /W4 warns when a designated initializer leaves out a field (-Wmissing-designated-field-initializers). The
+# Mac's -Wall -Wextra doesn't. WSF leaves out the fields whose default member initializers give their values. Writing
+# those values into each initializer would copy the defaults, and the copies could drift from them.
+if (WSF_CLANG_CL)
+    list(APPEND WSF_WARNINGS -Wno-missing-designated-field-initializers)
+endif()
 
 # ntdlib: a library for the hardware and formats of Nintendo's consoles, as a second submodule. It builds on xsflib.
 # xsflib provides the compression libraries that ntdlib's image formats require: zlib (GCZ), Zstandard (RVZ), liblzma
@@ -31,41 +38,6 @@ xsflib_add_libraries(xsflib ntdlib)
 add_library(wsf_common INTERFACE)
 target_include_directories(wsf_common INTERFACE src)
 target_link_libraries(wsf_common INTERFACE xsflib::common ntdlib::common)
-
-# AXFX: the RVL SDK's effects for AX's aux buses, modelled on the games' code. They must give the same floats on every
-# platform: xsflib_project turns off the contraction of multiplies and adds into fused multiply-adds for every target,
-# with clang-cl too.
-add_library(wsf_axfx STATIC
-    src/axfx/axfx.h
-    src/axfx/chorus.cpp
-    src/axfx/chorus.h
-    src/axfx/delay.cpp
-    src/axfx/delay.h
-    src/axfx/photo_mood.cpp
-    src/axfx/photo_mood.h
-    src/axfx/reverb_hi.cpp
-    src/axfx/reverb_hi.h
-    src/axfx/reverb_std.cpp
-    src/axfx/reverb_std.h
-    src/axfx/util.h
-)
-target_link_libraries(wsf_axfx PUBLIC wsf_common)
-target_compile_options(wsf_axfx PRIVATE ${WSF_WARNINGS})
-
-# AX model: the CPU side of the RVL SDK's audio library.
-add_library(wsf_ax STATIC
-    src/ax/dsp_link.cpp
-    src/ax/dsp_link.h
-    src/ax/pb.cpp
-    src/ax/pb.h
-    src/ax/system.cpp
-    src/ax/system.h
-    src/ax/tables.h
-    src/ax/voice.cpp
-    src/ax/voice.h
-)
-target_link_libraries(wsf_ax PUBLIC wsf_common ntdlib::ax ntdlib::dsp PRIVATE ntdlib::flipper)
-target_compile_options(wsf_ax PRIVATE ${WSF_WARNINGS})
 
 # The Wii for game mode: Broadway, memory, the DSP and Hollywood's hardware.
 add_library(wsf_wii STATIC
@@ -85,41 +57,29 @@ add_library(wsf_format STATIC
 target_link_libraries(wsf_format PUBLIC wsf_common xsflib::psf)
 target_compile_options(wsf_format PRIVATE ${WSF_WARNINGS})
 
-# NW4R SND model: the sequence player, channels, envelopes and the voice layer above AX.
-add_library(wsf_nw4r STATIC
-    src/nw4r/arrangement.h
-    src/nw4r/driver.cpp
-    src/nw4r/driver.h
-    src/nw4r/effect_setup.h
-    src/nw4r/effects.cpp
-    src/nw4r/effects.h
-    src/nw4r/engine.cpp
-    src/nw4r/engine.h
-    src/nw4r/rsar_options.h
-    src/nw4r/sequence.cpp
-    src/nw4r/sequence.h
-    src/nw4r/util.h
-)
-target_link_libraries(wsf_nw4r PUBLIC wsf_ax wsf_axfx ntdlib::nwsnd ntdlib::rsar)
-target_compile_options(wsf_nw4r PRIVATE ${WSF_WARNINGS})
-
 # The ripper: game- and archive-mode sets, the game profiles and the length analysis.
 add_library(wsf_rip STATIC
+    src/rip/dol_search.cpp
+    src/rip/dol_search.h
     src/rip/driver_blob.h
+    src/rip/effect_profiles.cpp
     src/rip/galaxy_driver_blob.h
     src/rip/galaxy2_driver_blob.h
+    src/rip/game_profiles.cpp
     src/rip/jaudio.cpp
+    src/rip/jaudio.h
     src/rip/jaudio_driver_blob.h
+    src/rip/jaudio_profiles.cpp
     src/rip/jungle_beat_driver_blob.h
     src/rip/nw4r.cpp
     src/rip/pikmin_driver_blob.h
     src/rip/pikmin2_driver_blob.h
-    src/rip/profiles.cpp
+    src/rip/profiles.h
     src/rip/rip.cpp
     src/rip/rip.h
     src/rip/sound_libraries.h
 )
-target_link_libraries(wsf_rip PUBLIC wsf_format wsf_nw4r ntdlib::disc ntdlib::flipper ntdlib::jaudio xsflib::rip
+target_link_libraries(wsf_rip PUBLIC wsf_format ntdlib::rvl_snd ntdlib::disc ntdlib::flipper ntdlib::jaudio xsflib::rip
                               PRIVATE ntdlib::disc_containers)
 target_compile_options(wsf_rip PRIVATE ${WSF_WARNINGS})
 
@@ -133,7 +93,7 @@ add_library(wsf_player STATIC
     src/wsf/player.h
 )
 find_package(Threads REQUIRED)
-target_link_libraries(wsf_player PUBLIC wsf_format wsf_nw4r wsf_wii xsflib::player Threads::Threads)
+target_link_libraries(wsf_player PUBLIC wsf_format ntdlib::rvl_snd wsf_wii xsflib::player Threads::Threads)
 target_compile_options(wsf_player PRIVATE ${WSF_WARNINGS})
 
 add_executable(wsfplay src/cli/wsfplay.cpp)
@@ -148,7 +108,14 @@ add_library(wsf_jaudio_analysis STATIC src/rip/jaudio_analysis.cpp src/rip/jaudi
 target_link_libraries(wsf_jaudio_analysis PUBLIC wsf_rip PRIVATE wsf_player)
 target_compile_options(wsf_jaudio_analysis PRIVATE ${WSF_WARNINGS})
 
-add_executable(wsfrip src/cli/wsfrip.cpp)
+add_executable(wsfrip
+    src/cli/archive_rip.cpp
+    src/cli/archive_rip.h
+    src/cli/jaudio_games.cpp
+    src/cli/jaudio_games.h
+    src/cli/wsfrip.cpp
+    src/cli/wsfrip.h
+)
 # wsfrip rips on several threads (--jobs). glibc before 2.34 keeps threads in a separate library.
 target_link_libraries(wsfrip PRIVATE wsf_jaudio_analysis wsf_rip xsflib::cli xsflib::rip Threads::Threads)
 target_compile_options(wsfrip PRIVATE ${WSF_WARNINGS})
@@ -184,16 +151,12 @@ if (WSF_TESTS)
 
     # The unit tests: wsf_<name>_test from tests/<name>_test.cpp, registered as wsf_<name>. The tests that build sound
     # archives use ntdlib's builders (ntdlib::testing).
-    xsflib_add_project_test(wsf ax wsf_ax)
     xsflib_add_project_test(wsf format wsf_format)
-    xsflib_add_project_test(wsf nw4r wsf_nw4r ntdlib::testing)
     xsflib_add_project_test(wsf rip wsf_rip ntdlib::testing)
 
     # The tools report the version they were built as.
-    string(REPLACE "." "\\." version_pattern ${wsf_VERSION})
     foreach (tool wsfrip wsfplay)
-        add_test(NAME version_${tool} COMMAND ${tool} --version)
-        set_tests_properties(version_${tool} PROPERTIES PASS_REGULAR_EXPRESSION "^${tool} ${version_pattern}[\r\n]*$")
+        xsflib_add_version_test(${tool} VERSION ${wsf_VERSION} NAME version_${tool})
     endforeach()
 
     # Load local_tests.cmake from each immediate subdirectory to register tests that use locally supplied files.

@@ -87,7 +87,16 @@ than other games' rips. A slow computer may not play them in real time. The two 
 each of the player's voices once more in Luigi's voice. That rip's name ends in `_Luigi`. A voice that plays the same
 waves for both players gets one rip. Game mode also plays New Play Control! Donkey Kong Jungle Beat (USA), another
 JAudio2 game. Its rips require WSF 1.4.0 or later. The game plays many of its effects in the chords of the music. A rip
-plays each such effect over a stage's music as the game does. The music stays silent. Archive mode doesn't play JAudio2.
+plays each such effect over a stage's music as the game does. The music stays silent. The game also adds layers to its
+music as you play: a combo, a flight with a Helibird and each part of a boss fight turn more tracks on or change them. A
+rip of Jungle Beat contains each piece as the game starts it, and 102 variants of 44 pieces, one for each later state. A
+variant is named after the piece and what sets its state, for example `JA_BGM_MAIN_01_combo1` and `_combo2` for the
+layers of a combo, `_helibird` for a flight with a Helibird, `_round2` and `_change` for a boss's second round and the
+change before it, and `_underwater` for TropicalCoast's music while DK swims below. Each variant plays its state from
+the start of the piece. The game moves from one state to the next with a short fade, and the rips leave out those
+changes. The states are those of the GameCube release, plus `JA_BGM_COURSE_SELECT_state1`, the map's music with two
+tracks off. The specification, `docs/wsf.md`, lists the states and the stages that play each piece. Archive mode doesn't
+play JAudio2.
 `wsfrip` therefore can't rip another JAudio2 game, or a release of these games that isn't listed. It stops with an
 error that says so.
 
@@ -130,6 +139,27 @@ encrypted or damaged.
 Both tools accept multiple inputs and continue if one fails. A nonexistent input path stops the command before it writes
 any files. For example, `wsfrip game.rvz` writes `game_wsf/`. `wsfplay game_wsf/*/*.miniwsf` then renders every sequence
 in it. The rips of a JAudio game go in `game_wsf/` itself. `--version` shows a tool's version.
+
+### Ripping faster
+
+Finding the length of each sequence takes most of the time of a rip. `wsfrip` plays every sequence until it ends or
+starts to repeat, for 10 minutes at most. A sound effect that loops for as long as the game keeps it going, such as wind
+or a machine, often plays the full 10 minutes. In a JAudio game, such as Super Mario Galaxy, a sound may also play once
+before that, to find the waves it uses.
+
+- `--bgm` rips only the music. It's the quickest way to rip a game's soundtrack.
+- `--only REGEX` rips only the sounds whose labels match. For example, `--only BOSS` rips the sounds whose labels
+  contain `BOSS`. `--list` shows a JAudio game's labels.
+- `--archive PATH` rips only one of a game's sound archives. `--list` shows them.
+- `--jobs N` sets how many sequences play at once. The default is the number of CPU threads. That's the fastest
+  setting.
+- `--no-length` skips the length analysis. The rips then have no length or fade tags, and a player plays each one for
+  its default length. Then only the sequences at a volume of 0 are skipped.
+
+Dropping a disc image on `wsfrip` rips everything. To use these options, run `wsfrip` from a command prompt or a
+terminal:
+
+    wsfrip --bgm "Super Mario Galaxy.rvz"
 
 ### Downloads
 
@@ -182,9 +212,6 @@ Windows, use the commands above.
 ## Layout
 
 ```
-src/ax/       AX's CPU side, and the exchange with its microcode
-src/axfx/     the models of the SDK's effects for AX's aux buses (AXFX)
-src/nw4r/     the model of nw4r::snd that plays archive mode
 src/wii/      the Wii for game mode: its hardware and IOS
 src/wsf/      the format and the player
 src/rip/      the ripper: the parts that every game shares, the game profiles, a file for each sound library
@@ -202,7 +229,8 @@ tests/        ctest suites
 xsflib holds the PSF container, playback and the tools' frames. xsflib's CMake helpers make the Windows programs'
 version resources and manifests, the macOS droplet apps, the foobar2000 component and the XMPlay plugin. ntdlib holds
 the disc reader, the Broadway CPU, the hardware that the GameCube and the Wii share (the DSP that runs AX's microcode,
-its interface, EXI, and the processor and audio interfaces) and the sound archive readers.
+its interface, EXI, and the processor and audio interfaces) and the sound archive readers. It also holds the models
+that archive mode plays on: AX's CPU side, the effects on AX's aux buses (AXFX) and NW4R SND.
 
 The drivers run on the emulated Wii. `driver/build.py` builds them for PowerPC and requires a clang with the PowerPC
 target. The drivers' images are committed in `src/rip/` as `driver_blob.h` (NW4R SND), `jaudio_driver_blob.h` (Twilight

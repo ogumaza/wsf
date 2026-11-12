@@ -15,7 +15,7 @@
 //   --list           list the game's sound archives, or a JAudio game's sounds (and a JAudio2 game's sections), and
 //                    whether it has a driver profile, then stop
 //   --mode game|archive
-//                    game mode runs the game's code and requires a driver profile for the game (src/rip/profiles.cpp).
+//                    game mode runs the game's code and requires a driver profile for the game (src/rip/profiles.h).
 //                    It's the default when a profile exists. Archive mode plays the sound archives with WSF's model of
 //                    the SDK's sound player instead.
 //   --microcode PATH the game code for a sound archive: the main.dol of the game that the archive comes from, the
@@ -32,9 +32,9 @@
 //   --suffix TEXT    archive mode: add TEXT to each rip's title and file name. Rips of one sound in several
 //                    arrangements can then share a folder.
 //   --only REGEX     rip only sounds whose label matches (ECMAScript regex)
-//   --bgm            rip only the music (rip::IsMusic): sequences labelled as BGM, or that play on a music player. In a
-//                    JAudio2 game, the sounds labelled as BGM or in the section named BGM. In a JAudio1 game, every
-//                    piece of music.
+//   --bgm            rip only the music (ntdlib::rsar::IsMusic): sequences labelled as BGM, or that play on a music
+//                    player. In a JAudio2 game, the sounds labelled as BGM or in the section named BGM. In a JAudio1
+//                    game, every piece of music.
 //   --no-length      skip length analysis (no length or fade tags, only the sequences at a volume of 0 are found to
 //                    make no sound, and every JAudio sound is taken to start)
 //   --jobs N         the number of length analyses run in parallel (default: the number of CPU threads, at most 8 in a
@@ -50,6 +50,8 @@
 // inputs are ripped one after another. An input that fails doesn't stop the rest. Files dropped on the program become
 // inputs.
 
+#include "cli/wsfrip.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -57,11 +59,8 @@
 #include <exception>
 #include <filesystem>
 #include <functional>
-#include <map>
 #include <optional>
-#include <regex>
 #include <set>
-#include <span>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -69,36 +68,31 @@
 
 #include "ntdlib/disc/cx.h"
 #include "ntdlib/disc/game.h"
-#include "ntdlib/flipper/wave_list.h"
-#include "ntdlib/jaudio/wave_system.h"
 #include "ntdlib/rsar/formats.h"
+#include "ntdlib/rvl/snd/rsar_options.h"
 #include "ntdlib/sound_build.h"
 #include "xsflib/ascii.h"
 #include "xsflib/binary.h"
 #include "xsflib/cli/rip.h"
-#include "xsflib/files.h"
 #include "xsflib/psf/psf.h"
 #include "xsflib/rip/file_names.h"
 #include "xsflib/rip/tool.h"
 #include "xsflib/sha1.h"
 #include "xsflib/text.h"
 
-#include "nw4r/arrangement.h"
-#include "nw4r/effect_setup.h"
-#include "nw4r/rsar_options.h"
-#include "nw4r/util.h"
-#include "rip/jaudio_analysis.h"
-#include "rip/rip.h"
+#include "cli/archive_rip.h"
+#include "cli/jaudio_games.h"
+#include "rip/jaudio.h"
+#include "rip/profiles.h"
 #include "wsf/format.h"
+#include "wsf/models.h"
 
-using namespace wsf;
-namespace fs = std::filesystem;
-
+namespace wsf::cli
+{
 namespace
 {
 
-// The file name for AX's microcode in a rip. The microcode comes from the game's main.dol.
-constexpr char kMicrocodeName[] = "ax_microcode.bin";
+namespace fs = std::filesystem;
 
 // The most that a compressed main program may decompress to: the Wii's memory, 24 MiB of MEM1 and 64 MiB of MEM2.
 constexpr std::size_t kMaxMainProgramSize = std::size_t{88} << 20;
@@ -183,17 +177,6 @@ constexpr char kUsage[] =
     "  --version            show the version\n"
     "  -h, --help           show this help\n";
 
-// What WSF's model reads from a game's main.dol: AX's microcode and the game's build of NW4R SND. The model follows
-// that build. Archive mode plays the model, and the length analyses of both modes run it. The game's effect profile
-// gives the effects that both modes play.
-struct GameCode
-{
-    ntdlib::Microcode microcode;
-    nw4r::SndBuild build;
-    std::string dol_sha1; // the main.dol's SHA-1, for the driver profile and the notes
-    std::optional<rip::EffectProfile> effect_profile;
-};
-
 // What WSF's model reads from `dol`, the main.dol of the game with the ID `game_id`, or nothing if `dol` holds no AX
 // microcode. A loose main.dol has no game ID.
 std::optional<GameCode> GameCodeOf(const std::vector<uint8_t>& dol, const std::string& game_id)
@@ -218,736 +201,6 @@ void NoteNoEffectProfile(const GameCode& code)
                      "note: WSF has no effect profile for this game: its rips play without the game's reverb\n"
                      "      and other effects\n");
     }
-}
-
-// RipArchive's result when the model can't drive the game's AX microcode.
-constexpr int kMicrocodeRejected = -2;
-
-// The rip frame's options, --microcode, and the options that arrange the sequences in archive mode.
-struct Options : xsflib::cli::RipOptions
-{
-    // The main.dol from --microcode or from the inputs: its path, and what WSF's model reads from it. Only loose sound
-    // archives use them.
-    std::string microcode_file;
-    std::optional<GameCode> microcode;
-
-    // --tracks, --tempo (its text and its ratio), --var and --suffix.
-    std::optional<uint16_t> tracks;
-    std::string tempo_text;
-    std::optional<float> tempo;
-    xsflib::psf::Variables variables;
-    std::string suffix;
-
-    // The options among --tracks, --tempo, --var and --suffix that were given, with the verb for a message: "--tempo
-    // is", "--tracks and --tempo are". Empty if none was.
-    std::string ArchiveOptionsGiven() const
-    {
-        std::vector<std::string> given;
-        if (tracks)
-        {
-            given.emplace_back("--tracks");
-        }
-        if (tempo)
-        {
-            given.emplace_back("--tempo");
-        }
-        if (!variables.empty())
-        {
-            given.emplace_back("--var");
-        }
-        if (!suffix.empty())
-        {
-            given.emplace_back("--suffix");
-        }
-
-        std::string text;
-        for (std::size_t i = 0; i < given.size(); i++)
-        {
-            text += (i == 0 ? "" : i + 1 == given.size() ? " and " : ", ") + given[i];
-        }
-
-        return given.empty() ? text : text + (given.size() == 1 ? " is" : " are");
-    }
-
-    // Whether --tracks, --tempo or --var was given.
-    bool Arranged() const
-    {
-        return tracks || tempo || !variables.empty();
-    }
-
-    // The arrangement that --tracks, --tempo and --var give.
-    nw4r::Arrangement ToArrangement() const
-    {
-        nw4r::Arrangement arrangement;
-        arrangement.tracks = tracks.value_or(arrangement.tracks);
-        arrangement.tempo_ratio = tempo.value_or(arrangement.tempo_ratio);
-        arrangement.variables = variables;
-
-        return arrangement;
-    }
-
-    // The tags that --tracks, --tempo and --var write into each mini.
-    void AddArrangementTags(Tags& tags) const
-    {
-        if (tracks)
-        {
-            tags[kTracksTag] = FormatTracks(*tracks);
-        }
-        if (tempo)
-        {
-            tags[kTempoTag] = tempo_text;
-        }
-        if (!variables.empty())
-        {
-            tags[kVariablesTag] = xsflib::psf::FormatVariables(variables);
-        }
-    }
-};
-
-struct Job
-{
-    uint32_t index;
-    std::string label;
-    std::optional<rip::Timing> timing;
-    std::optional<rip::SoundData> data; // game mode: what the driver loads for the sound
-
-    // Archive mode: the sounds that the rip plays, in the order in which they start. A piece whose channels the game
-    // plays as separate sequences has all of them (see rip::FindPieces), the first at `index`. Empty in game mode.
-    std::vector<uint32_t> sounds;
-
-    // The effect variant that the rip plays in (see nw4r::EffectVariant), by its place in the profile's variants, or -1
-    // for the plain rip.
-    int variant = -1;
-
-    // The sounds that the rip plays: `index` alone in game mode.
-    std::vector<uint32_t> Sounds() const
-    {
-        return sounds.empty() ? std::vector<uint32_t>{index} : sounds;
-    }
-};
-
-// The rips of the jobs in `jobs` that play one sound of a variant of `effects`, for each variant in turn. Each gets the
-// variant's name after its label.
-std::vector<Job> VariantJobs(const std::vector<Job>& jobs, const nw4r::ArchiveEffects& effects)
-{
-    std::vector<Job> found;
-    for (std::size_t v = 0; v < effects.variants.size(); v++)
-    {
-        const nw4r::EffectVariant& variant = effects.variants[v];
-        for (const Job& job : jobs)
-        {
-            const std::vector<uint32_t> sounds = job.Sounds();
-            if (sounds.size() == 1 &&
-                std::find(variant.sounds.begin(), variant.sounds.end(), sounds.front()) != variant.sounds.end())
-            {
-                Job rip = job;
-                rip.label += variant.name;
-                rip.timing.reset();
-                rip.variant = static_cast<int>(v);
-                found.push_back(rip);
-            }
-        }
-    }
-
-    return found;
-}
-
-// A count and its noun: "1 sound", "2 sounds".
-std::string Counted(std::size_t count, const std::string& noun)
-{
-    return std::to_string(count) + " " + noun + (count == 1 ? "" : "s");
-}
-
-// Length analysis runs every selected sequence through the model and AX's microcode on the DSP, in `arrangement`. The
-// sounds are independent. The analysis spreads them over several threads. Each sequence of a piece is measured alone,
-// with the effects of the piece's first sound. The piece then gets the latest end (rip::TimingOfPiece).
-void AnalyzeLengths(std::vector<Job>& jobs, const ntdlib::rsar::SoundArchive& archive,
-                    const std::vector<uint8_t>& archive_bytes, const GameCode& code,
-                    const nw4r::Arrangement& arrangement, const nw4r::ArchiveEffects& effects, unsigned threads)
-{
-    struct Measure
-    {
-        uint32_t index;
-        uint32_t effects_sound;
-        std::string label; // for the warning of a failed analysis
-        std::optional<rip::Timing> timing;
-    };
-
-    std::vector<Measure> measures;
-    for (const Job& job : jobs)
-    {
-        const std::vector<uint32_t> sounds = job.Sounds();
-        for (const uint32_t sound : sounds)
-        {
-            const std::string& label = sounds.size() > 1 ? archive.Sounds()[sound].name : job.label;
-            measures.push_back({sound, sounds.front(), label, std::nullopt});
-        }
-    }
-
-    const rip::LengthAnalyzer analyzer(archive_bytes, code.microcode, code.build, arrangement, effects);
-    const auto analyze = [&analyzer](Measure& measure)
-    {
-        measure.timing = analyzer.Analyze(measure.index, measure.effects_sound);
-
-        return true;
-    };
-    xsflib::cli::AnalyzeLengths(measures, threads, analyze,
-                                {.out_of_memory = "out of memory during length analysis; try fewer --jobs"});
-
-    std::size_t next = 0;
-    for (Job& job : jobs)
-    {
-        std::vector<std::optional<rip::Timing>> timings;
-        for (std::size_t i = job.Sounds().size(); i > 0; i--)
-        {
-            timings.push_back(measures[next++].timing);
-        }
-
-        job.timing = rip::TimingOfPiece(timings);
-    }
-}
-
-// The sequences that --only and --bgm pick.
-std::vector<Job> SelectSounds(const ntdlib::rsar::SoundArchive& archive, const Options& o)
-{
-    std::vector<Job> jobs;
-    const auto& sounds = archive.Sounds();
-    for (std::size_t i = 0; i < sounds.size(); i++)
-    {
-        // Streams are out of scope, and wave sounds aren't ripped yet.
-        const auto index = static_cast<uint32_t>(i);
-        if (sounds[i].type == ntdlib::rsar::SoundType::kSequence && std::regex_search(sounds[i].name, o.only) &&
-            (!o.bgm || rip::IsMusic(archive, index)))
-        {
-            jobs.push_back({index, sounds[i].name, std::nullopt, std::nullopt, {}});
-        }
-    }
-
-    return jobs;
-}
-
-// Archive mode: the sequences that --only and --bgm pick. A piece that the game plays as separate sequences makes one
-// job (see rip::FindPieces). --only picks it by its name or by any of its sequences' labels, and --bgm by any of its
-// sequences. A sequence of a piece makes no job of its own.
-std::vector<Job> SelectArchiveSounds(const ntdlib::rsar::SoundArchive& archive, const Options& o)
-{
-    const auto& sounds = archive.Sounds();
-    const std::vector<rip::Piece> pieces = rip::FindPieces(archive);
-    std::vector<bool> in_piece(sounds.size(), false);
-    for (const rip::Piece& piece : pieces)
-    {
-        for (const uint32_t sound : piece.sounds)
-        {
-            in_piece[sound] = true;
-        }
-    }
-
-    std::vector<Job> jobs;
-    const auto select =
-        [&archive, &sounds, &o, &jobs](uint32_t index, const std::string& label, const std::vector<uint32_t>& members)
-    {
-        bool matches = std::regex_search(label, o.only);
-        bool music = false;
-        for (const uint32_t sound : members)
-        {
-            matches = matches || std::regex_search(sounds[sound].name, o.only);
-            music = music || rip::IsMusic(archive, sound);
-        }
-
-        if (matches && (!o.bgm || music))
-        {
-            jobs.push_back({index, label, std::nullopt, std::nullopt, members});
-        }
-    };
-
-    for (std::size_t i = 0; i < sounds.size(); i++)
-    {
-        // Streams are out of scope, and wave sounds aren't ripped yet. A piece's jobs come at its first sound.
-        const auto index = static_cast<uint32_t>(i);
-        if (sounds[i].type != ntdlib::rsar::SoundType::kSequence)
-        {
-            continue;
-        }
-
-        if (!in_piece[i])
-        {
-            select(index, sounds[i].name, {index});
-            continue;
-        }
-
-        for (const rip::Piece& piece : pieces)
-        {
-            if (piece.sounds.front() == index)
-            {
-                select(index, piece.name, piece.sounds);
-            }
-        }
-    }
-
-    return jobs;
-}
-
-// Reports that --only or --bgm selected no sound. This is an error. Nothing is written.
-int NoSoundMatches(const Options& o)
-{
-    if (o.only_text.empty())
-    {
-        std::fprintf(stderr, "error: no music sequences found (--bgm)\n");
-    }
-    else
-    {
-        std::fprintf(stderr, "error: no %s matches '%s'\n", o.bgm ? "music" : "sound", o.only_text.c_str());
-    }
-
-    return 1;
-}
-
-// Takes out the sequences whose volume in the archive is 0, and the pieces whose sequences all have a volume of 0. They
-// make no sound. The game's sound library multiplies everything that a sound plays by its volume. Returns the number
-// taken out.
-std::size_t SkipMuted(std::vector<Job>& jobs, const ntdlib::rsar::SoundArchive& archive)
-{
-    const auto muted = [&archive](const Job& job)
-    {
-        const std::vector<uint32_t> sounds = job.Sounds();
-        if (std::any_of(sounds.begin(), sounds.end(),
-                        [&archive](uint32_t sound) { return archive.Sounds()[sound].volume != 0; }))
-        {
-            return false;
-        }
-
-        std::fprintf(stderr, "skipped %s: it makes no sound (volume 0)\n", job.label.c_str());
-
-        return true;
-    };
-    return std::erase_if(jobs, muted);
-}
-
-// Takes out the sequences that the length analysis found never sound. Returns the number taken out.
-template <typename J>
-std::size_t SkipSilent(std::vector<J>& jobs)
-{
-    const auto silent = [](const J& job)
-    {
-        if (!job.timing || !job.timing->silent)
-        {
-            return false;
-        }
-
-        std::fprintf(stderr, "skipped %s: it makes no sound\n", job.label.c_str());
-
-        return true;
-    };
-    return std::erase_if(jobs, silent);
-}
-
-// Takes out the sequences whose data isn't all in the archive, and the pieces with such a sequence. They would play
-// with missing instruments or channels. Returns the number taken out.
-std::size_t SkipIncomplete(std::vector<Job>& jobs, const ntdlib::rsar::SoundArchive& archive)
-{
-    const auto incomplete = [&archive](const Job& job)
-    {
-        const std::vector<uint32_t> sounds = job.Sounds();
-        std::string what;
-        for (const uint32_t sound : sounds)
-        {
-            const std::vector<std::string> missing = rip::MissingData(archive, sound);
-            std::string list;
-            for (std::size_t i = 0; i < missing.size(); i++)
-            {
-                list += (i ? ", " : "") + missing[i];
-            }
-
-            // A piece names each sequence whose data is missing.
-            if (!list.empty() && sounds.size() > 1)
-            {
-                list = archive.Sounds()[sound].name + " (" + list + ")";
-            }
-
-            if (!list.empty())
-            {
-                what += (what.empty() ? "" : "; ") + list;
-            }
-        }
-
-        if (what.empty())
-        {
-            return false;
-        }
-
-        std::fprintf(stderr, "skipped %s: not in this archive: %s\n", job.label.c_str(), what.c_str());
-
-        return true;
-    };
-    return std::erase_if(jobs, incomplete);
-}
-
-// Game mode: finds what the driver loads for each sequence. The driver loads the groups that hold the sequence and its
-// bank. Takes out the sequences that no group holds. Returns the number taken out.
-std::size_t SkipUngrouped(std::vector<Job>& jobs, const ntdlib::rsar::SoundArchive& archive)
-{
-    for (Job& job : jobs)
-    {
-        job.data = rip::FindSoundData(archive, job.index);
-    }
-
-    const auto ungrouped = [](const Job& job)
-    {
-        if (job.data)
-        {
-            return false;
-        }
-
-        std::fprintf(stderr, "skipped %s: no group in the archive holds its sequence, or its bank\n",
-                     job.label.c_str());
-
-        return true;
-    };
-    return std::erase_if(jobs, ungrouped);
-}
-
-// Takes out the sequences at a volume of 0. With the length analysis on, measures the others in `arrangement` with
-// `effects`, and takes out those that never sound. Returns the number taken out.
-std::size_t MeasureSequences(std::vector<Job>& jobs, const ntdlib::rsar::SoundArchive& archive,
-                             const std::vector<uint8_t>& archive_bytes, const GameCode& code,
-                             const nw4r::Arrangement& arrangement, const nw4r::ArchiveEffects& effects,
-                             const Options& o)
-{
-    std::size_t silent = SkipMuted(jobs, archive);
-    if (o.lengths && !jobs.empty())
-    {
-        AnalyzeLengths(jobs, archive, archive_bytes, code, arrangement, effects, o.jobs);
-        silent += SkipSilent(jobs);
-    }
-
-    return silent;
-}
-
-// Measures the rips of `variant_jobs` (see VariantJobs) and adds them to `jobs`, after the plain rips. Each variant's
-// rips are measured with the variant's effects added to `effects`, and in the variant's arrangement. A variant without
-// an arrangement takes `arrangement`. Returns the number of rips taken out.
-std::size_t MeasureVariants(std::vector<Job>& jobs, const std::vector<Job>& variant_jobs,
-                            const ntdlib::rsar::SoundArchive& archive, const std::vector<uint8_t>& archive_bytes,
-                            const GameCode& code, const nw4r::Arrangement& arrangement,
-                            const nw4r::ArchiveEffects& effects, const Options& o)
-{
-    std::size_t silent = 0;
-    for (std::size_t v = 0; v < effects.variants.size(); v++)
-    {
-        std::vector<Job> of_variant;
-        for (const Job& job : variant_jobs)
-        {
-            if (job.variant == static_cast<int>(v))
-            {
-                of_variant.push_back(job);
-            }
-        }
-
-        const nw4r::EffectVariant& variant = effects.variants[v];
-        const nw4r::ArchiveEffects with = nw4r::WithVariant(effects, variant);
-        silent += MeasureSequences(of_variant, archive, archive_bytes, code, variant.arrangement.value_or(arrangement),
-                                   with, o);
-        jobs.insert(jobs.end(), of_variant.begin(), of_variant.end());
-    }
-
-    return silent;
-}
-
-// Writes a rip's library `lib` into `out_dir`, with the name that `names` gives it from `base`. An earlier rip's
-// library there stays (see xsflib::rip::FileNames::LibraryIn). Returns the name. For a library that can't be written,
-// prints the error and returns nothing.
-std::optional<std::string> WriteLibrary(const fs::path& out_dir, xsflib::rip::FileNames& names, const std::string& base,
-                                        const std::vector<uint8_t>& lib)
-{
-    const std::string lib_name = names.LibraryIn(out_dir, base, lib);
-    fs::create_directories(out_dir);
-    if (!xsflib::rip::WriteFile(out_dir / xsflib::PathFromUtf8(lib_name), lib))
-    {
-        std::fprintf(stderr, "error: can't write %s\n", lib_name.c_str());
-        return std::nullopt;
-    }
-
-    std::fprintf(stderr, "wrote %s (%zu bytes)\n", lib_name.c_str(), lib.size());
-
-    return lib_name;
-}
-
-// Writes a rip's set into `out_dir`: the library `lib` (see WriteLibrary), then a mini for each of `jobs` with the tags
-// `tags`. `build(lib_name, job, tags)` makes a job's mini. Then prints how many minis the rip of `source` wrote, and
-// `skipped_text` (see xsflib::cli::SkippedText). Returns that number, or -1 after printing an error.
-template <typename J, typename Build>
-int WriteSet(const fs::path& out_dir, xsflib::rip::FileNames& names, const std::string& lib_base,
-             const std::vector<uint8_t>& lib, const std::vector<J>& jobs, const Tags& tags, const Build& build,
-             const std::string& source, const std::string& skipped_text)
-{
-    const std::optional<std::string> lib_name = WriteLibrary(out_dir, names, lib_base, lib);
-    if (!lib_name)
-    {
-        return -1;
-    }
-
-    const auto build_mini = [&build, &lib_name](const J& job, Tags& mini_tags)
-    {
-        return build(*lib_name, job, mini_tags);
-    };
-    const int count = xsflib::cli::WriteMinis(out_dir, names, jobs, tags, "wsf_sound", build_mini);
-    if (count >= 0)
-    {
-        std::fprintf(stderr, "%s: %s%s\n", source.c_str(), Counted(count, "miniwsf file").c_str(),
-                     skipped_text.c_str());
-    }
-
-    return count;
-}
-
-// Rips one sound archive in archive mode into `out_dir`. `names` is the registry of file names for `out_dir`. Adds the
-// number of sounds that --only selected to `matched`. Returns the number of .miniwsf files written, kMicrocodeRejected
-// if the model can't drive the game's AX microcode, or -1 on another error.
-int RipArchive(const fs::path& out_dir, xsflib::rip::FileNames& names, const std::string& lib_base,
-               const std::string& archive_path, const std::vector<uint8_t>& archive_bytes, const GameCode& code,
-               const std::string& game_name, const Options& o, std::size_t& matched)
-{
-    std::optional<ntdlib::rsar::SoundArchive> archive;
-    try
-    {
-        archive = ntdlib::rsar::SoundArchive::Load(archive_bytes, wsf::nw4r::kRsarOptions);
-    }
-    catch (const std::exception& e)
-    {
-        std::fprintf(stderr, "error: %s: %s\n", archive_path.c_str(), e.what());
-        return -1;
-    }
-
-    if (archive->Truncated())
-    {
-        std::fprintf(stderr, "warning: %s is truncated: sounds whose data lies past its end are skipped\n",
-                     archive_path.c_str());
-    }
-
-    std::vector<Job> jobs = SelectArchiveSounds(*archive, o);
-    matched += jobs.size();
-    if (jobs.empty())
-    {
-        return 0;
-    }
-
-    if (!rip::MicrocodeWorks(code.microcode, *archive))
-    {
-        std::fprintf(stderr,
-                     "error: %s: archive mode can't play this game. Its AX microcode rejects the command lists\n"
-                     "       that WSF's model makes. The game links a build of AX that the model doesn't follow.\n",
-                     archive_path.c_str());
-        return kMicrocodeRejected;
-    }
-
-    const std::size_t skipped = SkipIncomplete(jobs, *archive);
-
-    // --tracks replaces the tracks that the game plays of a sound. The tag does the same in the player. --tracks,
-    // --tempo and --var rip the arrangement that they give. The rips then leave out the variants that have an
-    // arrangement.
-    nw4r::ArchiveEffects effects = rip::FindEffects(code.effect_profile, archive_path, *archive);
-    if (o.Arranged())
-    {
-        const auto arranged = [](const nw4r::EffectVariant& variant)
-        {
-            return variant.arrangement.has_value();
-        };
-        std::erase_if(effects.variants, arranged);
-    }
-
-    nw4r::ArchiveEffects analyzed = effects;
-    if (o.tracks)
-    {
-        analyzed.tracks.clear();
-    }
-
-    // The rips of a sound in an effect variant follow its plain rips. A variant without an arrangement takes the
-    // options' arrangement.
-    const std::vector<Job> variant_jobs = VariantJobs(jobs, effects);
-    std::size_t silent = MeasureSequences(jobs, *archive, archive_bytes, code, o.ToArrangement(), analyzed, o);
-    silent += MeasureVariants(jobs, variant_jobs, *archive, archive_bytes, code, o.ToArrangement(), analyzed, o);
-
-    const std::string skipped_text = xsflib::cli::SkippedText(skipped, "data outside the archive", silent, "sequence");
-    if (jobs.empty())
-    {
-        std::fprintf(stderr, "%s: nothing to rip%s\n", archive_path.c_str(), skipped_text.c_str());
-        return 0;
-    }
-
-    // The library keeps only the data that the ripped sequences play. A game's archive can hold hundreds of megabytes
-    // of sound effects and voices that a rip of its music doesn't play. A set whose minis play several sounds gets
-    // version 2 of the archive descriptor. Players of WSF 1.5.0 and older refuse it.
-    std::vector<uint32_t> indices;
-    uint32_t version = ArchiveDescriptor::kVersion;
-    for (const Job& job : jobs)
-    {
-        // A sound's rips in its variants play the plain rip's data.
-        for (const uint32_t sound : job.sounds)
-        {
-            if (std::find(indices.begin(), indices.end(), sound) == indices.end())
-            {
-                indices.push_back(sound);
-            }
-        }
-
-        if (job.sounds.size() > 1)
-        {
-            version = ArchiveDescriptor::kListVersion;
-        }
-    }
-
-    const Tags common = xsflib::cli::RipTags(o, game_name, "wsf", "archive");
-    const auto lib = rip::BuildArchiveLibrary(archive_path, rip::KeepSequenceData(*archive, indices), kMicrocodeName,
-                                              code.microcode, code.build, common, effects, version);
-
-    // The arrangement's tags go in the minis. The library then stays the same for every arrangement of its sounds.
-    // --suffix goes in each mini's title and file name. The wsf_sound tag keeps the sound's label, or the labels of a
-    // piece's sequences.
-    Tags mini_tags = common;
-    o.AddArrangementTags(mini_tags);
-    for (Job& job : jobs)
-    {
-        job.label += o.suffix;
-    }
-
-    // The rip of a variant with effects or sends holds a descriptor with them. That descriptor takes the place of the
-    // library's. The mood effect and a send to the main mix require version 3. Players of WSF 1.7.0 and older refuse
-    // version 3. A variant's arrangement goes in the rip's tags.
-    const auto build_mini =
-        [&archive, &archive_path, &code, &effects, version](const std::string& lib_name, const Job& job, Tags tags)
-    {
-        std::string labels;
-        for (const uint32_t sound : job.sounds)
-        {
-            labels += (labels.empty() ? "" : ", ") + archive->Sounds()[sound].name;
-        }
-
-        tags["wsf_sound"] = labels;
-
-        std::optional<ArchiveDescriptor> descriptor;
-        if (job.variant >= 0)
-        {
-            const nw4r::EffectVariant& variant = effects.variants[static_cast<std::size_t>(job.variant)];
-            if (variant.arrangement)
-            {
-                for (const auto& [key, value] : ArrangementTags(*variant.arrangement))
-                {
-                    tags[key] = value;
-                }
-            }
-
-            if (!variant.setups.empty() || !variant.sends.empty())
-            {
-                const nw4r::ArchiveEffects with = nw4r::WithVariant(effects, variant);
-                const uint32_t mini_version =
-                    nw4r::RequiresMoodVersion(with) ? ArchiveDescriptor::kMoodVersion : version;
-                descriptor = rip::BuildArchiveDescriptor(archive_path, kMicrocodeName, code.microcode, code.build, with,
-                                                         mini_version);
-            }
-        }
-
-        // The variables that the game sets on a sound that rips alone, under those of --var or the variant's
-        // arrangement. The length analysis plays the same.
-        if (job.sounds.size() == 1)
-        {
-            rip::AddSoundVariables(effects, job.sounds.front(), tags);
-        }
-
-        return rip::BuildArchiveMini(job.sounds, lib_name, std::move(tags), descriptor);
-    };
-    return WriteSet(out_dir, names, lib_base, lib, jobs, mini_tags, build_mini, archive_path, skipped_text);
-}
-
-// Rips one of a game's sound archives in game mode into `out_dir`. `names` is the registry of file names for `out_dir`.
-// Adds the number of sounds that --only selected to `matched`. Returns the number of .miniwsf files written, or -1 on
-// an error.
-int RipArchiveInGameMode(const fs::path& out_dir, xsflib::rip::FileNames& names, const std::string& lib_base,
-                         const ntdlib::disc::GameFiles& game, const rip::GameProfile& profile,
-                         const std::string& archive_path, const std::vector<uint8_t>& archive_bytes,
-                         const GameCode& code, const std::string& game_name, const Options& o, std::size_t& matched)
-{
-    const auto archive = ntdlib::rsar::SoundArchive::Load(archive_bytes, wsf::nw4r::kRsarOptions);
-    std::vector<Job> jobs = SelectSounds(archive, o);
-    matched += jobs.size();
-    if (jobs.empty())
-    {
-        return 0;
-    }
-
-    const std::size_t skipped = SkipUngrouped(jobs, archive);
-
-    // Game mode rips a sound in a variant whose arrangement gives only the tracks that play. The driver silences the
-    // other tracks. It does the same for a sound whose tracks the profile gives (see rip::BuildMini). It sets no
-    // effects, sends, tempo or variables of a variant. The rips leave out the variants that have any.
-    nw4r::ArchiveEffects effects = rip::FindEffects(code.effect_profile, archive_path, archive);
-    const auto tracks_only = [](const nw4r::EffectVariant& variant)
-    {
-        return variant.setups.empty() && variant.sends.empty() && variant.arrangement &&
-               variant.arrangement->tempo_ratio == 1.0f && variant.arrangement->variables.empty();
-    };
-    std::erase_if(effects.variants, std::not_fn(tracks_only));
-
-    const std::vector<Job> variant_jobs = VariantJobs(jobs, effects);
-    std::size_t silent = MeasureSequences(jobs, archive, archive_bytes, code, {}, effects, o);
-    silent += MeasureVariants(jobs, variant_jobs, archive, archive_bytes, code, {}, effects, o);
-    const std::string skipped_text = xsflib::cli::SkippedText(skipped, "no group holds them", silent, "sequence");
-    if (jobs.empty())
-    {
-        std::fprintf(stderr, "%s: nothing to rip%s\n", archive_path.c_str(), skipped_text.c_str());
-        return 0;
-    }
-
-    // The library holds the data of the groups that the driver loads for the sounds. A sound's rips in its variants
-    // play the plain rip's data.
-    std::vector<uint32_t> indices;
-    for (const Job& job : jobs)
-    {
-        if (std::find(indices.begin(), indices.end(), job.index) == indices.end())
-        {
-            indices.push_back(job.index);
-        }
-    }
-
-    // A variant's rip gives the driver the variant's tracks for its sound. The library then requires the offsets that
-    // silence a track, even where the profile gives no sound's tracks.
-    const auto with_tracks = [&effects](const nw4r::EffectVariant& variant)
-    {
-        nw4r::ArchiveEffects found = nw4r::WithVariant(effects, variant);
-        for (const uint32_t sound : variant.sounds)
-        {
-            found.tracks.push_back({sound, variant.arrangement->tracks});
-        }
-
-        return found;
-    };
-    nw4r::ArchiveEffects library_effects = effects;
-    for (const nw4r::EffectVariant& variant : effects.variants)
-    {
-        const nw4r::ArchiveEffects with = with_tracks(variant);
-        library_effects.tracks.insert(library_effects.tracks.end(), with.tracks.begin(), with.tracks.end());
-    }
-
-    const Tags common = xsflib::cli::RipTags(o, game_name, "wsf", "game");
-    std::string error;
-    const auto lib = rip::BuildLibrary(game, profile, archive_path, archive, indices, common, &error, library_effects);
-    if (!lib)
-    {
-        std::fprintf(stderr, "error: %s\n", error.c_str());
-        return -1;
-    }
-
-    const auto build_mini =
-        [&effects, &code, &with_tracks](const std::string& lib_name, const Job& job, const Tags& tags)
-    {
-        if (job.variant < 0)
-        {
-            return rip::BuildMini(job.index, *job.data, lib_name, tags, effects, code.effect_profile);
-        }
-
-        const nw4r::EffectVariant& variant = effects.variants[static_cast<std::size_t>(job.variant)];
-        return rip::BuildMini(job.index, *job.data, lib_name, tags, with_tracks(variant), code.effect_profile);
-    };
-    return WriteSet(out_dir, names, lib_base, *lib, jobs, common, build_mini, archive_path, skipped_text);
 }
 
 // Lists a game's sound archives and their contents.
@@ -986,40 +239,6 @@ void ListArchives(const ntdlib::disc::GameFiles& game)
     }
 }
 
-// The profile in `profiles` of another release of the game with `game_id` (see rip::SameGame), or nullptr.
-template <typename Profile>
-const Profile* ProfileOfOtherRelease(const std::vector<Profile>& profiles, const std::string& game_id)
-{
-    for (const Profile& profile : profiles)
-    {
-        if (rip::SameGame(profile.game_id, game_id))
-        {
-            return &profile;
-        }
-    }
-
-    return nullptr;
-}
-
-// Names the driver profile that WSF has for another release of the game (see ProfileOfOtherRelease).
-void NoteOtherRelease(const std::string& profile_name)
-{
-    std::fprintf(stderr, "note: WSF's driver profile is for %s.\n", profile_name.c_str());
-}
-
-// The names of `profiles`, separated by commas.
-template <typename Profile>
-std::string ProfileNames(const std::vector<Profile>& profiles)
-{
-    std::string names;
-    for (const Profile& profile : profiles)
-    {
-        names += (names.empty() ? "" : ", ") + profile.name;
-    }
-
-    return names;
-}
-
 // Says where a profile comes from when it was derived from another release's (see rip::FindProfile).
 void NoteDerivedProfile(const rip::GameProfile& profile)
 {
@@ -1043,454 +262,6 @@ const rip::GameProfile* ProfileOfDol(const std::string& dol_sha1)
     }
 
     return nullptr;
-}
-
-// A JAudio game's sound to rip, and the wave groups that it plays, each (system << 16) | group.
-struct JAudioJob
-{
-    uint32_t index;    // the sound's place in the game's list of sounds
-    uint32_t sound_id; // the ID that the game passes to its sound library
-    std::string label;
-    std::optional<rip::Timing> timing;
-    std::vector<uint32_t> waves;
-    std::string start_error; // the player's message when the length pass can't start the sound
-
-    // The state that the driver gives a piece (rip::JAudioSound::piece_state).
-    ntdlib::flipper::z2::PieceState piece_state;
-
-    bool luigi = false;    // the sound's Luigi variant (rip::JAudioProfile::luigi_word)
-    bool as_mario = false; // a Luigi variant that looks up the same waves as its sound
-};
-
-// Takes out the Luigi variants that look up the same waves as their sounds (JAudioJob::as_mario). Their rips would
-// play as the sounds' rips do. Returns the number taken out.
-std::size_t SkipSameAsMario(std::vector<JAudioJob>& jobs)
-{
-    return std::erase_if(jobs, [](const JAudioJob& job) { return job.as_mario; });
-}
-
-// Takes out the sounds that the length pass couldn't start with their wave groups loaded. No player could start their
-// rips. Returns the number taken out.
-std::size_t SkipUnstartable(std::vector<JAudioJob>& jobs)
-{
-    const auto unstartable = [](const JAudioJob& job)
-    {
-        if (job.start_error.empty())
-        {
-            return false;
-        }
-
-        std::fprintf(stderr, "skipped %s: it can't start with its wave groups loaded (%s)\n", job.label.c_str(),
-                     job.start_error.c_str());
-
-        return true;
-    };
-    return std::erase_if(jobs, unstartable);
-}
-
-// A JAudio game's sounds that --only and --bgm pick. Streams are out of scope. A sound's number is its place in the
-// list without the sounds that share the number before them (rip::JAudioSound::shares_number). A sound of the profile's
-// group for Luigi (rip::JAudioProfile::luigi_word) is followed by its Luigi variant, labelled with "_Luigi", with the
-// same number. --only picks each of the two by its label.
-std::vector<JAudioJob> SelectJAudioSounds(const std::vector<rip::JAudioSound>& sounds,
-                                          const rip::JAudioProfile* profile, const Options& o)
-{
-    std::vector<JAudioJob> jobs;
-    uint32_t index = 0;
-    for (std::size_t i = 0; i < sounds.size(); i++)
-    {
-        const rip::JAudioSound& sound = sounds[i];
-        if (i > 0 && !sound.shares_number)
-        {
-            index++;
-        }
-
-        if (sound.stream || (o.bgm && !sound.music))
-        {
-            continue;
-        }
-
-        if (std::regex_search(sound.label, o.only))
-        {
-            jobs.push_back({index, sound.id, sound.label, std::nullopt, sound.waves, {}, sound.piece_state});
-        }
-
-        const std::string luigi = sound.label + "_Luigi";
-        if (profile && profile->luigi_word >= 0 && (sound.id >> 16) == profile->luigi_group &&
-            std::regex_search(luigi, o.only))
-        {
-            jobs.push_back({index, sound.id, luigi, std::nullopt, sound.waves, {}, sound.piece_state, true});
-        }
-    }
-
-    return jobs;
-}
-
-// Adds the disc's paths of the AW files that hold `groups` to `paths`, each path once. Returns false after printing an
-// error if one isn't on the disc.
-bool AddAwFiles(const ntdlib::disc::GameFiles& game, const rip::JAudioFiles& files,
-                const std::vector<ntdlib::jaudio::WaveSystem>& systems, std::span<const uint32_t> groups,
-                std::vector<std::string>& paths)
-{
-    std::string missing;
-    const std::optional<std::vector<std::string>> found = rip::FindAwFiles(game, files, systems, groups, &missing);
-    if (!found)
-    {
-        std::fprintf(stderr, "error: the disc has no %s\n", missing.c_str());
-        return false;
-    }
-
-    for (const std::string& path : *found)
-    {
-        if (std::find(paths.begin(), paths.end(), path) == paths.end())
-        {
-            paths.push_back(path);
-        }
-    }
-
-    return true;
-}
-
-// The name that the messages give the family of a JAudio game's sound library. Jac and AAF are kinds of JAudio1.
-const char* FamilyOf(const rip::JAudioProfile* profile)
-{
-    return rip::SoundLibraryOf(profile) == rip::JAudioLibrary::kJAudio2 ? "JAudio2" : "JAudio1";
-}
-
-// Lists a JAudio game's sounds, with the file that lists them: how many there are, how many of them are streams, and,
-// with `with_sections`, the sections of the name table.
-void ListJAudioSounds(const std::string& file, const std::vector<rip::JAudioSound>& sounds, bool with_sections)
-{
-    const auto is_stream = [](const rip::JAudioSound& sound)
-    {
-        return sound.stream;
-    };
-    const auto streams = std::count_if(sounds.begin(), sounds.end(), is_stream);
-    std::fprintf(stderr, "%s: %s, %zu of them streams\n", file.c_str(), Counted(sounds.size(), "sound").c_str(),
-                 static_cast<std::size_t>(streams));
-    if (!with_sections)
-    {
-        return;
-    }
-
-    std::map<std::string, std::size_t> sections;
-    for (const rip::JAudioSound& sound : sounds)
-    {
-        sections[sound.section]++;
-    }
-
-    for (const auto& [name, count] : sections)
-    {
-        std::fprintf(stderr, "  section %s: %s\n", name.empty() ? "(no name)" : name.c_str(),
-                     Counted(count, "sound").c_str());
-    }
-}
-
-// Reports that WSF has no driver profile for a JAudio2 game. Only game mode plays JAudio2. With `list`, the report is
-// --list's line. Otherwise the report is an error. Unless another release has a profile, the error names the games with
-// profiles.
-void ReportNoJAudioProfile(const std::string& game_id, bool list)
-{
-    const rip::JAudioProfile* other_release = ProfileOfOtherRelease(rip::KnownJAudioProfiles(), game_id);
-    if (list)
-    {
-        std::fprintf(stderr, "no driver profile for this %s: JAudio2 games rip in game mode only\n",
-                     other_release ? "release" : "game");
-    }
-    else if (other_release)
-    {
-        std::fprintf(stderr, "error: no driver profile for this release. JAudio2 games rip in game mode only.\n");
-    }
-    else
-    {
-        std::fprintf(stderr,
-                     "error: no driver profile for this game (known: %s). JAudio2 games rip in game mode only.\n",
-                     ProfileNames(rip::KnownJAudioProfiles()).c_str());
-    }
-
-    if (other_release)
-    {
-        NoteOtherRelease(other_release->name);
-    }
-}
-
-// The --list output for a JAudio game: its sounds (see ListJAudioSounds), then its profile, or why WSF has none. A Jac
-// game's pieces are files of its sequence archive. They have no sections.
-void ListJAudioGame(const std::string& game_id, const rip::JAudioFiles& files,
-                    const std::vector<rip::JAudioSound>& sounds, const rip::JAudioProfile* profile)
-{
-    const bool jac = rip::SoundLibraryOf(profile) == rip::JAudioLibrary::kJac;
-    ListJAudioSounds(jac ? files.archives.front() : files.baa, sounds, !jac);
-    if (profile)
-    {
-        std::fprintf(stderr, "profile: %s (game mode, %s)\n", profile->name.c_str(), FamilyOf(profile));
-    }
-    else
-    {
-        ReportNoJAudioProfile(game_id, true);
-    }
-}
-
-// Refuses a rip of a JAudio game for its options or the lack of a profile. The check comes before the rip parses the
-// start-up archive. Returns the exit code after the error, or nothing for a rip that can go on. --archive is a usage
-// error (exit code 2) and comes first. A game without a profile can't be ripped at all. The profile's error therefore
-// comes before the one for --mode archive.
-std::optional<int> RefuseJAudioRip(const Options& o, const rip::JAudioProfile* profile, const std::string& game_id)
-{
-    const char* const library = FamilyOf(profile);
-    if (!o.only_archive.empty())
-    {
-        std::fprintf(stderr,
-                     "error: --archive selects one of a game's NW4R SND sound archives, and this game's sound library "
-                     "is %s\n",
-                     library);
-        return 2;
-    }
-    if (const std::string given = o.ArchiveOptionsGiven(); !given.empty())
-    {
-        std::fprintf(stderr, "error: %s for archive mode, and this game's sound library is %s\n", given.c_str(),
-                     library);
-        return 2;
-    }
-    if (!profile)
-    {
-        ReportNoJAudioProfile(game_id, false);
-        return 1;
-    }
-    if (o.mode == "archive")
-    {
-        std::fprintf(stderr,
-                     "error: archive mode plays NW4R SND's sequences, and this game's sound library is %s. Leave out "
-                     "--mode archive.\n",
-                     library);
-        return 1;
-    }
-
-    return std::nullopt;
-}
-
-// Wave discovery, for the sounds in `jobs` with an empty list of groups: each plays on a library of the game's code and
-// the files at `paths`, and the waves that its notes look up give its groups. Returns false after the error for a
-// library that can't be built.
-bool DiscoverWaves(std::vector<JAudioJob>& jobs, const ntdlib::disc::GameFiles& game, const rip::JAudioProfile& profile,
-                   const std::vector<std::string>& paths, const std::vector<ntdlib::jaudio::WaveSystem>& systems,
-                   unsigned threads)
-{
-    const auto undiscovered = static_cast<std::size_t>(
-        std::count_if(jobs.begin(), jobs.end(), [](const JAudioJob& job) { return job.waves.empty(); }));
-    if (undiscovered == 0)
-    {
-        return true;
-    }
-
-    std::string error;
-    const auto base = rip::BuildJAudioLibrary(game, profile, paths, {}, &error);
-    if (!base)
-    {
-        std::fprintf(stderr, "error: %s\n", error.c_str());
-        return false;
-    }
-
-    const auto discover = [&](JAudioJob& job)
-    {
-        if (!job.waves.empty())
-        {
-            return false;
-        }
-
-        std::set<ntdlib::jaudio::WaveUse> found;
-        if (!rip::FindJAudioWaves(*base, profile, job.sound_id, found, &job.piece_state, job.luigi))
-        {
-            std::fprintf(stderr, "warning: the waves of %s can't be found; it plays without them\n", job.label.c_str());
-            return false;
-        }
-
-        // A Luigi variant that looks up the same waves as its sound plays as the sound does. It's left out
-        // (SkipSameAsMario).
-        if (job.luigi)
-        {
-            std::set<ntdlib::jaudio::WaveUse> mario;
-            if (rip::FindJAudioWaves(*base, profile, job.sound_id, mario, &job.piece_state) && mario == found)
-            {
-                job.as_mario = true;
-                return false;
-            }
-        }
-
-        job.waves = ntdlib::jaudio::WaveGroups(systems, {found.begin(), found.end()});
-        if (job.waves.size() > ntdlib::flipper::kMaxWaves)
-        {
-            std::fprintf(stderr, "warning: %s plays waves from %zu groups; it loads the first %u\n", job.label.c_str(),
-                         job.waves.size(), ntdlib::flipper::kMaxWaves);
-            job.waves.resize(ntdlib::flipper::kMaxWaves);
-        }
-
-        // The pass gives no timing. False keeps the runner from reporting a failed length analysis.
-        return false;
-    };
-    std::fprintf(stderr, "finding the wave groups of %s\n", Counted(undiscovered, "sound").c_str());
-    xsflib::cli::AnalyzeLengths(
-        jobs, threads, discover,
-        {.out_of_memory = "out of memory while finding the waves; try fewer --jobs", .progress = "searched"});
-
-    return true;
-}
-
-// Length analysis plays every sound in `jobs` on the rip's library `lib`, with its wave groups loaded. A sound that
-// can't start isn't analyzed: SkipUnstartable takes it out. A sound that looks up waves outside its groups gets a
-// warning.
-void AnalyzeLengths(std::vector<JAudioJob>& jobs, const std::vector<uint8_t>& lib, const rip::JAudioProfile& profile,
-                    const std::vector<ntdlib::jaudio::WaveSystem>& systems, unsigned threads)
-{
-    const auto analyze = [&](JAudioJob& job)
-    {
-        std::set<ntdlib::jaudio::WaveUse> played;
-        job.timing = rip::AnalyzeJAudioSound(lib, profile, job.sound_id, job.waves, &played, &job.start_error,
-                                             &job.piece_state, job.luigi);
-        if (!job.start_error.empty())
-        {
-            return false;
-        }
-
-        const std::vector<ntdlib::jaudio::WaveUse> waves(played.begin(), played.end());
-        const std::size_t missing = ntdlib::jaudio::MissingWaves(systems, job.waves, waves);
-        if (missing)
-        {
-            std::fprintf(stderr, "warning: %s looked up %s outside its wave groups\n", job.label.c_str(),
-                         Counted(missing, "wave").c_str());
-        }
-
-        return true;
-    };
-    xsflib::cli::AnalyzeLengths(jobs, threads, analyze,
-                                {.out_of_memory = "out of memory during length analysis; try fewer --jobs"});
-}
-
-// Game mode for a JAudio game: rips the sounds of its start-up archive, or of a Jac game's sequence index, into one
-// set. A JAudio2 sound first plays with only the wave groups that the game's audio set-up loads, and the waves its
-// notes look up give its groups. ReadJacSounds gives the group of each piece of a Jac game. ReadPikmin2Sounds lists the
-// sounds of New Play Control! Pikmin 2 with their groups, apart from the pieces that the game never plays. Wave
-// discovery finds the groups of those pieces. The library then holds every group that a ripped sound plays, and each
-// sound plays with its groups for the length analysis. `files` are the game's sound files. `profile` is null for a
-// JAudio2 game without a driver profile. Only --list works then.
-int RipJAudioGame(const std::string& input, const fs::path& out_dir, const ntdlib::disc::GameFiles& game,
-                  const rip::JAudioFiles& files, const rip::JAudioProfile* profile, const Options& o,
-                  xsflib::cli::FileNameRegistries& registries)
-{
-    // A rip checks its options and the profile before it parses the start-up archive.
-    if (!o.list)
-    {
-        if (const std::optional<int> refused = RefuseJAudioRip(o, profile, game.GameId()))
-        {
-            return *refused;
-        }
-    }
-
-    // The start-up archive, or a Jac game's bank file.
-    std::vector<uint8_t> baa;
-    if (!rip::ReadSoundFile(game, files.baa, baa))
-    {
-        std::fprintf(stderr, "error: can't read %s\n", files.baa.c_str());
-        return 1;
-    }
-
-    std::string error;
-    const std::optional<std::vector<rip::JAudioSound>> sounds =
-        rip::ReadJAudioSounds(game, files, profile, baa, &error);
-    if (!sounds)
-    {
-        std::fprintf(stderr, "error: %s\n", error.c_str());
-        return 1;
-    }
-
-    if (o.list)
-    {
-        ListJAudioGame(game.GameId(), files, *sounds, profile);
-        return 0;
-    }
-
-    std::vector<JAudioJob> jobs = SelectJAudioSounds(*sounds, profile, o);
-    if (jobs.empty())
-    {
-        if (!o.only_text.empty() || o.bgm)
-        {
-            return NoSoundMatches(o);
-        }
-
-        std::fprintf(stderr, "%s: nothing to rip\n", files.baa.c_str());
-        return 0;
-    }
-
-    // Every library holds the sound files (see rip::LibraryFiles) and the groups that the audio set-up loads.
-    const std::vector<ntdlib::jaudio::WaveSystem> systems = rip::ReadWaveSystems(profile->library, baa);
-    std::vector<std::string> paths = rip::LibraryFiles(files, *profile);
-    if (!AddAwFiles(game, files, systems, profile->static_waves, paths))
-    {
-        return 1;
-    }
-
-    if (!DiscoverWaves(jobs, game, *profile, paths, systems, o.jobs))
-    {
-        return 1;
-    }
-
-    if (const std::size_t same = SkipSameAsMario(jobs))
-    {
-        std::fprintf(stderr, "left out %s: they play Mario's waves\n", Counted(same, "Luigi variant").c_str());
-    }
-
-    for (const JAudioJob& job : jobs)
-    {
-        if (!AddAwFiles(game, files, systems, job.waves, paths))
-        {
-            return 1;
-        }
-    }
-
-    const std::string game_name = o.game_name.empty() ? profile->name : o.game_name;
-    const Tags common = xsflib::cli::RipTags(o, game_name, "wsf", "game");
-    const auto lib = rip::BuildJAudioLibrary(game, *profile, paths, common, &error);
-    if (!lib)
-    {
-        std::fprintf(stderr, "error: %s\n", error.c_str());
-        return 1;
-    }
-
-    std::size_t unstartable = 0;
-    std::size_t silent = 0;
-    if (o.lengths)
-    {
-        AnalyzeLengths(jobs, *lib, *profile, systems, o.jobs);
-        unstartable = SkipUnstartable(jobs);
-        silent = SkipSilent(jobs);
-    }
-
-    const std::string skipped_text = xsflib::cli::SkippedText(unstartable, "can't start", silent, "sound");
-    if (jobs.empty())
-    {
-        std::fprintf(stderr, "%s: nothing to rip%s\n", files.baa.c_str(), skipped_text.c_str());
-        return 0;
-    }
-
-    xsflib::rip::FileNames& names = xsflib::cli::NamesIn(registries, out_dir, ".wsflib", ".miniwsf");
-    const auto build_mini = [profile](const std::string& lib_name, const JAudioJob& job, const Tags& tags)
-    {
-        return rip::BuildJAudioMini(job.sound_id, job.waves, lib_name, tags, &job.piece_state,
-                                    job.luigi ? profile->luigi_word : -1);
-    };
-    const std::string source = xsflib::rip::InputPath(input).filename().string();
-    const int count = WriteSet(out_dir, names, game_name, *lib, jobs, common, build_mini, source, skipped_text);
-    if (count < 0)
-    {
-        return 1;
-    }
-
-    if (count > 0)
-    {
-        xsflib::rip::ReportOutput(out_dir);
-    }
-
-    return 0;
 }
 
 // The --list output for a game of NW4R SND: its sound archives, then how WSF rips them. `profile` is the game's driver
@@ -1617,6 +388,81 @@ ArchivesRipped RipArchives(const fs::path& out_dir, const ntdlib::disc::GameFile
     return ripped;
 }
 
+// Rips `game` from `input` if a JAudio profile gives it (see RipGame). Returns the exit code, or nothing for a game
+// that no JAudio profile gives.
+std::optional<int> RipProfiledJAudioGame(const std::string& input, const fs::path& out_dir,
+                                         const ntdlib::disc::GameFiles& game, const Options& o,
+                                         xsflib::cli::FileNameRegistries& registries)
+{
+    const std::optional<rip::JAudioProfile> jaudio = rip::FindJAudioProfile(game);
+    if (!jaudio)
+    {
+        return std::nullopt;
+    }
+
+    std::string error;
+    const std::optional<rip::JAudioFiles> files = rip::FindJAudioFiles(game, *jaudio, &error);
+    if (!files)
+    {
+        std::fprintf(stderr, "error: %s\n", error.c_str());
+        return 1;
+    }
+
+    return RipJAudioGame(input, out_dir, game, *files, &*jaudio, o, registries);
+}
+
+// The exit code for a rip in `mode` that the options or a missing driver profile refuse, after its error. Nothing when
+// the rip can go on.
+std::optional<int> RefuseGameMode(const std::string& mode, const rip::GameProfile* profile, const Options& o)
+{
+    if (const std::string given = o.ArchiveOptionsGiven(); mode == "game" && !given.empty())
+    {
+        std::fprintf(stderr, "error: %s for archive mode. Add --mode archive.\n", given.c_str());
+        return 2;
+    }
+
+    if (mode == "game" && !profile)
+    {
+        std::fprintf(stderr,
+                     "error: no driver profile for this game (known: %s); --mode archive rips its sound archives "
+                     "instead\n",
+                     ProfileNames(rip::KnownProfiles()).c_str());
+        return 1;
+    }
+
+    return std::nullopt;
+}
+
+// Reports what RipGame ripped from `input` into `out_dir`, with a note when game mode can rip the game or another
+// release of it. Returns the exit code.
+int ReportGameRip(const std::string& input, const fs::path& out_dir, const ArchivesRipped& ripped,
+                  const rip::GameProfile* profile, const rip::GameProfile* other_release, const Options& o)
+{
+    if (ripped.rejected && profile)
+    {
+        std::fprintf(stderr, "note: game mode can rip this game. Leave out --mode archive.\n");
+    }
+    else if (ripped.rejected && other_release)
+    {
+        std::fprintf(stderr, "note: game mode can rip the release with the driver profile: %s.\n",
+                     other_release->name.c_str());
+    }
+
+    if (ripped.matched == 0 && (!o.only_text.empty() || o.bgm) && !ripped.failed)
+    {
+        return NoSoundMatches(o);
+    }
+
+    std::fprintf(stderr, "%s: %s\n", xsflib::rip::InputPath(input).filename().string().c_str(),
+                 Counted(ripped.files, "miniwsf file").c_str());
+    if (ripped.files > 0)
+    {
+        xsflib::rip::ReportOutput(out_dir);
+    }
+
+    return ripped.failed ? 1 : 0;
+}
+
 // Rips a game image or folder: each of its sound archives, or the one that --archive names. Uses game mode if a driver
 // profile exists. Otherwise uses archive mode. --mode overrides the choice. Each archive's folder takes its registry of
 // file names from `registries` (see xsflib::cli::NamesIn). RipJAudioGame rips a JAudio game. Returns the exit code.
@@ -1636,18 +482,10 @@ int RipGame(const std::string& input, const fs::path& out_dir, const Options& o,
     // JAudio game. So is a disc that has no profile for NW4R SND and holds JAudio2's start-up archive. The sound
     // archives of NW4R SND on such a disc, like the Home Button menu's archive, aren't the game's music.
     const bool title = game.IsTitle();
-    const std::optional<rip::JAudioProfile> jaudio = title ? std::nullopt : rip::FindJAudioProfile(game);
+    const std::optional<int> jaudio = title ? std::nullopt : RipProfiledJAudioGame(input, out_dir, game, o, registries);
     if (jaudio)
     {
-        std::string error;
-        const std::optional<rip::JAudioFiles> files = rip::FindJAudioFiles(game, *jaudio, &error);
-        if (!files)
-        {
-            std::fprintf(stderr, "error: %s\n", error.c_str());
-            return 1;
-        }
-
-        return RipJAudioGame(input, out_dir, game, *files, &*jaudio, o, registries);
+        return *jaudio;
     }
 
     const std::optional<rip::GameProfile> found = title ? std::nullopt : rip::FindProfile(game);
@@ -1690,19 +528,9 @@ int RipGame(const std::string& input, const fs::path& out_dir, const Options& o,
     }
 
     const std::string mode = o.mode.empty() ? (profile ? "game" : "archive") : o.mode;
-    if (const std::string given = o.ArchiveOptionsGiven(); mode == "game" && !given.empty())
+    if (const std::optional<int> refused = RefuseGameMode(mode, profile, o))
     {
-        std::fprintf(stderr, "error: %s for archive mode. Add --mode archive.\n", given.c_str());
-        return 2;
-    }
-
-    if (mode == "game" && !profile)
-    {
-        std::fprintf(stderr,
-                     "error: no driver profile for this game (known: %s); --mode archive rips its sound archives "
-                     "instead\n",
-                     ProfileNames(rip::KnownProfiles()).c_str());
-        return 1;
+        return *refused;
     }
 
     NoteMode(mode, title, profile, other_release);
@@ -1717,29 +545,8 @@ int RipGame(const std::string& input, const fs::path& out_dir, const Options& o,
 
     const std::string game_name = o.game_name.empty() ? (profile ? profile->name : game.Title()) : o.game_name;
     const ArchivesRipped ripped = RipArchives(out_dir, game, archives, mode, profile, *code, game_name, o, registries);
-    if (ripped.rejected && profile)
-    {
-        std::fprintf(stderr, "note: game mode can rip this game. Leave out --mode archive.\n");
-    }
-    else if (ripped.rejected && other_release)
-    {
-        std::fprintf(stderr, "note: game mode can rip the release with the driver profile: %s.\n",
-                     other_release->name.c_str());
-    }
 
-    if (ripped.matched == 0 && (!o.only_text.empty() || o.bgm) && !ripped.failed)
-    {
-        return NoSoundMatches(o);
-    }
-
-    std::fprintf(stderr, "%s: %s\n", xsflib::rip::InputPath(input).filename().string().c_str(),
-                 Counted(ripped.files, "miniwsf file").c_str());
-    if (ripped.files > 0)
-    {
-        xsflib::rip::ReportOutput(out_dir);
-    }
-
-    return ripped.failed ? 1 : 0;
+    return ReportGameRip(input, out_dir, ripped, profile, other_release, o);
 }
 
 // Reads AX's microcode and the build of NW4R SND from a game's code (see GameCodeOf). `path` is a main.dol, a main
@@ -1790,6 +597,28 @@ std::optional<GameCode> ReadGameCode(const std::string& path)
     return code;
 }
 
+// The game's code for the loose sound archive `input`. The main.dol comes from --microcode or the inputs, or else from
+// the archive's folder. `file` gives the main.dol's path.
+std::optional<GameCode> LooseArchiveCode(const std::string& input, const Options& o, std::string& file)
+{
+    file = o.microcode_file;
+    if (o.microcode)
+    {
+        return o.microcode;
+    }
+
+    const fs::path beside = xsflib::rip::InputPath(input).parent_path() / "main.dol";
+    std::error_code ec;
+    if (!fs::is_regular_file(beside, ec))
+    {
+        return std::nullopt;
+    }
+
+    file = beside.string();
+
+    return ReadGameCode(file);
+}
+
 // Rips a loose sound archive in archive mode into `out_dir`. `names` is the registry of file names for `out_dir`.
 // Returns the exit code.
 int RipLooseArchive(const std::string& input, const fs::path& out_dir, const Options& o, xsflib::rip::FileNames& names)
@@ -1815,19 +644,8 @@ int RipLooseArchive(const std::string& input, const fs::path& out_dir, const Opt
         return 1;
     }
 
-    // The main.dol comes from --microcode or the inputs, or else from the archive's folder.
-    std::string microcode_file = o.microcode_file;
-    std::optional<GameCode> code = o.microcode;
-    if (!code)
-    {
-        const fs::path beside = xsflib::rip::InputPath(input).parent_path() / "main.dol";
-        std::error_code ec;
-        if (fs::is_regular_file(beside, ec))
-        {
-            microcode_file = beside.string();
-            code = ReadGameCode(microcode_file);
-        }
-    }
+    std::string microcode_file;
+    const std::optional<GameCode> code = LooseArchiveCode(input, o, microcode_file);
 
     if (o.list)
     {
@@ -1943,92 +761,97 @@ int RipInput(const std::string& input, const Options& o, xsflib::cli::FileNameRe
     return RipGame(input, out_dir, o, registries);
 }
 
+// Parses one of wsfrip's options: --microcode, --tracks, --tempo, --var and --suffix. `next` gives the option's
+// value. Returns 0, 2 after an error, or -1 for an option that isn't wsfrip's.
+int ParseOption(const std::string& option, const std::function<std::string()>& next, Options& o)
+{
+    if (option == "--microcode")
+    {
+        o.microcode_file = next();
+    }
+    else if (option == "--tracks")
+    {
+        const std::string value = next();
+        o.tracks = ParseTracks(value);
+        if (!o.tracks)
+        {
+            std::fprintf(stderr,
+                         "error: --tracks takes track numbers from 0 to 15 and ranges such as 8-14, separated by "
+                         "commas, not '%s'\n",
+                         value.c_str());
+            return 2;
+        }
+    }
+    else if (option == "--tempo")
+    {
+        o.tempo_text = next();
+        o.tempo = ParseTempo(o.tempo_text);
+        if (!o.tempo)
+        {
+            std::fprintf(stderr, "error: --tempo takes a number from 0.25 to 4, such as 1.1, not '%s'\n",
+                         o.tempo_text.c_str());
+            return 2;
+        }
+    }
+    else if (option == "--var")
+    {
+        const std::string value = next();
+        const std::optional<xsflib::Assignment> assignment = xsflib::ParseAssignment(value);
+        if (!assignment || assignment->index < 0 || assignment->index > 31 || assignment->value < INT16_MIN ||
+            assignment->value > INT16_MAX)
+        {
+            std::fprintf(stderr,
+                         "error: --var takes N=V, with N from 0 to 31 and V from -32768 to 32767, not '%s'\n",
+                         value.c_str());
+            return 2;
+        }
+
+        o.variables[static_cast<int>(assignment->index)] = static_cast<int16_t>(assignment->value);
+    }
+    else if (option == "--suffix")
+    {
+        o.suffix = next();
+    }
+    else
+    {
+        return -1;
+    }
+
+    return 0;
+}
+
 } // namespace
+} // namespace wsf::cli
 
 int main(int argc, char** argv)
 {
-    xsflib::cli::RipTool<Options> tool;
+    xsflib::cli::RipTool<wsf::cli::Options> tool;
     tool.name = "wsfrip";
     tool.version = WSF_VERSION;
-    tool.usage = kUsage;
+    tool.usage = wsf::cli::kUsage;
 
     // Each analysis emulates 88 MiB of main memory. A 32-bit build has only 2 GiB of address space. It runs at most 8
     // analyses.
     tool.max_jobs_32bit = 8;
 
-    tool.parse_option = [](const std::string& option, const std::function<std::string()>& next, Options& o)
-    {
-        if (option == "--microcode")
-        {
-            o.microcode_file = next();
-        }
-        else if (option == "--tracks")
-        {
-            const std::string value = next();
-            o.tracks = ParseTracks(value);
-            if (!o.tracks)
-            {
-                std::fprintf(stderr,
-                             "error: --tracks takes track numbers from 0 to 15 and ranges such as 8-14, separated by "
-                             "commas, not '%s'\n",
-                             value.c_str());
-                return 2;
-            }
-        }
-        else if (option == "--tempo")
-        {
-            o.tempo_text = next();
-            o.tempo = ParseTempo(o.tempo_text);
-            if (!o.tempo)
-            {
-                std::fprintf(stderr, "error: --tempo takes a number from 0.25 to 4, such as 1.1, not '%s'\n",
-                             o.tempo_text.c_str());
-                return 2;
-            }
-        }
-        else if (option == "--var")
-        {
-            const std::string value = next();
-            const std::optional<xsflib::Assignment> assignment = xsflib::ParseAssignment(value);
-            if (!assignment || assignment->index < 0 || assignment->index > 31 || assignment->value < INT16_MIN ||
-                assignment->value > INT16_MAX)
-            {
-                std::fprintf(stderr,
-                             "error: --var takes N=V, with N from 0 to 31 and V from -32768 to 32767, not '%s'\n",
-                             value.c_str());
-                return 2;
-            }
-
-            o.variables[static_cast<int>(assignment->index)] = static_cast<int16_t>(assignment->value);
-        }
-        else if (option == "--suffix")
-        {
-            o.suffix = next();
-        }
-        else
-        {
-            return -1;
-        }
-
-        return 0;
-    };
+    tool.parse_option = wsf::cli::ParseOption;
 
     // The main.dol from --microcode, then the main.dol files among the inputs.
-    tool.before_inputs = [](std::vector<std::string>& inputs, Options& o)
+    tool.before_inputs = [](std::vector<std::string>& inputs, wsf::cli::Options& o)
     {
         if (!o.microcode_file.empty())
         {
-            o.microcode = ReadGameCode(o.microcode_file);
+            o.microcode = wsf::cli::ReadGameCode(o.microcode_file);
             if (!o.microcode)
             {
                 return 1;
             }
         }
 
-        return TakeDolInputs(inputs, o);
+        return wsf::cli::TakeDolInputs(inputs, o);
     };
 
-    tool.rip_input = RipInput;
+    tool.rip_input = wsf::cli::RipInput;
 
     return xsflib::cli::RunRipTool(tool, argc, argv);
 }

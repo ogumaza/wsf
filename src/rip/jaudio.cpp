@@ -4,8 +4,9 @@
 // files and sounds, Pikmin 2's pieces, and the library and minis. The length analysis and the wave discovery play a
 // rip on the player (see rip/jaudio_analysis.h).
 
+#include "rip/jaudio.h"
+
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -13,7 +14,6 @@
 #include <iterator>
 #include <map>
 #include <optional>
-#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -27,8 +27,11 @@
 #include "ntdlib/jaudio/aaf.h"
 #include "ntdlib/jaudio/archive.h"
 #include "ntdlib/jaudio/game_lengths.h"
+#include "ntdlib/jaudio/jac_effects.h"
+#include "ntdlib/jaudio/pikmin2_pieces.h"
 #include "ntdlib/jaudio/rarc.h"
 #include "ntdlib/jaudio/wave_system.h"
+#include "ntdlib/yaz0.h"
 #include "xsflib/ascii.h"
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
@@ -81,16 +84,8 @@ bool StartsWith(std::span<const uint8_t> data, const char* magic)
     return data.size() >= 4 && std::memcmp(data.data(), magic, 4) == 0;
 }
 
-// The folder of a path on the disc, with its '/' at the end, or "" for a file at the root.
-std::string FolderOf(const std::string& path)
-{
-    const std::size_t slash = path.rfind('/');
-    return slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
-}
-
-// The words of a profile's parameters for a driver other than kZ2 start where the Z2 start-up's profile starts: after
-// the wave list.
-constexpr uint32_t kJAudioParamsOffset = kJAudioZ2Offset + ntdlib::flipper::z2::kProfileOffset;
+// The offset of a profile's parameter words in the driver block.
+constexpr uint32_t kJAudioParamsOffset = kJAudioParamsAddress - DriverBlock::kAddress;
 
 // A JAudio driver's image: its blob, the address it's loaded at, its entry and its parameter block. Every driver's
 // block is at DriverBlock::kAddress.
@@ -166,7 +161,7 @@ void PutZ2DriverParams(uint8_t* params, const JAudioProfile& profile)
     const std::vector<uint32_t> words = z2.Words();
     for (std::size_t i = 0; i < words.size(); i++)
     {
-        put(kJAudioZ2Offset + ntdlib::flipper::z2::kProfileOffset + static_cast<uint32_t>(i * 4), words[i]);
+        put(kJAudioParamsOffset + static_cast<uint32_t>(i * 4), words[i]);
     }
 
     put(kJAudioSleepOffset, profile.sleep ? profile.sleep : word(kJAudioDriverSleepOffset));
@@ -189,200 +184,11 @@ void PutZ2DriverParams(uint8_t* params, const JAudioProfile& profile)
     }
 }
 
-// How Pikmin 2's driver makes a piece's object: driver/pikmin2.c's PIECE_ values. Each is a way in which the game
-// makes a piece's object.
-enum class PieceKind : uint32_t
-{
-    kPlain = 0,       // a BgmSeq that only plays
-    kMain = 1,        // an area's music: a JumpBgmSeq with the scene's directors
-    kDirected = 2,    // a boss's music, or the music of 2-player battles
-    kAuto = 3,        // a cave's music: an AutoBgm. Its conductor picks what the tracks play
-    kBattle = 4,      // a DirectedBgm with the 2-player battle directors that the game gives battle_t
-    kFree = 5,        // a DirectedBgm without directors
-    kAutoFree = 6,    // an AutoBgm without directors or the arrangement of its melody
-    kBigBoss = 7,     // the final boss's music, with the final boss's sound object in place
-    kBigBossNear = 8, // the same, with the tension director on: a captain stands near the boss
-};
-
-// The JAInter::SoundInfo that the game gives a piece's object, in words: the flags, then the priority and the
-// sequence's slot in the top two bytes, the pitch (1.0) and the volume in the top byte. The game's list of volumes
-// (BgmList.txt) then sets the volume.
-using SoundInfoWords = std::array<uint32_t, 4>;
-constexpr SoundInfoWords kAreaInfo = {0x1f00, 127u << 24 | 1u << 16, 0x3f800000, 50u << 24}; // from initMainBgm
-constexpr SoundInfoWords kBossInfo = {0, 127u << 24 | 2u << 16, 0x3f800000, 40u << 24};      // from initBossBgm
-constexpr SoundInfoWords kExtraInfo = {0, 127u << 24 | 1u << 16, 0x3f800000, 50u << 24};     // from initAdditionalBgm
-constexpr SoundInfoWords kKeyInfo = {0x1f00, 127u << 24 | 4u << 16, 0x3f800000, 35u << 24};  // the key's music
-
-// The wave scene of a piece that the game never plays. The ripper finds the groups that hold its waves.
-constexpr uint8_t kFindWaves = 0xff;
-
-// One of Pikmin 2's pieces of music: its file in the sequence archive, how the game makes its object, the wave scene
-// that the game loads for it (a group of wave system 0, besides group 0), an AutoBgm's conductor, the object's sound
-// information, and the beat interval that the game gives the root track (0 keeps the default). A boss's music then has
-// a start point: the part of the music that the boss starts. A variant of a piece plays it in another state of the
-// game: with another conductor, or from another start point. Its label names its rips. A piece has no label, and its
-// rips are named after its file.
-struct Pikmin2Piece
-{
-    const char* sequence;
-    PieceKind kind;
-    uint8_t wave_scene;
-    const char* conductor = "";
-    SoundInfoWords info = kAreaInfo;
-    uint16_t beat_interval = 0;
-    uint8_t start_point = 0;
-    const char* label = "";
-};
-
-// Pikmin 2's music: every file of the sequence archive but the effects sequence, se.bms, in the archive's order, then
-// the variants. A piece's sound ID is 0x80000000 and its place here. The Wii's sequence archive has the GameCube's
-// files, and the Wii's code makes the pieces' objects as the GameCube's does.
-//
-// The game makes most pieces' objects in PikSceneMgr::initMainBgm, initBossBgm and initAdditionalBgm. A piece's scene
-// loads one of the wave system's 49 groups (wScene_*.aw) besides group 0. A cave floor's conductor comes from a list
-// for each area (BgmList_*.txt) or from the challenge mode's list (ChallengeBgmList.txt). The conductor picks the
-// phrases that the cave music's tracks play. Its name gives the floor's piece and wave group
-// (ConductorList::getSeqAndWaveFromConductor, 0x803b3b3c). A piece plays with the first conductor of its family, such
-// as caveconc_00_0.cnd and new_00_0.cnd. The game's code names caveconc_00_0.cnd itself, for a boss's floor. A boss
-// starts its music when it appears, at a part of the music: the start point. The middle bosses start m_boss at their
-// appearance (9). The final boss starts l_boss at its part for four weapons (1). A start point of 0 leaves the start to
-// the scene. The music then starts at part 0, where JumpBgmSeq's constructor sets the part. The Waterwraith's chase
-// starts m_boss there. At part 0, a track of l_boss jumps to itself without end.
-//
-// The variants. Each other conductor that the lists name gets a variant of its piece, with the wave group that its
-// name gives. The bosses' actions jump to the other parts of their music (JumpBgmSeq::requestJumpBgmOnBeat). Each
-// other part of m_boss and l_boss gets a variant that starts there and plays what follows. m_boss's parts 5 to 7 play
-// in turn with part 3 for an attack. Nobody has found code in the game that asks for part 12 of l_boss. Its variant
-// rips it, as the pieces that the game never plays rip. l_boss has no variant at part 0.
-//
-// The game makes l_boss only while the final boss's sound object exists (initBossBgm, 0x803b5740). Its directors then
-// take tracks 14 and 15 (0x804f5d24) and mute them. Tracks 10 and 11 play in full. tentionD turns track 15 on while a
-// captain stands within 300 units of the boss (0x804f2130), and only parts 4 and 11 hold notes on that track. Those two
-// parts therefore get one more variant each, labelled with "-near". pikatkD turns track 14 on as Pikmin attack. That
-// track holds one note, in parts 1 and 12, and gets no variant.
-//
-// Neither the game's code nor its lists of music start 14 of the files: 2pbattle, a_iron, a_zawinul01, caveboss,
-// c_result, the six ff_ pieces, id_test, result and u_result. The game plays streams of the same names in place of
-// c_result, result, u_result and the ff_ pieces. The calls that each sequence makes to the game choose its object.
-// 2pbattle calls as battle_t does. a_iron and caveboss call as the caves' pieces do. They play with iron.cnd and
-// caveboss.cnd. The game has no track map for them, and they play without directors. a_zawinul01 has no conductor of
-// its own and plays with iron.cnd. id_test calls as a directed piece does, and plays without directors. The others
-// only play. The ripper finds the wave groups of these pieces.
-const Pikmin2Piece kPikmin2Pieces[] = {
-    {"2pbattle.bms", PieceKind::kBattle, kFindWaves},
-    {"a_iron.bms", PieceKind::kAutoFree, kFindWaves, "iron.cnd"},
-    {"a_zawinul01.bms", PieceKind::kAutoFree, kFindWaves, "iron.cnd"},
-    {"battle_t.bms", PieceKind::kDirected, 6},
-    {"book.bms", PieceKind::kPlain, 36},
-    {"caveboss.bms", PieceKind::kAutoFree, kFindWaves, "caveboss.cnd"},
-    {"caveconc.bms", PieceKind::kAuto, 26, "caveconc_00_0.cnd"},
-    {"caveglass.bms", PieceKind::kAuto, 23, "caveglass_00_0.cnd"},
-    {"cavekeyget.bms", PieceKind::kAuto, 5, "cavekeyget.cnd", kKeyInfo},
-    {"cavemetal.bms", PieceKind::kAuto, 10, "cavemetal_00_0.cnd"},
-    {"caverelax.bms", PieceKind::kAuto, 28, "caverelax.cnd"},
-    {"cavesoil.bms", PieceKind::kAuto, 22, "cavesoil_00_0.cnd"},
-    {"cavetile.bms", PieceKind::kAuto, 24, "cavetile_00_0.cnd"},
-    {"cavetsumiki.bms", PieceKind::kAuto, 25, "cavetsumiki_00_0.cnd"},
-    {"comp_result.bms", PieceKind::kPlain, 19},
-    {"c_menu.bms", PieceKind::kPlain, 20},
-    {"c_result.bms", PieceKind::kPlain, kFindWaves},
-    {"ff_annihi.bms", PieceKind::kPlain, kFindWaves},
-    {"ff_doped.bms", PieceKind::kPlain, kFindWaves},
-    {"ff_doping.bms", PieceKind::kPlain, kFindWaves},
-    {"ff_keyget.bms", PieceKind::kPlain, kFindWaves},
-    {"ff_playerdown.bms", PieceKind::kPlain, kFindWaves},
-    {"ff_treasureget.bms", PieceKind::kPlain, kFindWaves},
-    {"forest.bms", PieceKind::kMain, 2},
-    {"f_result.bms", PieceKind::kPlain, 19},
-    {"hiscore.bms", PieceKind::kPlain, 21, "", kExtraInfo},
-    {"id_test.bms", PieceKind::kFree, kFindWaves},
-    {"kuro_post.bms", PieceKind::kPlain, 48, "", kExtraInfo},
-    {"kuro_pre.bms", PieceKind::kPlain, 48},
-    {"last.bms", PieceKind::kMain, 4, "", kAreaInfo, 30},
-    {"l_boss.bms", PieceKind::kBigBoss, 35, "", kBossInfo, 60, 1},
-    {"m_boss.bms", PieceKind::kDirected, 0, "", kBossInfo, 60, 9},
-    {"new_00.bms", PieceKind::kAuto, 37, "new_00_0.cnd"},
-    {"new_01.bms", PieceKind::kAuto, 38, "new_01_0.cnd"},
-    {"new_02.bms", PieceKind::kAuto, 39, "new_02_0.cnd"},
-    {"new_03.bms", PieceKind::kAuto, 40, "new_03_0.cnd"},
-    {"new_04.bms", PieceKind::kAuto, 41, "new_04_0.cnd"},
-    {"new_05.bms", PieceKind::kAuto, 42, "new_05_0.cnd"},
-    {"new_06.bms", PieceKind::kAuto, 43, "new_06_0.cnd"},
-    {"new_07.bms", PieceKind::kAuto, 44, "new_07_0.cnd"},
-    {"new_08.bms", PieceKind::kAuto, 45, "new_08_0.cnd"},
-    {"n_tutorial.bms", PieceKind::kMain, 15},
-    {"n_tutorial_1stday.bms", PieceKind::kPlain, 15, "", kExtraInfo},
-    {"result.bms", PieceKind::kPlain, kFindWaves},
-    {"u_result.bms", PieceKind::kPlain, kFindWaves},
-    {"worldmap.bms", PieceKind::kPlain, 16},
-    {"worldmap_intro.bms", PieceKind::kPlain, 16},
-    {"yakushima.bms", PieceKind::kMain, 3, "", kAreaInfo, 30},
-    {"caveconc.bms", PieceKind::kAuto, 31, "caveconc_05_0.cnd", kAreaInfo, 0, 0, "caveconc_05_0"},
-    {"caveconc.bms", PieceKind::kAuto, 32, "caveconc_10_0.cnd", kAreaInfo, 0, 0, "caveconc_10_0"},
-    {"cavemetal.bms", PieceKind::kAuto, 29, "cavemetal_05_0.cnd", kAreaInfo, 0, 0, "cavemetal_05_0"},
-    {"cavemetal.bms", PieceKind::kAuto, 29, "cavemetal_05_4.cnd", kAreaInfo, 0, 0, "cavemetal_05_4"},
-    {"cavemetal.bms", PieceKind::kAuto, 30, "cavemetal_10_0.cnd", kAreaInfo, 0, 0, "cavemetal_10_0"},
-    {"cavemetal.bms", PieceKind::kAuto, 30, "cavemetal_10_4.cnd", kAreaInfo, 0, 0, "cavemetal_10_4"},
-    {"cavesoil.bms", PieceKind::kAuto, 33, "cavesoil_05_0.cnd", kAreaInfo, 0, 0, "cavesoil_05_0"},
-    {"cavesoil.bms", PieceKind::kAuto, 34, "cavesoil_10_0.cnd", kAreaInfo, 0, 0, "cavesoil_10_0"},
-    {"cavesoil.bms", PieceKind::kAuto, 34, "cavesoil_10_3.cnd", kAreaInfo, 0, 0, "cavesoil_10_3"},
-    {"new_00.bms", PieceKind::kAuto, 37, "new_00_1.cnd", kAreaInfo, 0, 0, "new_00_1"},
-    {"new_08.bms", PieceKind::kAuto, 45, "new_08_1.cnd", kAreaInfo, 0, 0, "new_08_1"},
-    {"m_boss.bms", PieceKind::kDirected, 0, "", kBossInfo, 60, 0, "m_boss-0"},
-    {"m_boss.bms", PieceKind::kDirected, 0, "", kBossInfo, 60, 1, "m_boss-1"},
-    {"m_boss.bms", PieceKind::kDirected, 0, "", kBossInfo, 60, 2, "m_boss-2"},
-    {"m_boss.bms", PieceKind::kDirected, 0, "", kBossInfo, 60, 3, "m_boss-3"},
-    {"m_boss.bms", PieceKind::kDirected, 0, "", kBossInfo, 60, 4, "m_boss-4"},
-    {"m_boss.bms", PieceKind::kDirected, 0, "", kBossInfo, 60, 5, "m_boss-5"},
-    {"m_boss.bms", PieceKind::kDirected, 0, "", kBossInfo, 60, 6, "m_boss-6"},
-    {"m_boss.bms", PieceKind::kDirected, 0, "", kBossInfo, 60, 7, "m_boss-7"},
-    {"m_boss.bms", PieceKind::kDirected, 0, "", kBossInfo, 60, 8, "m_boss-8"},
-    {"m_boss.bms", PieceKind::kDirected, 0, "", kBossInfo, 60, 10, "m_boss-10"},
-    {"m_boss.bms", PieceKind::kDirected, 0, "", kBossInfo, 60, 11, "m_boss-11"},
-    {"m_boss.bms", PieceKind::kDirected, 0, "", kBossInfo, 60, 12, "m_boss-12"},
-    {"l_boss.bms", PieceKind::kBigBoss, 35, "", kBossInfo, 60, 2, "l_boss-2"},
-    {"l_boss.bms", PieceKind::kBigBoss, 35, "", kBossInfo, 60, 3, "l_boss-3"},
-    {"l_boss.bms", PieceKind::kBigBoss, 35, "", kBossInfo, 60, 4, "l_boss-4"},
-    {"l_boss.bms", PieceKind::kBigBoss, 35, "", kBossInfo, 60, 5, "l_boss-5"},
-    {"l_boss.bms", PieceKind::kBigBoss, 35, "", kBossInfo, 60, 6, "l_boss-6"},
-    {"l_boss.bms", PieceKind::kBigBoss, 35, "", kBossInfo, 60, 7, "l_boss-7"},
-    {"l_boss.bms", PieceKind::kBigBoss, 35, "", kBossInfo, 60, 8, "l_boss-8"},
-    {"l_boss.bms", PieceKind::kBigBoss, 35, "", kBossInfo, 60, 9, "l_boss-9"},
-    {"l_boss.bms", PieceKind::kBigBoss, 35, "", kBossInfo, 60, 10, "l_boss-10"},
-    {"l_boss.bms", PieceKind::kBigBoss, 35, "", kBossInfo, 60, 11, "l_boss-11"},
-    {"l_boss.bms", PieceKind::kBigBoss, 35, "", kBossInfo, 60, 12, "l_boss-12"},
-    {"l_boss.bms", PieceKind::kBigBoss, 35, "", kBossInfo, 60, 13, "l_boss-13"},
-    {"l_boss.bms", PieceKind::kBigBossNear, 35, "", kBossInfo, 60, 4, "l_boss-4-near"},
-    {"l_boss.bms", PieceKind::kBigBossNear, 35, "", kBossInfo, 60, 11, "l_boss-11-near"},
-};
-
-// The most pieces that driver/pikmin2.c's table holds (MAX_PIECES).
-constexpr std::size_t kMaxPikmin2Pieces = 96;
-static_assert(std::size(kPikmin2Pieces) <= kMaxPikmin2Pieces);
-
-// The bytes that driver/pikmin2.c's Piece gives each file name.
-constexpr std::size_t kPieceNameSize = 24;
-
 } // namespace
 
 std::vector<uint32_t> Pikmin2Parameters(std::vector<uint32_t> words)
 {
-    words.push_back(static_cast<uint32_t>(std::size(kPikmin2Pieces)));
-    for (const Pikmin2Piece& piece : kPikmin2Pieces)
-    {
-        words.push_back(static_cast<uint32_t>(piece.kind) | uint32_t{piece.start_point} << 8 |
-                        uint32_t{piece.beat_interval} << 16);
-        words.insert(words.end(), piece.info.begin(), piece.info.end());
-        for (const std::string_view name : {std::string_view(piece.sequence), std::string_view(piece.conductor)})
-        {
-            std::array<uint8_t, kPieceNameSize> bytes = {};
-            std::copy_n(name.begin(), std::min(name.size(), bytes.size() - 1), bytes.begin());
-            for (std::size_t i = 0; i < bytes.size(); i += 4)
-            {
-                words.push_back(xsflib::LoadBe32(bytes.data() + i));
-            }
-        }
-    }
+    ntdlib::jaudio::AppendPikmin2Pieces(words);
 
     return words;
 }
@@ -390,166 +196,49 @@ std::vector<uint32_t> Pikmin2Parameters(std::vector<uint32_t> words)
 namespace
 {
 
-// The piece of Pikmin 2's that sound `sound_id` plays, or null for another sound.
-const Pikmin2Piece* PieceOf(const JAudioProfile& profile, uint32_t sound_id)
-{
-    const uint32_t index = sound_id & 0xffff;
-    if (profile.driver != JAudioDriver::kPikmin2 ||
-        (sound_id & ntdlib::jaudio::kAafTypeMask) != ntdlib::jaudio::kAafSequence || index >= std::size(kPikmin2Pieces))
-    {
-        return nullptr;
-    }
-
-    return &kPikmin2Pieces[index];
-}
-
-// A JAudio1 sound name table (.asn): a 16-byte header, then 32-byte records. A record holds a name in up to 28 bytes,
-// then a word. The first 18 records name the sound table's categories: 16 of effects, the sequences and the streams.
-// Each record after them names a sound, and its word is the sound's ID.
-constexpr std::size_t kNamesHeader = 0x10;
-constexpr std::size_t kNameRecordSize = 0x20;
-constexpr std::size_t kNameSize = 0x1c;
-constexpr std::size_t kNamedCategories = 18;
-
-// The key under which an effect's name is found: its ID without bits 10 and 11. Those bits set how long the effect
-// plays.
-uint32_t NameKey(uint32_t id)
-{
-    return id & ~(ntdlib::jaudio::kAafToEnd | ntdlib::jaudio::kAafToEnd >> 1);
-}
-
-// The effects that a name table names, by NameKey. Throws xsflib::FormatError if the table is damaged.
+// The effects that a JAudio1 name file (.asn) names, by ntdlib::jaudio::AsnNameKey. Throws xsflib::FormatError if the
+// file is too short for its sounds.
 std::map<uint32_t, std::string> ReadEffectNames(std::span<const uint8_t> table)
 {
-    if (table.size() < kNamesHeader || (table.size() - kNamesHeader) / kNameRecordSize < kNamedCategories)
-    {
-        throw xsflib::FormatError("the sound name table is damaged");
-    }
-
     std::map<uint32_t, std::string> names;
-    const xsflib::Reader r(table, true);
-    for (std::size_t at = kNamesHeader + kNamedCategories * kNameRecordSize; at + kNameRecordSize <= table.size();
-         at += kNameRecordSize)
+    for (const ntdlib::jaudio::AsnSound& sound : ntdlib::jaudio::ReadAsnSounds(table))
     {
-        const uint32_t id = r.U32(at + kNameSize);
-        if ((id & ntdlib::jaudio::kAafTypeMask) == ntdlib::jaudio::kAafEffect)
+        if ((sound.id & ntdlib::jaudio::kAafTypeMask) == ntdlib::jaudio::kAafEffect)
         {
-            names.try_emplace(NameKey(id), r.CString(at, kNameSize));
+            names.try_emplace(ntdlib::jaudio::AsnNameKey(sound.id), sound.name);
         }
     }
 
     return names;
 }
 
-// The text at `address` in `dol`, up to its terminating zero. Throws xsflib::FormatError if the text has no end.
-std::string DolText(const ntdlib::Dol& dol, uint32_t address)
-{
-    const std::span<const uint8_t> bytes = dol.At(address);
-    const auto end = std::find(bytes.begin(), bytes.end(), uint8_t{0});
-    if (end == bytes.end())
-    {
-        throw xsflib::FormatError("main.dol's name of an effect at " + xsflib::Hex(address, 8) + " has no end");
-    }
-
-    return std::string(bytes.begin(), end);
-}
-
-// A Jac game's sound effects, from the catalogue in `dol` (see ReadJacSounds).
+// A Jac game's sound effects, from the catalogue in `dol` (see ReadJacSounds). An effect that the game's code starts
+// itself is named after its kind and number, such as "system-19", or is "formation".
 std::vector<JAudioSound> ReadJacEffects(const ntdlib::Dol& dol, const JAudioProfile& profile)
 {
-    if (!profile.effect_table)
+    const auto name_of_other = [](uint32_t id)
     {
-        return {};
-    }
-
-    constexpr std::size_t kRow = 20, kEventTypes = 8, kAction = 6;
-    constexpr int32_t kSystem = -2, kPlayer = -1;
-    const xsflib::Reader rows(dol.At(profile.effect_table), true);
-    const xsflib::Reader offsets(dol.At(profile.event_offsets), true);
-    if (rows.Size() < profile.effect_count * kRow || offsets.Size() < kEventTypes * 4)
-    {
-        throw xsflib::FormatError("main.dol's catalogue of effects runs past its section");
-    }
-
-    // An event type's first entry in the table of actions, and the effect that an entry plays.
-    const xsflib::Reader actions(offsets.Sub(kEventTypes * 4, offsets.Size() - kEventTypes * 4), true);
-    const auto first_entry = [&offsets](uint32_t type)
-    {
-        return offsets.U32(4 * std::size_t{type});
-    };
-    const auto effect_of = [&actions](uint32_t entry)
-    {
-        if (actions.Size() / kAction <= entry)
+        const auto kind = static_cast<JacEffect>(id >> 24 & 0x7f);
+        if (kind == JacEffect::kFormation)
         {
-            throw xsflib::FormatError("main.dol's table of actions runs past its section");
+            return std::string("formation");
         }
 
-        return actions.U16(std::size_t{entry} * kAction + 4);
+        const char* const word = kind == JacEffect::kSystem   ? "system"
+                                 : kind == JacEffect::kPlayer ? "player"
+                                                              : "event";
+        char text[32];
+        std::snprintf(text, sizeof(text), "%s-%x", word, static_cast<unsigned>(id >> 8 & 0xffff));
+
+        return std::string(text);
     };
 
     std::vector<JAudioSound> effects;
-    std::set<uint32_t> ids;
-    const auto add = [&](uint32_t id, std::string label)
+    for (ntdlib::jaudio::JacEffectSound& effect :
+         ntdlib::jaudio::ListJacEffects(dol, profile.jac_effects, name_of_other))
     {
-        const std::vector<uint32_t>& left_out = profile.left_out_effects;
-        if (std::find(left_out.begin(), left_out.end(), id) == left_out.end() && ids.insert(id).second)
-        {
-            effects.push_back({.id = id, .label = std::move(label), .section = "SE", .waves = profile.effect_groups});
-        }
-    };
-
-    // Actions of events of different types can play the same effect. The first row that plays an effect names it.
-    std::set<uint32_t> event_effects;
-    for (uint32_t i = 0; i < profile.effect_count; i++)
-    {
-        const std::size_t row = std::size_t{i} * kRow;
-        const uint32_t number = rows.U32(row + 4);
-        std::string name = DolText(dol, rows.U32(row + 8));
-        const auto kind = static_cast<int32_t>(rows.U32(row + 16));
-        if (kind == kSystem || kind == kPlayer)
-        {
-            add(JacEffectId(kind == kSystem ? JacEffect::kSystem : JacEffect::kPlayer, number), std::move(name));
-            continue;
-        }
-
-        if (kind < 1 || kind >= static_cast<int32_t>(kEventTypes))
-        {
-            throw xsflib::FormatError("main.dol's catalogue of effects has a row of unknown kind");
-        }
-
-        // An event of the sounding type starts another effect as the game creates it. The rip plays the effects of
-        // that type on an event of the quiet type, by the same entry in the table of actions.
-        auto type = static_cast<uint32_t>(kind);
-        const uint32_t entry = first_entry(type) + number;
-        if (!event_effects.insert(effect_of(entry)).second)
-        {
-            continue;
-        }
-
-        if (type == profile.sounding_event)
-        {
-            type = profile.quiet_event;
-        }
-
-        add(JacEffectId(JacEffect::kEvent, type << 12 | (entry - first_entry(type))), std::move(name));
-    }
-
-    // The effects that the game's code starts itself.
-    for (const uint32_t id : profile.other_effects)
-    {
-        const auto kind = static_cast<JacEffect>(id >> 24 & 0x7f);
-        std::string label = "formation";
-        if (kind != JacEffect::kFormation)
-        {
-            const char* const word = kind == JacEffect::kSystem   ? "system"
-                                     : kind == JacEffect::kPlayer ? "player"
-                                                                  : "event";
-            char text[32];
-            std::snprintf(text, sizeof(text), "%s-%x", word, static_cast<unsigned>(id >> 8 & 0xffff));
-            label = text;
-        }
-
-        add(id, std::move(label));
+        effects.push_back(
+            {.id = effect.id, .label = std::move(effect.name), .section = "SE", .waves = profile.effect_groups});
     }
 
     return effects;
@@ -583,7 +272,7 @@ std::optional<JAudioFiles> FindJAudio2Files(const ntdlib::disc::GameFiles& game)
     }
 
     // The RARC archives in the start-up archive's folder and below it, compressed with Yaz0 or not.
-    const std::string folder = FolderOf(found->baa);
+    const std::string folder = xsflib::psf::DirectoryOf(found->baa, "/");
     for (const ntdlib::disc::GameFile& file : game.files)
     {
         if (file.path.starts_with(folder) && xsflib::AsciiLower(file.path).ends_with(".arc") &&
@@ -603,11 +292,11 @@ bool ReadSoundFile(const ntdlib::disc::GameFiles& game, const std::string& path,
         return false;
     }
 
-    if (ntdlib::jaudio::IsYaz0(data))
+    if (ntdlib::IsYaz0(data))
     {
         try
         {
-            data = ntdlib::jaudio::DecodeYaz0(data);
+            data = ntdlib::DecodeYaz0(data);
         }
         catch (const xsflib::FormatError&)
         {
@@ -631,13 +320,13 @@ std::optional<std::vector<std::string>> FindAwFiles(const ntdlib::disc::GameFile
                                                     const std::vector<ntdlib::jaudio::WaveSystem>& systems,
                                                     std::span<const uint32_t> groups, std::string* missing)
 {
-    const std::string folder = FolderOf(files.baa);
+    const std::string folder = xsflib::psf::DirectoryOf(files.baa, "/");
     std::vector<std::string> paths;
     for (const std::string& name : ntdlib::jaudio::GroupArchives(systems, groups))
     {
         const auto matches = [&folder, &name](const ntdlib::disc::GameFile& file)
         {
-            return file.path.starts_with(folder) && file.path.ends_with("/" + name);
+            return file.path == folder + name || (file.path.starts_with(folder) && file.path.ends_with("/" + name));
         };
         const auto file = std::find_if(game.files.begin(), game.files.end(), matches);
         if (file == game.files.end())
@@ -709,23 +398,19 @@ std::vector<uint8_t> BuildJAudioMini(uint32_t sound_id, std::span<const uint32_t
     uint8_t sound[4];
     xsflib::StoreBe32(sound, sound_id);
     ProgramBuilder program;
-    program.AddMemory(DriverBlock::kAddress + kJAudioZ2Offset + ntdlib::flipper::z2::kSoundOffset, sound,
-                      sizeof(sound));
+    program.AddMemory(kJAudioZ2Address + ntdlib::flipper::z2::kSoundOffset, sound, sizeof(sound));
     const std::vector<uint8_t> list = ntdlib::flipper::WaveList(waves);
-    program.AddMemory(DriverBlock::kAddress + kJAudioZ2Offset + ntdlib::flipper::z2::kWaveCountOffset, list.data(),
-                      list.size());
+    program.AddMemory(kJAudioZ2Address + ntdlib::flipper::z2::kWaveCountOffset, list.data(), list.size());
     if (const std::vector<uint8_t> words = state ? state->Bytes() : std::vector<uint8_t>(); !words.empty())
     {
-        program.AddMemory(DriverBlock::kAddress + kJAudioZ2Offset + ntdlib::flipper::z2::kMutedChildrenOffset,
-                          words.data(), words.size());
+        program.AddMemory(kJAudioZ2Address + ntdlib::flipper::z2::kMutedChildrenOffset, words.data(), words.size());
     }
 
     if (luigi_word >= 0)
     {
         uint8_t on[4];
         xsflib::StoreBe32(on, 1);
-        program.AddMemory(DriverBlock::kAddress + kJAudioParamsOffset + static_cast<uint32_t>(luigi_word) * 4, on,
-                          sizeof(on));
+        program.AddMemory(kJAudioParamsAddress + static_cast<uint32_t>(luigi_word) * 4, on, sizeof(on));
     }
 
     tags["_lib"] = lib_name;
@@ -891,12 +576,12 @@ std::vector<JAudioSound> ReadPikmin2Sounds(std::span<const uint8_t> aaf, std::sp
                                            std::span<const uint8_t> names, const JAudioProfile& profile)
 {
     std::vector<uint8_t> decoded;
-    sequence_archive = ntdlib::jaudio::DecodeIfYaz0(sequence_archive, decoded);
+    sequence_archive = ntdlib::DecodeIfYaz0(sequence_archive, decoded);
 
     // The pieces, each with group 0 and its scene's group of wave system 0.
     const std::vector<ntdlib::jaudio::ArchiveFile> files = ntdlib::jaudio::ReadRarc(sequence_archive);
     std::vector<JAudioSound> sounds;
-    for (const Pikmin2Piece& piece : kPikmin2Pieces)
+    for (const ntdlib::jaudio::Pikmin2Piece& piece : ntdlib::jaudio::kPikmin2Pieces)
     {
         const std::string_view name = piece.sequence;
         const auto is_piece = [name](const ntdlib::jaudio::ArchiveFile& file)
@@ -908,12 +593,11 @@ std::vector<JAudioSound> ReadPikmin2Sounds(std::span<const uint8_t> aaf, std::sp
             throw xsflib::FormatError("the sequence archive lacks " + std::string(name));
         }
 
-        const std::string_view label = *piece.label ? std::string_view(piece.label) : name.substr(0, name.rfind('.'));
         JAudioSound sound = {.id = ntdlib::jaudio::kAafSequence | static_cast<uint32_t>(sounds.size()),
-                             .label = std::string(label),
+                             .label = std::string(piece.Name()),
                              .section = "BGM",
                              .music = true};
-        if (piece.wave_scene != kFindWaves)
+        if (piece.wave_scene != ntdlib::jaudio::Pikmin2Piece::kFindWaves)
         {
             sound.waves = {0};
             if (piece.wave_scene != 0)
@@ -936,7 +620,7 @@ std::vector<JAudioSound> ReadPikmin2Sounds(std::span<const uint8_t> aaf, std::sp
         }
 
         const uint32_t id = entry.Id();
-        const auto name = named.find(NameKey(id));
+        const auto name = named.find(ntdlib::jaudio::AsnNameKey(id));
         char label[32];
         std::snprintf(label, sizeof(label), "se%u-%04u", static_cast<unsigned>(ntdlib::jaudio::AafCategory(id)),
                       static_cast<unsigned>(id & ntdlib::jaudio::kAafIndexMask));
@@ -954,6 +638,18 @@ std::vector<JAudioSound> ReadPikmin2Sounds(std::span<const uint8_t> aaf, std::sp
 
 namespace
 {
+
+// A variant of `sound`: a sound with `suffix` on its label that shares the sound's number. The variant keeps the label
+// of the sound that it plays (JAudioSound::sound_label).
+JAudioSound VariantOf(const JAudioSound& sound, std::string_view suffix)
+{
+    JAudioSound variant = sound;
+    variant.sound_label = sound.sound_label.empty() ? sound.label : sound.sound_label;
+    variant.label += suffix;
+    variant.shares_number = true;
+
+    return variant;
+}
 
 // Gives the pieces whose tracks the game mutes as it starts them the children to mute (JAudioProfile::muted_starts). A
 // start with a suffix becomes a sound after its piece. The sound's label is the piece's with the suffix, such as
@@ -983,10 +679,8 @@ void AddMutedStarts(const JAudioProfile& profile, std::vector<JAudioSound>& soun
                 continue;
             }
 
-            JAudioSound variant = listed[piece];
-            variant.label += start.suffix;
+            JAudioSound variant = VariantOf(listed[piece], start.suffix);
             variant.piece_state.muted_children = start.muted_children;
-            variant.shares_number = true;
             listed.push_back(std::move(variant));
         }
     }
@@ -1028,10 +722,8 @@ void AddPieceStates(const JAudioProfile& profile, std::vector<JAudioSound>& soun
                 continue;
             }
 
-            JAudioSound variant = listed[piece];
-            variant.label += state.suffix;
+            JAudioSound variant = VariantOf(listed[piece], state.suffix);
             variant.piece_state = ntdlib::flipper::z2::PieceStateOf(state);
-            variant.shares_number = true;
             states.push_back(std::move(variant));
         }
 
@@ -1042,6 +734,37 @@ void AddPieceStates(const JAudioProfile& profile, std::vector<JAudioSound>& soun
         }
 
         listed.insert(listed.end(), std::make_move_iterator(states.begin()), std::make_move_iterator(states.end()));
+    }
+
+    sounds = std::move(listed);
+}
+
+// Adds the states that the game's code sets for its music during play to `sounds`, each after its piece
+// (JAudioProfile::layer_states). A state's label is the label of the piece, "_" and the suffix of the state, such as
+// "JA_BGM_MAIN_01_combo1". The states share the piece's number.
+void AddLayerStates(const JAudioProfile& profile, std::vector<JAudioSound>& sounds)
+{
+    if (profile.layer_states.empty())
+    {
+        return;
+    }
+
+    std::vector<JAudioSound> listed;
+    for (JAudioSound& sound : sounds)
+    {
+        listed.push_back(std::move(sound));
+        const JAudioSound base = listed.back();
+        for (const ntdlib::jaudio::JungleBeatState& state : profile.layer_states)
+        {
+            if (state.piece != base.id)
+            {
+                continue;
+            }
+
+            JAudioSound variant = VariantOf(base, std::string("_") + state.suffix);
+            variant.id = state.piece | state.bits;
+            listed.push_back(std::move(variant));
+        }
     }
 
     sounds = std::move(listed);
@@ -1061,6 +784,7 @@ std::optional<std::vector<JAudioSound>> ReadJAudioSounds(const ntdlib::disc::Gam
         {
             AddMutedStarts(*profile, sounds);
             AddPieceStates(*profile, sounds);
+            AddLayerStates(*profile, sounds);
         }
 
         return sounds;
@@ -1104,8 +828,10 @@ ntdlib::jaudio::GameWatch WatchOf(const JAudioProfile& profile, uint32_t sound_i
     // tracks would still look like a loop. The root track's polls therefore stay moves. They hold back every loop, and
     // the piece plays to the analysis's limit.
     ntdlib::jaudio::GameWatch watch = profile.watch;
-    const Pikmin2Piece* piece = PieceOf(profile, sound_id);
-    if (piece && (piece->kind == PieceKind::kAuto || piece->kind == PieceKind::kAutoFree))
+    using Kind = ntdlib::jaudio::Pikmin2Piece::Kind;
+    const ntdlib::jaudio::Pikmin2Piece* piece =
+        profile.driver == JAudioDriver::kPikmin2 ? ntdlib::jaudio::Pikmin2PieceOf(sound_id) : nullptr;
+    if (piece && (piece->kind == Kind::kAuto || piece->kind == Kind::kAutoFree))
     {
         watch.idle_in_calls = false;
     }

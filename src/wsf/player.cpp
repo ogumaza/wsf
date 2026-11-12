@@ -7,9 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <span>
-#include <string>
 #include <vector>
 
 #include "ntdlib/disc/header.h"

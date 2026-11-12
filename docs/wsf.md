@@ -226,7 +226,7 @@ An archive-mode player runs a model of the SDK's sound library on AX's microcode
   (x = x × 0x19660D + 0x3C6EF35F, from 0x12345678) steps once a frame, after the channels' updates. The sound's first
   frame comes before the generator's first step. Game mode with WSF's driver behaves the same way.
 
-WSF's implementation (`src/ax`, `src/nw4r`) follows the builds of `nw4r::snd` (June 2007) and AX (December 2006) that
+The model (`rvl/ax` and `rvl/snd` in ntdlib) follows the builds of `nw4r::snd` (June 2007) and AX (December 2006) that
 Wii Sports and Wii Play link. The archive descriptor gives the game's build of `nw4r::snd`. For builds from March 2008
 (Mario Kart Wii) on, the model follows that build where the builds differ:
 
@@ -614,6 +614,79 @@ together:
 The ripper finds such pieces by their labels (see "Archive mode" under "Ripping"). The labels work without a profile
 of a game's code: for the game's other releases and for a loose archive.
 
+## Jungle Beat's states of music
+
+New Play Control! Donkey Kong Jungle Beat changes the tracks of its music during play (see "Donkey Kong Jungle Beat's
+driver"). A rip starts each piece as the game starts it. It also contains the later states of 44 pieces, 102 variants in
+all. Each variant follows its piece and has the piece's number. Its label is the label of the piece, "_" and the name of
+the state, for example `JA_BGM_MAIN_01_combo1`. The states:
+
+- `combo1` and `combo2`: the layers of a combo. Once the count of the combo reaches the first or second count of the
+  stage, the BGM player plays more tracks. Most stages use the counts 10 and 45. The third count plays the tracks of
+  the second and gets no variant.
+- `helibird`: the tracks that a Helibird adds while it carries DK, in three pieces. `helibird_combo1` and
+  `helibird_combo2` add the layers of a combo too.
+- `below_75`, `change`, `round2` and `round2_below_30`: the fights against the four Kongs. The boss's face sets these
+  states once the boss has 75 % of its health or less, while the boss changes between the rounds, in the second round,
+  and once the boss has 30 % or less there.
+- `hit`, `change`, `round2` and `round2_hit`: the two-round fights against GoroPig, ElephantCannon and SlumpBird. The
+  boss's code sets these states while DK hits or holds the boss in the first round, while the boss changes between the
+  rounds, in the second round, and while DK hits or holds the boss there.
+- `hold`, `below_60`, `below_60_hold`, `below_30` and `below_30_hold`: the final fight. The boss's health picks the
+  state. `hold` plays while DK holds on to the boss.
+- `underwater`: TropicalCoast's music while DK is below a depth of 12,000.
+- `fall`: JA_BGM_MAIN_22 while DK falls from the Helibird into the final fight.
+- `state1` and `state2`: the other states of the BGM player's second table. VsFinalKong's frame sets state 2 of
+  JA_BGM_MAIN_22 by DK's place. EndingCeremony's frame sets state 2 of JA_BGM_ENDING_CELEMONY by DK's place. The bind's
+  music, JA_BGM_BIND_01, gets state 1. The Wii release adds a row for JA_BGM_COURSE_SELECT. The menus' code sets its
+  state 1. That state turns two of its tracks off.
+
+The pieces with variants play in these stages, by the names in the game's stage table:
+
+| Piece | Stages |
+| --- | --- |
+| JA_BGM_MAIN_01 | MorningField |
+| JA_BGM_MAIN_02 | SteepValley |
+| JA_BGM_MAIN_03 | DeepJungle |
+| JA_BGM_MAIN_04 | BigGodTree |
+| JA_BGM_MAIN_05 | TropicalCoast |
+| JA_BGM_MAIN_06 | SkyGarden01, TheNestOfHeliBird |
+| JA_BGM_MAIN_07 | GoUpTheWaterFall |
+| JA_BGM_MAIN_08 | EscapeFromRelic |
+| JA_BGM_MAIN_09 | KikkiFestival |
+| JA_BGM_MAIN_10 | FactoryRelic, UnderGroundMaze |
+| JA_BGM_MAIN_11 | DesertRelic |
+| JA_BGM_MAIN_12 | IceCave, IceTunnel |
+| JA_BGM_MAIN_13 | InfernalZoo |
+| JA_BGM_MAIN_15 | CloudHeaven |
+| JA_BGM_MAIN_16 | AboveTheClouds |
+| JA_BGM_MAIN_17 | ClockTower |
+| JA_BGM_MAIN_18 | FairyWood |
+| JA_BGM_MAIN_19 | RoadToCastle |
+| JA_BGM_MAIN_20 | InTheCastle |
+| JA_BGM_MAIN_21 | DemonFireMarsh |
+| JA_BGM_MAIN_22 | VsFinalKong, VsFinalKong2 |
+| JA_BGM_UG_01 | LavaValley |
+| JA_BGM_VOLCANO | VolcanoBottom |
+| JA_BGM_BIRDRACE_01 and _02 | BirdLand, GreatestRace (_02 from the race's start) |
+| JA_BGM_SEARACE_01 and _02 | SwimRace (_02 from the race's start) |
+| JA_BGM_NINRACE_01 and _02 | RelicOfJungle (_02 from the race's start) |
+| JA_BGM_MATSURI_A and _B | DreadKong01 (_B from the boxing's start) |
+| JA_BGM_BOSS_KONFU_A and _B | VsKonfu (_B from the boxing's start) |
+| JA_BGM_BOSS_MIYAMOTO_A and _B | VsMiyamoto (_B from the boxing's start) |
+| JA_BGM_BOSS_AKEBONO_A and _B | VsAkebono (_B from the boxing's start) |
+| JA_BGM_BOSS_GOROPY_B | VsGoroPig1 to 4 |
+| JA_BGM_BOSS_IUZOU_B | VsElephantCannon1 to 4 |
+| JA_BGM_BOSS_BIRD_B | VsSlumpBird1 to 4 |
+| JA_BGM_BOSS_FINAL | VsFinalKong, VsFinalKong2 (from the fight's start) |
+| JA_BGM_ENDING_CELEMONY | EndingCeremony |
+| JA_BGM_BIND_01 | the bind |
+| JA_BGM_COURSE_SELECT | the map |
+
+A variant plays its state from the piece's start. In the game, a state comes partway through the piece, with a fade of 5
+to 180 frames. The rips leave out the change from one state to the next. The profile lists the variants
+(`JAudioProfile::layer_states`). Bits 16 to 21 of a variant's sound ID contain its states.
+
 ## Chord effects
 
 New Play Control! Donkey Kong Jungle Beat plays many of its instruments' effects (`JA_SE_IST_*`) in the chords of the
@@ -792,6 +865,9 @@ the same address. The driver's parameter block is at **0x81700010**. The block's
 0x2B0 u32  the offset of the SeqPlayer's 16 track pointers in nw4r::snd's SeqSound, for tracks that the game silences
 0x2B4 u32  the offset of the volume in SeqTrack
 0x2B8 u32  the tracks that the game silences on the sound, bit N for track N, or 0
+0x2BC u32  the offset of the SeqPlayer's 16 local variables in nw4r::snd's SeqSound, for variables that the game sets
+0x2C0 u32  the local variables that the game sets on the sound, bit N for variable N, or 0
+0x2C4 ...  16 s16: the values of those variables, by number
 ```
 
 A `.miniwsf` patches only the sound, the group and the heap size (a 12-byte `MEM` chunk at 0x8170001C). It also patches
@@ -799,7 +875,8 @@ the bank's group when the sound requires one (a 4-byte `MEM` chunk at 0x817000C4
 presets, or on which the game sets a send, it patches 0xE0 to 0xEB too (a 12-byte `MEM` chunk at 0x817000F0). The
 library sets up the effects of a sound that no effect lists (see "Effects"). A `.miniwsf` whose sound gets other effects
 patches the block from 0xDC to the end of 0x270's effects instead (a 468-byte `MEM` chunk at 0x817000EC). For a sound
-whose tracks the game silences, it patches 0x2B8 (a 4-byte `MEM` chunk at 0x817002C8). After applying all `MEM` chunks,
+whose tracks the game silences, it patches 0x2B8 (a 4-byte `MEM` chunk at 0x817002C8). For a sound whose variables the
+game sets, it patches 0x2C0 to 0x2E3 (a 36-byte `MEM` chunk at 0x817002D0). After applying all `MEM` chunks,
 a player checks the driver block. If the block has the expected magic, the player rejects a version that it doesn't
 support. WSF 1.1.0's players support version 1. Later players support versions 1 and 2.
 
@@ -813,9 +890,10 @@ It sets the status to 2 when the sound's handle is free again.
 
 With effects, the driver makes the game's effect objects after it starts the sound system. Each object gets a work
 buffer for the largest of its presets. The driver then registers a frame callback with AX in place of the one that
-`nw4r::snd` registered. The driver's callback calls that one first. With effects or tracks to silence, the driver turns
-interrupts off and starts the sound. It sets the volumes of the tracks that the game silences to 0, as
-`SeqSound::SetTrackVolume` does. With effects, it then sets the game's send on the sound and calls the update once. That
+`nw4r::snd` registered. The driver's callback calls that one first. With effects, tracks to silence or variables to
+set, the driver turns interrupts off and starts the sound. It sets the volumes of the tracks that the game silences to
+0, as `SeqSound::SetTrackVolume` does. It writes the variables that the game sets into the sound's player, as
+`SeqSound::WriteVariable` does. With effects, it then sets the game's send on the sound and calls the update once. That
 update passes the send to the sound's player. The driver turns interrupts on again. In the next AX frame, the driver's
 callback appends the effects without presets. In every frame after that, the callback lets the sound's variables pick
 the presets. Archive mode does the same.
@@ -936,6 +1014,11 @@ patches them in the same way. The profile follows:
             gives the effect first. A pair without an effect holds 0xFFFFFFFF
 0x210  8    the effect that a game object gives a value at port 0xb after the start: a pair of a sound ID and the value
             that the game's code gives the effect first, as above
+0x218  u32  the BGM player's function for the state of the first table that a combo's count picks
+0x21C  u32  the game's function for the count at which a stage's combo reaches a layer
+0x220  u32  the stage whose counts the driver uses (30, MorningField: 10, 45 and 80)
+0x224  u32  the BGM player's function for the state of the first table that the player's flags pick
+0x228  u32  the offset of the player's flags in the BGM player
 ```
 
 The driver repeats the game's start-up for sound with the game's functions: the root heap, the game's heaps, the ARAM
@@ -943,7 +1026,13 @@ manager (the game keeps its "ARAM" in MEM2) and the sound files. The game's audi
 the Wii Remote speaker's manager out of it. That manager sends the speaker's sounds to the Wii Remotes. The player has
 no Wii Remotes. Then the driver loads the wave groups and starts the sound. The game's BGM player starts music. It sets
 each track of a piece to the piece's first state from tables in the game's code. A piece whose first state turns every
-track off gets its next state at once. A chord effect starts through the game's chord code over a stage's music. The
+track off gets its next state at once. A variant of a piece then gets the states that the game sets for the piece during
+play, from bits 16 to 23 of its sound ID: a combo's layer in bits 16 and 17, a state of the BGM player's second table in
+bits 18 to 20, and a flight with a Helibird in bit 21. The driver starts the piece with those bits 0. For a flight, it
+sets the player's flags to 4 and calls the player's function for the flags. For a combo, it sets the number of the stage
+object to the stage at 0x220 and calls the player's combo function with the count at which that stage's combo reaches
+the layer. For a state of the second table, it calls the player's function for that table. The game fades to each state.
+The driver sets each one at once. A chord effect starts through the game's chord code over a stage's music. The
 music's tracks are off (see "Chord effects"). The profile gives the number of records in the chord database. An effect
 that the game starts with a count starts through the audio system's start of a sound with a count, with the count that
 the game's code gives it first (see "Effects that the game starts with a count"). Other sounds start in the game's sound

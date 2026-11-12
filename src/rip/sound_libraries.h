@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-// What the ripper's files share. rip.cpp holds the parts that every game shares, and profiles.cpp the games' profiles.
-// The file of each sound library holds the rest: nw4r.cpp for NW4R SND, and jaudio.cpp for JAudio2, JAudio1 and Jac.
+// What the ripper's files share. rip.cpp holds the parts that every game shares. game_profiles.cpp, effect_profiles.cpp
+// and jaudio_profiles.cpp hold the profiles of the games. The file of each sound library holds the rest: nw4r.cpp for
+// NW4R SND, and jaudio.cpp for JAudio2, JAudio1 and Jac.
 // The length analysis of a JAudio game plays the game's code on the player. jaudio_analysis.cpp holds it, in a separate
 // library that links the player.
 

@@ -1,46 +1,25 @@
 // SPDX-License-Identifier: MIT
 
 // foo_input_wsf: foobar2000 input component for WSF (.miniwsf), from xsflib's input template
-// (xsflib/foobar2000/input.h). The template's comment says what the component does. This file gives WSF's traits: its
-// player, names, extensions, GUIDs and limits.
+// (xsflib/foobar2000/input.h). The template's comment says what the component does. This file gives the decoder's name
+// and GUIDs. plugin_traits.h gives WSF's other traits.
 //
 // The player core (src/wsf) does the emulation. Game mode runs the game's sound code on an emulated Wii. Archive mode
 // runs WSF's model of the SDK's sound player. Both modes run the game's AX microcode on the emulated DSP.
 //
 // Build: see plugins/foobar2000/README.md (clang-cl on Windows, or Apple Clang on macOS, with the foobar2000 SDK).
 
-#include <array>
-#include <cstdint>
-#include <optional>
-#include <string>
-#include <string_view>
-
 #include "xsflib/foobar2000/input.h"
-#include "xsflib/psf/psf.h"
 #include <SDK/foobar2000.h>
 
-#include "wsf/format.h"
-#include "wsf/player.h"
+#include "../plugin_traits.h"
 
 namespace
 {
 
-struct Traits
+struct Traits : wsf::PluginTraits
 {
-    using Player = wsf::Player;
-    using Set = wsf::LoadedSet;
-
-    static constexpr const char* kName = "WSF";
     static constexpr const char* kDecoderName = "WSF decoder";
-    static constexpr std::array<const char*, 1> kExtensions = {"miniwsf"};
-    static constexpr uint8_t kPsfVersion = wsf::kPsfVersionWsf;
-
-    // The tags that arrange a sequence in archive mode: the tracks, the tempo and the variables.
-    static constexpr std::array<const char*, 3> kPlaybackTags = {wsf::kTracksTag, wsf::kTempoTag, wsf::kVariablesTag};
-
-    // The largest file read into memory: as large as a program may be. A .wsflib holds a game's sound archive. The
-    // largest archives are hundreds of megabytes.
-    static constexpr t_filesize kMaxFileSize = t_filesize{1} << 30;
 
     // {A34DC260-7833-4B54-8DCC-750144AD1B92}
     static constexpr GUID kInputGuid = {0xa34dc260, 0x7833, 0x4b54, {0x8d, 0xcc, 0x75, 0x01, 0x44, 0xad, 0x1b, 0x92}};
@@ -52,12 +31,6 @@ struct Traits
     static constexpr GUID kEndlessGuid = {0xd98bb8a9, 0x9afb, 0x4392, {0xb9, 0xbe, 0x9e, 0x9e, 0x07, 0xf7, 0x2f, 0x2f}};
     static constexpr GUID kRenderAheadGuid = {
         0xa705e71b, 0xaced, 0x468f, {0xaf, 0x69, 0x5a, 0xbd, 0xe2, 0xe7, 0x23, 0xbc}};
-
-    static std::optional<std::string> LoadSet(const std::string& path, const xsflib::psf::FileReader& reader, Set& out,
-                                              std::string_view separators)
-    {
-        return wsf::LoadSet(path, reader, out, separators);
-    }
 };
 
 xsflib::foobar2000::Settings<Traits> g_settings;
@@ -67,10 +40,6 @@ input_singletrack_factory_t<xsflib::foobar2000::Input<Traits>> g_input_wsf_facto
 
 DECLARE_FILE_TYPE("WSF files", "*.MINIWSF");
 
-DECLARE_COMPONENT_VERSION("WSF Decoder", WSF_VERSION,
-                          "Plays WSF (Nintendo Wii sequenced music) rips. The game's AX microcode runs on an emulated "
-                          "DSP. In game mode, the game's sound code drives it on an emulated Wii. In archive mode, "
-                          "WSF's model of the SDK's sound player drives it.\n\n"
-                          "MIT licence. Uses zlib.");
+DECLARE_COMPONENT_VERSION("WSF Decoder", wsf::PluginTraits::kVersion, wsf::PluginTraits::kAbout);
 
 VALIDATE_COMPONENT_FILENAME("foo_input_wsf.dll");

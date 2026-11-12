@@ -19,9 +19,10 @@
  *      manager plays the speaker's sounds through WPAD, and WSF's machine has no Wii Remotes. The speaker's sounds
  *      come from another file than the TV's;
  *   6. the wave groups that the .miniwsf lists, one group of a wave bank each. The game loads its waves per stage;
- *   7. the sound, by its JAudio sound ID. Music starts in the game's BGM player, the way the game starts it. A chord
- *      effect plays over a stage's music with the music's tracks off (see play_over_music). An effect that the game
- *      starts with a count starts with that count (see play_with_count). The sound manager starts other sounds;
+ *   7. the sound, by its JAudio sound ID. Music starts in the game's BGM player, the way the game starts it. A variant
+ *      of a piece then gets the states that the game sets for the piece during play (see play_states). A chord effect
+ *      plays over a stage's music with the music's tracks off (see play_over_music). An effect that the game starts
+ *      with a count starts with that count (see play_with_count). The sound manager starts other sounds;
  *   8. the audio system's frame process, once a frame, forever. While a chord effect plays, the rhythm's frame process
  *      follows it.
  * A frame of the game is a sleep of the game's frame time. WSF's machine raises no video interrupts. A step that fails
@@ -53,33 +54,10 @@ typedef int s32;
 /* The most wave groups that a .miniwsf lists. ntdlib's Z2Params has the same limit. */
 #define MAX_WAVES 64u
 
-/* A wave archive's state once it is in ARAM. */
-#define WAVES_LOADED 2u
+#include "jaudio/jungle_beat.h"
 
-/* JKRDvdRipper's and JKRArchive's options: decode Yaz0, allocate from a heap's head or tail, and mount an archive in
-   memory. */
-#define EXPAND 1u
-#define FROM_HEAD 1u
-#define FROM_TAIL 2u
+/* JKRArchive's option to mount an archive in memory. jaudio/jungle_beat.h gives JKRDvdRipper's options. */
 #define MOUNT_IN_MEMORY 1u
-
-/* The tracks of a BGM that its states set. */
-#define MUSIC_TRACKS 16u
-
-/* The chord effects. The chord database's table of records holds their count, then the records. A record holds its
-   entry, then its effect's sound ID. The audio system's chord effects hold the database at +8. The database holds the
-   table at +0xc. The chord effects hold their players from +0xc. A player's byte at +0x18 is set from its start until
-   the game stops it. Its byte at +0x19 is set while a step of its effect waits for a beat. Its sound object at +0x34
-   plays the steps. The object holds its JAISoundHandles at +0 and their number at +4. */
-#define NO_RECORD 0xffffffffu
-#define RECORD_SIZE 16u
-#define CHORD_DATABASE 0x8u
-#define RECORD_TABLE 0xcu
-#define CHORD_PLAYER_LIST 0xcu
-#define CHORD_PLAYERS 64u
-#define PLAYER_BUSY 0x18u
-#define PLAYER_WAITING 0x19u
-#define PLAYER_SOUND_OBJECT 0x34u
 
 /* The effects that some stages play in place of another effect (Params.swaps). */
 #define SWAPS 2u
@@ -89,10 +67,6 @@ typedef int s32;
 #define COUNTS 5u
 #define PORTS 1u
 #define NO_EFFECT 0xffffffffu
-
-/* The stage object holds the stage's number at +4 and its row of the stage table at +0xc. */
-#define STAGE_NUMBER 0x4u
-#define STAGE_ROW 0xcu
 
 struct Params
 {
@@ -166,6 +140,13 @@ struct Params
     u32 write_port;         /* bool (system, JAISoundHandle*, u32 port, u16 value): writes a port of a sound */
     u32 counts[COUNTS * 2]; /* the effects that start with a count */
     u32 ports[PORTS * 2];   /* the effects that a game object gives a value after the start */
+    /* the game profile: the states that the game's code sets for the music during play. The first table of the BGM
+       player contains a state for each layer of a combo and for the player's flags */
+    u32 combo_state;     /* void (player, s32 count, bool at_once): the state of the first table for a combo's count */
+    u32 combo_threshold; /* s32 (stage, s32 layer): the count at which a combo reaches the layer in the stage */
+    u32 combo_stage;     /* the stage whose counts the driver uses */
+    u32 flags_state;     /* void (player, bool at_once): the state of the first table for the player's flags */
+    u32 flags_offset;    /* the player's flags in the BGM player: a word whose low bits the states read */
 };
 
 __attribute__((section(".params"), used)) volatile struct Params driver_params = {
@@ -468,6 +449,42 @@ __attribute__((noreturn)) static void play_with_count(u32 system, u32 id, u32 co
     }
 }
 
+/* Sets the states of the variant `id` (STATE_BITS) on the music that `player` plays, at once. The game's code sets them
+   during play, through the same functions. A Helibird sets the player's flags while it carries DK. The flags pick a
+   state of the first table. A combo's count picks a state of the first table by the counts of the stage. The driver
+   uses the count at which the combo reaches the layer in `combo_stage`. A state of the second table comes from the code
+   of a boss, a stage or a scene. The game sets each state with a fade. The driver sets each one at once. */
+static void play_states(u32 system, u32 player, u32 id)
+{
+    volatile struct Params* p = &driver_params;
+    if (id & HELIBIRD)
+    {
+        *(volatile u32*)(player + p->flags_offset) = HELIBIRD_FLAGS;
+        ((fn2)p->flags_state)(player, 1);
+    }
+    const u32 layer = (id >> COMBO_SHIFT) & COMBO_MASK;
+    if (layer)
+    {
+        const u32 stage = word(system + p->stage_offset);
+        if (!stage)
+        {
+            fail(7);
+        }
+        *(volatile u32*)(stage + STAGE_NUMBER) = p->combo_stage;
+        const s32 count = (s32)((fn2)p->combo_threshold)(stage, layer);
+        if (count <= 0)
+        {
+            fail(7);
+        }
+        ((fn3)p->combo_state)(player, (u32)count, 1);
+    }
+    const u32 state = (id >> TABLE_STATE_SHIFT) & TABLE_STATE_MASK;
+    if (state)
+    {
+        ((fn3)p->set_music_state)(player, state, 1);
+    }
+}
+
 __attribute__((noreturn)) void driver_main(void)
 {
     volatile struct Params* p = &driver_params;
@@ -555,7 +572,8 @@ __attribute__((noreturn)) void driver_main(void)
 
     /* The sound. The BGM player starts music and sets the tracks to the music's first states. Some tracks start off.
        The game turns them on later, or never. A BGM whose first state turns every track off gets its next state at
-       once. The game turns that BGM's tracks on later. The sound manager starts other sounds. Its vtable gives
+       once. The game turns that BGM's tracks on later. For a variant, the driver starts the piece and then sets the
+       states (see play_states). The sound manager starts other sounds. Its vtable gives
        startSound(JAISoundID*, JAISoundHandle*, const TVec3*) at 0xc. The player holds its sound's handle. The driver
        copies the handle to `sound` once a frame. A chord effect plays over a stage's music. Some stages play another
        effect in place of `swapped_effect`, with the records of `swapped_effect`. Such an effect plays at its stage.
@@ -588,16 +606,18 @@ __attribute__((noreturn)) void driver_main(void)
     const u32 player = (id >> 24) == p->music_section ? system + p->music_player_offset : 0;
     if (player)
     {
-        ((fn2)virtual_function(player, 8))(player, (u32)&id);
+        const u32 piece = id & ~STATE_BITS;
+        ((fn2)virtual_function(player, 8))(player, (u32)&piece);
         p->sound = word(player + 4);
         if (!p->sound)
         {
             fail(7);
         }
-        if (starts_silent(id))
+        if (starts_silent(piece))
         {
             ((fn3)p->set_music_state)(player, 1, 1);
         }
+        play_states(system, player, id);
     }
     else if (!(((fn4)virtual_function(system, 0xc))(system, (u32)&id, (u32)&p->sound, 0) & 0xff))
     {

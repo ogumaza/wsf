@@ -2,8 +2,8 @@
 
 // WSF player core. Loads a .wsflib/.miniwsf set and produces its audio. Game mode runs the game's code, including its
 // sound code and OS, on an emulated Wii. Archive mode uses WSF's model of the SDK's sound player. Both modes run the
-// game's AX microcode on the emulated DSP. Portable C++ with no platform audio or UI. The CLI renderer and the
-// foobar2000 component use it.
+// game's AX microcode on the emulated DSP. Portable C++ with no platform audio or UI. wsfplay, wsfrip's JAudio
+// analysis, the foobar2000 component and the XMPlay plugin use it.
 
 #pragma once
 
