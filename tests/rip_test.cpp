@@ -829,6 +829,54 @@ void TestPikmin2Sounds()
           "the root tracks of the other pieces, their variants and the effects idle in calls");
 }
 
+// Tests the chord layers of the profiles (JAudioProfile::chord_layers).
+void TestChordLayers()
+{
+    // Only New Play Control! Donkey Kong Jungle Beat's profile lists chord layers, at most as many as the driver's table
+    // holds. Each belongs to a piece of music, 0x01000000 plus an index below 0x100, and names a stage and one or two
+    // records of the chord database below 0x100. A piece's layers have different suffixes, and none is the suffix of a
+    // layer state.
+    for (const rip::JAudioProfile& profile : rip::KnownJAudioProfiles())
+    {
+        if (profile.chord_layers.empty())
+        {
+            continue;
+        }
+
+        Check(profile.driver == rip::JAudioDriver::kJungleBeat, profile.name + ": the driver of chord layers");
+        Check(profile.chord_layers.size() <= ntdlib::jaudio::kMaxChordLayers,
+              profile.name + ": the number of chord layers");
+        for (std::size_t i = 0; i < profile.chord_layers.size(); i++)
+        {
+            const ntdlib::jaudio::JungleBeatChordLayer& layer = profile.chord_layers[i];
+            const std::string name = profile.name + ": chord layer " + std::to_string(i);
+            Check((layer.piece & 0xffffff00) == 0x01000000 && layer.stage != 0 && layer.stage < 0x100 &&
+                      layer.record != 0 && layer.record < 0x100 && layer.second < 0x100 && layer.suffix &&
+                      *layer.suffix,
+                  name);
+
+            // The sound ID gives the index back, in bits 16 to 22 and bit 15, and the piece's ID.
+            const uint32_t id = ntdlib::jaudio::ChordLayerId(layer.piece, static_cast<uint32_t>(i));
+            Check(
+                ((id >> 16 & 0x7f) | (id >> 8 & 0x80)) == i &&
+                    (id & ~(ntdlib::jaudio::kChordLayer | 0x7f0000u | ntdlib::jaudio::kChordLayerHigh)) == layer.piece,
+                name + ": its sound ID");
+            for (std::size_t j = 0; j < i; j++)
+            {
+                Check(profile.chord_layers[j].piece != layer.piece ||
+                          std::string(profile.chord_layers[j].suffix) != layer.suffix,
+                      name + ": its suffix");
+            }
+
+            for (const ntdlib::jaudio::JungleBeatState& state : profile.layer_states)
+            {
+                Check(state.piece != layer.piece || std::string(state.suffix) != layer.suffix,
+                      name + ": its suffix and the states'");
+            }
+        }
+    }
+}
+
 // Tests the copy of an archive for a game-mode library (rip::KeepLoadedGroups): the groups that the driver loads for
 // each sound. ntdlib's rsar_cut test checks the copy of the loaded groups.
 void TestKeepLoadedGroups()
@@ -895,6 +943,7 @@ int main()
         TestPieces();
         TestJac();
         TestPikmin2Sounds();
+        TestChordLayers();
         TestKeepLoadedGroups();
         TestProgramTooLarge();
     };

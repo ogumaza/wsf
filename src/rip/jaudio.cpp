@@ -378,14 +378,21 @@ std::optional<std::vector<uint8_t>> BuildJAudioLibrary(const ntdlib::disc::GameF
     }
     else
     {
-        if (block + kJAudioParamsOffset + profile.params.size() * 4 > library.driver.size())
+        // Donkey Kong Jungle Beat's driver takes the table of its chord layers after the profile's words.
+        std::vector<uint32_t> params = profile.params;
+        if (profile.driver == JAudioDriver::kJungleBeat)
+        {
+            ntdlib::jaudio::AppendChordLayers(profile.chord_layers, params);
+        }
+
+        if (block + kJAudioParamsOffset + params.size() * 4 > library.driver.size())
         {
             return LibraryError(error, "the profile has more parameters than its driver's block holds");
         }
 
-        for (std::size_t i = 0; i < profile.params.size(); i++)
+        for (std::size_t i = 0; i < params.size(); i++)
         {
-            xsflib::StoreBe32(library.driver.data() + block + kJAudioParamsOffset + i * 4, profile.params[i]);
+            xsflib::StoreBe32(library.driver.data() + block + kJAudioParamsOffset + i * 4, params[i]);
         }
     }
 
@@ -770,6 +777,38 @@ void AddLayerStates(const JAudioProfile& profile, std::vector<JAudioSound>& soun
     sounds = std::move(listed);
 }
 
+// Adds the chord effects that the game plays beside its music to `sounds`, each after its piece
+// (JAudioProfile::chord_layers). A layer's label is the label of the piece, "_" and the suffix of the layer, such as
+// "JA_BGM_MAIN_01_enemy_sleeping". The layers share the piece's number.
+void AddChordLayers(const JAudioProfile& profile, std::vector<JAudioSound>& sounds)
+{
+    if (profile.chord_layers.empty())
+    {
+        return;
+    }
+
+    std::vector<JAudioSound> listed;
+    for (JAudioSound& sound : sounds)
+    {
+        listed.push_back(std::move(sound));
+        const JAudioSound base = listed.back();
+        for (std::size_t i = 0; i < profile.chord_layers.size(); i++)
+        {
+            const ntdlib::jaudio::JungleBeatChordLayer& layer = profile.chord_layers[i];
+            if (layer.piece != base.id)
+            {
+                continue;
+            }
+
+            JAudioSound variant = VariantOf(base, std::string("_") + layer.suffix);
+            variant.id = ntdlib::jaudio::ChordLayerId(layer.piece, static_cast<uint32_t>(i));
+            listed.push_back(std::move(variant));
+        }
+    }
+
+    sounds = std::move(listed);
+}
+
 } // namespace
 
 std::optional<std::vector<JAudioSound>> ReadJAudioSounds(const ntdlib::disc::GameFiles& game, const JAudioFiles& files,
@@ -784,6 +823,7 @@ std::optional<std::vector<JAudioSound>> ReadJAudioSounds(const ntdlib::disc::Gam
         {
             AddMutedStarts(*profile, sounds);
             AddPieceStates(*profile, sounds);
+            AddChordLayers(*profile, sounds); // before the states, which then come first after each piece
             AddLayerStates(*profile, sounds);
         }
 

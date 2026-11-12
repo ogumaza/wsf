@@ -687,6 +687,53 @@ A variant plays its state from the piece's start. In the game, a state comes par
 to 180 frames. The rips leave out the change from one state to the next. The profile lists the variants
 (`JAudioProfile::layer_states`). Bits 16 to 21 of a variant's sound ID contain its states.
 
+Some objects of a stage also play a chord effect beside the stage's music while they're near DK (see "Chord effects"):
+a sleeping enemy, an angry one, an enemy that waits for DK's attack, the attack chance of a stunned enemy, the coconut
+pigs' battle, an armadillo's rush and others. These effects repeat their steps until the object stops them. Some of them
+replace a part of the music. A rip also contains each pair of a piece and such an effect that a stage plays: 127
+variants of 25 pieces. A variant's label is the piece's label, "_" and the effect's name without `JA_SE_IST_`, in lower
+case, for example `JA_BGM_MAIN_01_enemy_sleeping`. The variants follow the piece's states and have the piece's number.
+The effects:
+
+- `enemy_sleeping` (record 134): PigPoppoSleep and KobuPakkun.
+- `enemy_angry` (135): Garigari, KobuPakkunAngry, NoFin, NoMouth, PigPoppoFire, PigPoppoKiba, RollingFrog and BigBee.
+- `dk_wait_attack` (136): most enemies while they wait for DK's attack.
+- `dk_has_wait` (138) and `dk_has_weight_damage` (143): MiniIga and its fire and ice kinds.
+- `enemy_wait_pig` (140) and `enemy_blow_wind` (141): PigPoppo, and BigBee and PigPoppoFire for the second.
+- `attack_chance` (157 and 158 together): a stunned enemy.
+- `enemy_battle` (159): BigBee, NeedlePoppo and CocoPig.
+- `garigari_rush` (34), `garigari_spin` (37) and `garigari_ball_roll` (44): Garigari.
+- `only_head_move` (46), `bubble_flower_rotate` (47) and `lect_kikki_run` (132): OnlyHead, BubbleFlower and
+  LectureKikki.
+
+The names are those of the objects in the stages' files. Most objects ask for their record once a frame through
+0x8027c0b0 (record, object), from 0x802615f0 and the helpers at 0x80261660 to 0x802616a0. 0x8027c0b0 starts the record
+through `startChordSe` (0x80273870) while its effect doesn't play (0x80273f40), and keeps the effect playing otherwise.
+The coconut pigs' battle and the attack chance start once instead, through the audio system's list of shared effects
+(0x8027c1a0). For a variant, the driver writes the stage's number to the stage object's number and row and starts the
+row's music through `start_stage_music`, as the stage does. Each frame it then asks for the records through 0x8027c0b0,
+or starts the records that start once through 0x8027c050 while they don't play. The music's tracks play as the stage
+starts them. The length analysis leaves out the effects' tracks: a track belongs to an effect if its root track belongs
+to a JAISe. Each variant has the music's length.
+
+Two stages give `JA_BGM_MAIN_22` in their row: VsFinalKong (0x56) and VsFinalKong2 (0x58). For them, the Wii release's
+`start_stage_music` asks the game's system object (the pointer at 0x805012d8) for the course that DK plays (its record
+at +0x24). In Survival Mode, the course of world 5 and kingdom 3, the stage starts `JA_BGM_BOSS_FINAL` in place of the
+row's music (0x80277590, through 0x80265190 and 0x8027bb90). The GameCube release has no Survival Mode, and its
+`start_stage_music` (0x8025049c) has no such test. The game's `main` creates the system object (0x80226e90), and the
+driver doesn't. For a variant, the driver therefore gives the game a stand-in system object whose course record the
+game's constructor sets up (0x80230410). That record names the first course. The game's table of courses (0x803aa4c0)
+puts VsFinalKong in world 5, kingdom 1 and VsFinalKong2 in kingdom 2. The stages play their row's music there, as with
+the stand-in.
+
+The pairs come from the objects that each stage places (the `objinfo` files of its `world/*.arc`) and the records that
+each object's class plays. The game's main.dol names the classes of the objects' states (RTTI). A piece that several
+stages play gets each effect once, at the first stage by number that places such an object. At the castle stages, 0x43
+and 0x44, `startChordSe` refuses records 134, 135, 138, 140, 141, 143 and 157 to 159 (0x80273940). The GameCube release
+places the same objects for these effects, except for KikkiFestival's MiniIga. The profile lists the variants
+(`JAudioProfile::chord_layers`, ntdlib's `kJungleBeatWiiChordLayers`). Bit 23 of a variant's sound ID marks it. Bits 16
+to 22 contain bits 0 to 6 of its index in the list, and bit 15 contains bit 7. The driver's table holds 256 variants.
+
 ## Chord effects
 
 New Play Control! Donkey Kong Jungle Beat plays many of its instruments' effects (`JA_SE_IST_*`) in the chords of the

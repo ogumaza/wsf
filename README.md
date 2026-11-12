@@ -92,7 +92,10 @@ music as you play: a combo, a flight with a Helibird and each part of a boss fig
 rip of Jungle Beat contains each piece as the game starts it, and 102 variants of 44 pieces, one for each later state. A
 variant is named after the piece and what sets its state, for example `JA_BGM_MAIN_01_combo1` and `_combo2` for the
 layers of a combo, `_helibird` for a flight with a Helibird, `_round2` and `_change` for a boss's second round and the
-change before it, and `_underwater` for TropicalCoast's music while DK swims below. Each variant plays its state from
+change before it, and `_underwater` for TropicalCoast's music while DK swims below. Some enemies and objects also play a
+loop beside the music while they're near DK, such as a sleeping hog or a stunned enemy. A rip contains 127 more variants
+of 25 pieces for those, one for each loop that a stage plays, named after the loop, for example
+`JA_BGM_MAIN_01_enemy_sleeping`. Each variant plays its state from
 the start of the piece. The game moves from one state to the next with a short fade, and the rips leave out those
 changes. The states are those of the GameCube release, plus `JA_BGM_COURSE_SELECT_state1`, the map's music with two
 tracks off. The specification, `docs/wsf.md`, lists the states and the stages that play each piece. Archive mode doesn't

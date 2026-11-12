@@ -821,11 +821,21 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                     30,         // combo_stage: MorningField, whose combos reach their layers at counts of 10, 45 and 80
                     0x802799d0, // flags_state: the BGM player's state of the first table for the player's flags
                     0x164,      // flags_offset
+                    // The chord effects that objects play beside a stage's music (ntdlib's kJungleBeatWiiChordLayers).
+                    // The table of chord layers follows. The objects that start an effect once do it through
+                    // start_chord_effect.
+                    0x8027c0b0, // keep_chord_effect: starts a record's effect, or keeps it playing, for an object
+                                // that asks once a frame (0x802615f0)
+                    0x80273f40, // chord_effect_playing: whether a record's effect plays
+                    0x805012d8, // game_system: the variable that holds the game's system object (main, 0x80226ea4)
+                    0x24,       // course_offset: the system object's course record (0x80227be8)
+                    0x80230410, // course_ctor: the course record's constructor
                 },
             .background_sound = 50, // the driver's `music`
             .track_parent_offset = 0x12c,
             .files = {"AudioRes/Seqs/JaiSeq.arc", "AudioRes/Info/JaiChord.arc", "AudioRes/Info/ChordSeDataBase.csd"},
             .layer_states = ntdlib::jaudio::kJungleBeatWiiStates,
+            .chord_layers = ntdlib::jaudio::kJungleBeatWiiChordLayers,
         },
         // New Play Control! Pikmin (USA). The game's sound library is the early JAudio1 of the GameCube release. The
         // game calls the library through C functions (Jac, Jaf, Jaq and Jam). The game's code holds the sequence index.

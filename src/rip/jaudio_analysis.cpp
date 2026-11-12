@@ -17,6 +17,7 @@
 #include "ntdlib/dsp/memory.h"
 #include "ntdlib/flipper/z2_params.h"
 #include "ntdlib/jaudio/game_lengths.h"
+#include "ntdlib/jaudio/jungle_beat_states.h"
 #include "ntdlib/ppc/cpu.h"
 #include "xsflib/bytes.h"
 
@@ -67,14 +68,15 @@ private:
 };
 
 // WSF's player as the machine that ntdlib's analysis watches: its output, the emulated Wii's memory at CPU addresses,
-// and its CPU.
+// and its CPU. For sound `sound_id`.
 class Machine
 {
 public:
-    Machine(Player& player, wii::System& system, const JAudioProfile& profile)
+    Machine(Player& player, wii::System& system, const JAudioProfile& profile, uint32_t sound_id)
         : player_(player),
           system_(system),
           profile_(profile),
+          chord_layer_(!profile.chord_layers.empty() && (sound_id & ntdlib::jaudio::kChordLayer) != 0),
           cpu_(system.Cpu(), [this](uint32_t pc) { return OnBackgroundTrack(pc); })
     {
     }
@@ -103,8 +105,9 @@ public:
 
 private:
     // Whether the watched instruction at `pc` parses a track of the sound that the driver plays beside the ripped one
-    // (see JAudioProfile::background_sound). A track belongs to that sound if it or one of its parents is the sound's
-    // root track. The register that holds the track is the one that ntdlib's analysis reads.
+    // (see JAudioProfile::background_sound), or of a chord layer's effect (JAudioProfile::chord_layers). A track
+    // belongs to that sound if it or one of its parents is the sound's root track. The register that holds the track
+    // is the one that ntdlib's analysis reads.
     bool OnBackgroundTrack(uint32_t pc)
     {
         const ntdlib::jaudio::GameWatch& watch = profile_.watch;
@@ -114,33 +117,61 @@ private:
             return false;
         }
 
-        const uint32_t sound = Word(kJAudioParamsAddress + 4 * static_cast<uint32_t>(profile_.background_sound));
-        if (sound == 0 || Word(sound + watch.vtable_offset) != watch.sequence_vtable)
-        {
-            return false;
-        }
-
-        const uint32_t root = sound + watch.sequence_track_offset;
         const uint32_t reg = pc == watch.parse_command ? watch.command_track_register
                              : conditional             ? watch.conditional_track_register
                                                        : watch.jump_track_register;
-        uint32_t track = system_.Cpu().state_.gpr[reg];
-        for (int level = 0; track != 0 && level < kMaxTrackDepth; level++)
+        const uint32_t track = system_.Cpu().state_.gpr[reg];
+        const uint32_t sound = Word(kJAudioParamsAddress + 4 * static_cast<uint32_t>(profile_.background_sound));
+        if (sound == 0 || Word(sound + watch.vtable_offset) != watch.sequence_vtable)
         {
-            if (track == root)
+            return chord_layer_ && OnEffect(track);
+        }
+
+        const uint32_t root = sound + watch.sequence_track_offset;
+        uint32_t t = track;
+        for (int level = 0; t != 0 && level < kMaxTrackDepth; level++)
+        {
+            if (t == root)
             {
                 return true;
             }
 
-            track = Word(track + profile_.track_parent_offset);
+            t = Word(t + profile_.track_parent_offset);
         }
 
         return false;
     }
 
+    // The root of `track`: the track that its parents lead to, or 0.
+    uint32_t RootOf(uint32_t track)
+    {
+        for (int level = 0; track != 0 && level < kMaxTrackDepth; level++)
+        {
+            const uint32_t parent = Word(track + profile_.track_parent_offset);
+            if (parent == 0)
+            {
+                return track;
+            }
+
+            track = parent;
+        }
+
+        return 0;
+    }
+
+    // Whether `track` belongs to an effect. A chord layer's effects play beside the music that the driver reports. The
+    // analysis follows the music alone.
+    bool OnEffect(uint32_t track)
+    {
+        const ntdlib::jaudio::GameWatch& watch = profile_.watch;
+        const uint32_t root = RootOf(track);
+        return root != 0 && Word(root - watch.effect_track_offset + watch.vtable_offset) == watch.effect_vtable;
+    }
+
     Player& player_;
     wii::System& system_;
     const JAudioProfile& profile_;
+    bool chord_layer_;
     AnalysisCpu cpu_;
 };
 
@@ -189,7 +220,7 @@ std::optional<xsflib::rip::Timing> PlayAndWatch(const std::vector<uint8_t>& libr
         return std::nullopt;
     }
 
-    Machine machine(player, *player.GameSystem(), profile);
+    Machine machine(player, *player.GameSystem(), profile, sound_id);
     // For a JAudio1 game, the sound's ID distinguishes a sequence from an effect.
     return ntdlib::jaudio::AnalyzeGameSound(machine, kJAudioZ2Address + ntdlib::flipper::z2::kHandleOffset,
                                             WatchOf(profile, sound_id), JAudioLengthRules(), found, lookups_sound,

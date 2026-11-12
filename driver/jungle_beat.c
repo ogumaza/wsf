@@ -59,6 +59,15 @@ typedef int s32;
 /* JKRArchive's option to mount an archive in memory. jaudio/jungle_beat.h gives JKRDvdRipper's options. */
 #define MOUNT_IN_MEMORY 1u
 
+/* Stand-ins for the game's system object and its course record (Params.game_system). The Wii release's start of a
+   stage's music asks for the course while the stage's row gives JA_BGM_MAIN_22 (0x80277590, through 0x80265190). The
+   game's system object is 0x104 bytes (main, 0x80226e90), and its course record is 0x14 bytes (0x80227bd4). The stand-in
+   system holds nothing but the course. The course record gets the game's constructor. */
+#define GAME_SYSTEM_SIZE 0x104u
+#define COURSE_SIZE 0x14u
+static u32 game_system[GAME_SYSTEM_SIZE / 4];
+static u32 course[COURSE_SIZE / 4];
+
 /* The effects that some stages play in place of another effect (Params.swaps). */
 #define SWAPS 2u
 
@@ -147,6 +156,17 @@ struct Params
     u32 combo_stage;     /* the stage whose counts the driver uses */
     u32 flags_state;     /* void (player, bool at_once): the state of the first table for the player's flags */
     u32 flags_offset;    /* the player's flags in the BGM player: a word whose low bits the states read */
+    /* the game profile: the chord effects that some objects play beside the music while they are near, such as a
+       sleeping hog's. Each layer gives the stage, the records and how the objects start them (CHORD_LAYER). The
+       objects that start an effect once do it through start_chord_effect */
+    u32 keep_chord_effect;    /* void (u32 record, void* object): starts the record's effect, or keeps it playing */
+    u32 chord_effect_playing; /* bool (chords, u32 record): whether the record's effect plays */
+    /* the game profile: the game's system object, which main creates. The driver doesn't create it. A stage's start of
+       its music asks the system for the course that DK plays (see play_chord_layer) */
+    u32 game_system;   /* the variable that holds the game's system object */
+    u32 course_offset; /* the system object's pointer to the course that DK plays */
+    u32 course_ctor;   /* the constructor of that course record */
+    u32 chord_layers[CHORD_LAYERS];
 };
 
 __attribute__((section(".params"), used)) volatile struct Params driver_params = {
@@ -449,6 +469,75 @@ __attribute__((noreturn)) static void play_with_count(u32 system, u32 id, u32 co
     }
 }
 
+/* Plays the music of a stage's row with one or two chord effects beside it, as the game does while an object that plays
+   them is near DK. `layer` holds the stage and the effects' records (CHORD_LAYER). The music's tracks play as the stage
+   starts them. The driver reports the music as the sound. The effects play until the music ends.
+
+   Most objects ask for their effect once a frame through keep_chord_effect, which starts the effect or keeps it
+   playing. Some start their effects once, through the audio system's list of the effects that objects share, and stop
+   them later. The driver starts such an effect through start_chord_effect, and again if it isn't playing. The effects'
+   code refuses an effect until the music's chords are in.
+
+   The Wii release's stages whose row gives JA_BGM_MAIN_22, VsFinalKong and VsFinalKong2, start JA_BGM_BOSS_FINAL in
+   its place in Survival Mode, the course of world 5 and kingdom 3 (0x80277590). They ask the game's system object for
+   the course. The driver gives the game a stand-in system with a course record that the game's constructor sets up.
+   The record's course is the first one, not Survival Mode, and the stages play their row's music, as in the courses of
+   the main game. */
+__attribute__((noreturn)) static void play_chord_layer(u32 system, u32 layer)
+{
+    volatile struct Params* p = &driver_params;
+    const u32 stage = word(system + p->stage_offset);
+    if (!stage)
+    {
+        fail(7);
+    }
+    if (!word(p->game_system))
+    {
+        ((fn1)p->course_ctor)((u32)course);
+        game_system[p->course_offset / 4] = (u32)course;
+        *(volatile u32*)p->game_system = (u32)game_system;
+    }
+    const u32 stage_number = (layer >> LAYER_STAGE_SHIFT) & 0xff;
+    *(volatile u32*)(stage + STAGE_NUMBER) = stage_number;
+    *(volatile u32*)(stage + STAGE_ROW) = stage_number;
+    ((fn1)p->start_stage_music)(stage);
+    const u32 music_player = system + p->music_player_offset;
+    p->sound = word(music_player + 4);
+    if (!p->sound)
+    {
+        fail(7);
+    }
+    p->status = STATUS_PLAYING;
+
+    const u32 records[2] = {layer & 0xff, (layer >> 8) & 0xff};
+    for (;;)
+    {
+        for (u32 i = 0; i < 2; i++)
+        {
+            if (i && !records[i])
+            {
+                break;
+            }
+            if (!(layer & LAYER_STARTED_ONCE))
+            {
+                ((fn2)p->keep_chord_effect)(records[i], 0);
+            }
+            else if (!((fn2)p->chord_effect_playing)(word(system + p->chord_offset), records[i]))
+            {
+                ((fn2)p->start_chord_effect)(records[i], 0);
+            }
+        }
+        ((fn1)p->audio_frame)(system);
+        ((fn1)p->rhythm_frame)(system + p->rhythm_offset);
+        p->sound = word(music_player + 4);
+        if (p->status == STATUS_PLAYING && p->sound == 0)
+        {
+            p->status = STATUS_FINISHED;
+        }
+        wait_frame();
+    }
+}
+
 /* Sets the states of the variant `id` (STATE_BITS) on the music that `player` plays, at once. The game's code sets them
    during play, through the same functions. A Helibird sets the player's flags while it carries DK. The flags pick a
    state of the first table. A combo's count picks a state of the first table by the counts of the stage. The driver
@@ -578,8 +667,14 @@ __attribute__((noreturn)) void driver_main(void)
        copies the handle to `sound` once a frame. A chord effect plays over a stage's music. Some stages play another
        effect in place of `swapped_effect`, with the records of `swapped_effect`. Such an effect plays at its stage.
        Every other chord effect plays at stage 0, the first row of the stage table. An effect that the game starts
-       with a count starts with the count that the game gives it first. */
+       with a count starts with the count that the game gives it first. A chord layer plays a stage's music with
+       effects beside it (see play_chord_layer). */
     const u32 id = p->sound_id;
+    if (id & CHORD_LAYER)
+    {
+        const u32 index = ((id >> CHORD_LAYER_SHIFT) & CHORD_LAYER_MASK) | (id & CHORD_LAYER_HIGH ? 0x80 : 0);
+        play_chord_layer(system, p->chord_layers[index % CHORD_LAYERS]);
+    }
     u32 effect = id;
     u32 stage_number = 0;
     for (u32 i = 0; i < SWAPS; i++)

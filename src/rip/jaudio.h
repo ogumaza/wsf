@@ -211,6 +211,11 @@ struct JAudioProfile
     // The states that the game's code sets for its music during play, for driver/jungle_beat.c. ReadJAudioSounds puts a
     // piece's states after the piece. Each state shares the piece's number. Other profiles have none.
     std::span<const ntdlib::jaudio::JungleBeatState> layer_states = {};
+
+    // The chord effects that the game plays beside a piece of music while an object keeps them playing, for
+    // driver/jungle_beat.c. ReadJAudioSounds puts a piece's layers after the piece and its states. Each layer shares the
+    // piece's number. The driver's parameters end with the layers' stages and records.
+    std::span<const ntdlib::jaudio::JungleBeatChordLayer> chord_layers = {};
 };
 
 const std::vector<JAudioProfile>& KnownJAudioProfiles();
