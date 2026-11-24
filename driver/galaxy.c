@@ -25,9 +25,9 @@
  *      the scene manager's stationed banks. Then the wave groups that the .miniwsf lists, one group of a wave bank
  *      each. The game loads them per stage and per scenario;
  *   7. the sound, by its JAudio sound ID. Music starts in the BGM manager's stage slot, the way the game starts a
- *      stage's music. The manager sets the tracks to the music's first state. The audio system starts other sounds,
- *      in Luigi mode for a Luigi variant, and the driver writes the low-pass cutoff that the game's sound objects
- *      give an effect;
+ *      stage's music. The manager sets the tracks to the music's first state. A state's .miniwsf then gives the music
+ *      another state (galaxy_state.h). The audio system starts other sounds, in Luigi mode for a Luigi variant, and
+ *      the driver writes the low-pass cutoff that the game's sound objects give an effect;
  *   8. the audio system's frame process, once a frame, forever.
  * A frame of the game is a sleep of the game's frame time. WSF's machine raises no video interrupts. A step that fails
  * stops the driver with its number in the status word. Step 1 is the check of the block's header.
@@ -41,22 +41,11 @@
  * requires no PowerPC toolchain.
  */
 
-typedef unsigned int u32;
-typedef int s32;
+#include "galaxy_state.h"
+#include "guest.h"
 
 #define PARAMS_MAGIC 0x57534644u /* 'WSFD' */
 #define PARAMS_VERSION 2u
-
-/* Values of Params.status. They're macros because an enumerator can't hold 0x80000000 before C23. */
-#define STATUS_PLAYING 1u
-#define STATUS_FINISHED 2u
-#define STATUS_ERROR 0x80000000u /* | step number */
-
-/* The frames that the driver waits for the waves before it gives up. */
-#define SETUP_FRAMES 600u
-
-/* The most wave groups that a .miniwsf lists. ntdlib's Z2Params has the same limit. */
-#define MAX_WAVES 64u
 
 /* VIInit's screen-saver threshold for a 60 Hz mode: 18,000 retraces, 5 minutes. */
 #define DIMMING_RETRACES 18000u
@@ -123,6 +112,7 @@ struct Params
     u32 set_cutoff_to_port;     /* void (sound object, JAISoundHandle*, JAISoundID*): an effect's cutoff */
     u32 set_player_luigi;       /* void (scene manager): Luigi mode, in which the player's voices are Luigi's */
     u32 luigi;                  /* 1 to start the sound in Luigi mode; patched by a Luigi variant's .miniwsf */
+    struct PieceState piece;    /* the music's state (galaxy_state.h) */
 };
 
 __attribute__((section(".params"), used)) volatile struct Params driver_params = {
@@ -130,50 +120,8 @@ __attribute__((section(".params"), used)) volatile struct Params driver_params =
     .version = PARAMS_VERSION,
 };
 
-typedef u32 (*fn0)(void);
-typedef u32 (*fn1)(u32);
-typedef u32 (*fn2)(u32, u32);
-typedef u32 (*fn3)(u32, u32, u32);
-typedef u32 (*fn4)(u32, u32, u32, u32);
-typedef u32 (*fn5)(u32, u32, u32, u32, u32);
-typedef u32 (*fn6)(u32, u32, u32, u32, u32, u32);
-typedef u32 (*fn9)(u32, u32, u32, u32, u32, u32, u32, u32, u32);
-
-static u32 word(u32 address)
-{
-    return *(volatile u32*)address;
-}
-
-static void wait_frame(void)
-{
-    /* OSSleepTicks takes an OSTime, a 64-bit count in r3 (high) and r4 (low). */
-    ((fn2)driver_params.sleep)(0, driver_params.frame_ticks);
-}
-
-__attribute__((noreturn)) static void fail(u32 step)
-{
-    driver_params.status = STATUS_ERROR | step;
-    for (;;)
-    {
-        wait_frame();
-    }
-}
-
-/* Whether every listed wave group is in ARAM. A group without a file on the disc never loads. The game has no samples
-   for its waves. */
-static int waves_loaded(void)
-{
-    volatile struct Params* p = &driver_params;
-    const u32 section = word(p->section_heap);
-    for (u32 i = 0; i < p->wave_count && i < MAX_WAVES; i++)
-    {
-        if (!(((fn3)p->wave_loaded)(section, p->waves[i] >> 16, p->waves[i] & 0xffff) & 0xff))
-        {
-            return 0;
-        }
-    }
-    return 1;
-}
+#include "galaxy_waves.h"
+#include "sleep.h"
 
 /* Runs the audio system's frame process until `loaded` returns true for the scene manager. Fails with `step` after
    SETUP_FRAMES frames. */
@@ -192,17 +140,7 @@ static void wait_for_waves(u32 system, u32 loaded, u32 step)
     }
 }
 
-/* Whether the disc has a file at the game's `path`. */
-static int on_disc(u32 path)
-{
-    return (s32)((fn1)driver_params.path_to_entry)(path) >= 0;
-}
-
-/* Mounts the archive at the game's `path` in memory from `heap`'s head. */
-static u32 mount(u32 path, u32 heap)
-{
-    return ((fn4)driver_params.mount)(path, MOUNT_IN_MEMORY, heap, FROM_HEAD);
-}
+#include "disc_files.h"
 
 __attribute__((noreturn)) void driver_main(void)
 {
@@ -306,6 +244,9 @@ __attribute__((noreturn)) void driver_main(void)
         {
             fail(7);
         }
+
+        /* A state's .miniwsf gives the piece a state, as the game's code does during play. */
+        set_piece_state(&p->piece, p->sound);
     }
     else
     {

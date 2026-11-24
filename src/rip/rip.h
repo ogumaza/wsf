@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 // WSF ripper. For a game with NW4R SND, it builds a .wsflib for one of the game's sound archives and one .miniwsf per
-// sequence. Game mode rips the game's code, for games with a driver profile. Archive mode rips a sound archive and AX's
-// microcode for WSF's model of the SDK's sound player. The profiles of the games are in profiles.h, and the rips of
-// the JAudio games in jaudio.h.
+// sequence. Game mode rips the game's code, for games with a driver profile. Archive mode rips a sound archive and the
+// AX microcode for the model of the SDK sound player. The profiles of the games are in profiles.h, and the rips of the
+// JAudio games in jaudio.h.
 
 #pragma once
 
@@ -35,7 +35,7 @@ namespace wsf::rip
 struct SoundData
 {
     uint32_t group;
-    std::optional<uint32_t> bank_group; // the group with the bank, when `group` lacks it
+    std::optional<uint32_t> bank_group; // the group with the bank, when `group` doesn't have it
     uint32_t heap_size;
 };
 
@@ -143,12 +143,15 @@ public:
 
     ~LengthAnalyzer();
 
-    // A looping sequence gets two loops and a 10 s fade. Any other sequence runs to its end or to where it falls silent
-    // for good, for at most 600 s. A sequence that never makes a sound is marked silent and gets the 0.5 s that follows
-    // a sequence's last sound. Returns nullopt when the length can't be worked out. No length tag is written then.
-    // Throws std::bad_alloc when memory runs out. The effects are those of `effects_sound`, by default the sound
-    // itself. A sequence that plays together with others gets the effects of the first.
-    std::optional<Timing> Analyze(uint32_t sound_index, std::optional<uint32_t> effects_sound = std::nullopt) const;
+    // A looping sequence gets two loops and a 7 s fade. Any other sequence runs to its end or to where it falls silent
+    // for good, for at most 600 s, or with `limit` kLong 3,600 s (xsflib::rip::Limit). A sequence at the limit gets
+    // 600 s and the fade under either limit. A sequence that never makes a sound is marked silent, with a length of 0.
+    // The timing of a sequence that sounds has its first sample that isn't 0. Returns nullopt when the length can't be
+    // worked out. No length tag is written then. Throws std::bad_alloc when memory runs out. The effects are those of
+    // `effects_sound`, by default the sound itself. A sequence that plays together with others gets the effects of the
+    // first.
+    std::optional<Timing> Analyze(uint32_t sound_index, std::optional<uint32_t> effects_sound = std::nullopt,
+                                  xsflib::rip::Limit limit = xsflib::rip::Limit::kDefault) const;
 
 private:
     struct Impl;

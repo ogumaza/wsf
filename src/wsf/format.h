@@ -97,8 +97,8 @@ struct ProcessDescriptor
 // "The emulated system (game mode)").
 constexpr char kHeaderPath[] = "sys/boot.bin";
 
-// Descriptor of an archive-mode set (docs/wsf.md, "Archive mode"). WSF's model of the SDK's sound player (nw4r::snd and
-// AX) plays the sound archive on the game's AX microcode. The game's code isn't used.
+// Descriptor of an archive-mode set (docs/wsf.md, "Archive mode"). The model of the SDK sound player (nw4r::snd and AX)
+// plays the sound archive on the AX microcode of the game. The code of the game isn't used.
 struct ArchiveDescriptor
 {
     static constexpr uint32_t kMagic = 0x41465357; // "WSFA"
@@ -131,7 +131,7 @@ struct ArchiveDescriptor
     uint32_t snd_build = 0;         // the game's build of NW4R SND, by its date (YYYYMMDD), or 0 if unknown
 
     // The effects on the aux buses and the sends that the game sets on sounds (docs/wsf.md, "Effects"), after the
-    // build. A descriptor without them gives none. Parse skips an effect of a type that it doesn't know. Then the
+    // build. A descriptor without them gives none. Parse skips an effect of a type that it doesn't support. Then the
     // tracks that the game plays of some sounds (docs/wsf.md, "Tracks that the game silences").
     nw4r::ArchiveEffects effects;
 };

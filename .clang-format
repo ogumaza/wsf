@@ -45,7 +45,7 @@ EmptyLineBeforeAccessModifier: Always
 # Includes go in the guide's groups: the related header, C system headers, C++
 # standard library headers, other libraries' headers, then the project's
 # headers. Other libraries are xsflib, ntdlib and seqlib in quotes, and the
-# third-party libraries in the first three categories in angle brackets (SDK/ is
+# third-party libraries in the first two categories in angle brackets (SDK/ is
 # the foobar2000 SDK). OS headers, such as <windows.h>, count as C system
 # headers. In the code of xsflib, ntdlib or seqlib, remove that library from
 # the list. A test, such as foo_test.cpp, or a platform's file, such as
@@ -55,9 +55,7 @@ IncludeIsMainRegex: '([-_](test|unittest)|_mac|_windows|_other)?$'
 IncludeCategories:
   - Regex: '^<(zlib|zconf|zstd|lzma|bzlib)\.h>$'
     Priority: 3
-  - Regex: '^<(FLAC|FLAC\+\+|teakra|SDK)/'
-    Priority: 3
-  - Regex: '^<sfizz\.hpp>$'
+  - Regex: '^<(FLAC|FLAC\+\+|SDK)/'
     Priority: 3
   - Regex: '^<ext/.*\.h>'
     Priority: 2

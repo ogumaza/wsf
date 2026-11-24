@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
 
-// The ripper's parts for games whose sound library is JAudio2, JAudio1 or Jac: the drivers' blocks, the games' sound
-// files and sounds, Pikmin 2's pieces, and the library and minis. The length analysis and the wave discovery play a
-// rip on the player (see rip/jaudio_analysis.h).
+// The ripper's parts for games whose sound library is JAudio2, JAudio1 or Jac: the games' sound files and sounds, and
+// the variants of the pieces. jaudio_library.cpp builds the library and the minis. The length analysis and the wave
+// discovery play a rip on the player (see rip/jaudio_analysis.h).
 
 #include "rip/jaudio.h"
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -22,10 +24,12 @@
 
 #include "ntdlib/disc/game.h"
 #include "ntdlib/dol.h"
-#include "ntdlib/flipper/wave_list.h"
+#include "ntdlib/flipper/piece_variants.h"
 #include "ntdlib/flipper/z2_params.h"
 #include "ntdlib/jaudio/aaf.h"
 #include "ntdlib/jaudio/archive.h"
+#include "ntdlib/jaudio/barc.h"
+#include "ntdlib/jaudio/bx.h"
 #include "ntdlib/jaudio/game_lengths.h"
 #include "ntdlib/jaudio/jac_effects.h"
 #include "ntdlib/jaudio/pikmin2_pieces.h"
@@ -38,178 +42,15 @@
 #include "xsflib/psf/psf.h"
 #include "xsflib/text.h"
 
-#include "rip/driver_blob.h"
-#include "rip/galaxy2_driver_blob.h"
-#include "rip/galaxy_driver_blob.h"
-#include "rip/jaudio_driver_blob.h"
-#include "rip/jungle_beat_driver_blob.h"
-#include "rip/pikmin2_driver_blob.h"
-#include "rip/pikmin_driver_blob.h"
-#include "rip/rip.h"
-#include "rip/sound_libraries.h"
-#include "wsf/format.h"
-
 namespace wsf::rip
 {
 namespace
 {
 
-// driver/jaudio.c's parameter block, from its address: the header, ntdlib's Z2Params, then the Wii's fields.
-constexpr uint32_t kJAudioZ2Offset = kJAudioZ2Address - DriverBlock::kAddress;
-constexpr uint32_t kJAudioWiiOffset = kJAudioZ2Offset + ntdlib::flipper::z2::kParamsSize;
-constexpr uint32_t kJAudioSleepOffset = kJAudioWiiOffset;
-constexpr uint32_t kJAudioRetraceTicksOffset = kJAudioWiiOffset + 4;
-constexpr uint32_t kJAudioResetDataOffset = kJAudioWiiOffset + 8;
-constexpr uint32_t kJAudioResetFlagOffset = kJAudioWiiOffset + 12;
-constexpr uint32_t kJAudioAlarmOffset = kJAudioWiiOffset + 16;
-constexpr uint32_t kJAudioWaveArcsOffset = kJAudioAlarmOffset + 20;
-
-// The driver's replacements for a game that lacks the functions: the sleep, then the functions for one wave group.
-constexpr uint32_t kJAudioDriverSleepOffset = kJAudioWaveArcsOffset + 20;
-constexpr uint32_t kJAudioDriverLoadSeWaveOffset = kJAudioDriverSleepOffset + 4;
-constexpr uint32_t kJAudioDriverLoadBgmWaveOffset = kJAudioDriverSleepOffset + 8;
-constexpr uint32_t kJAudioDriverWaveStatusOffset = kJAudioDriverSleepOffset + 12;
-constexpr uint32_t kJAudioDriverEraseBgmWaveOffset = kJAudioDriverSleepOffset + 16;
-constexpr uint32_t kJAudioDriverEraseSeWaveOffset = kJAudioDriverSleepOffset + 20;
-
-// The sound's start: the game's function and finishDSPFrame's count, then the driver's start.
-constexpr uint32_t kJAudioGameStartSoundOffset = kJAudioDriverSleepOffset + 24;
-constexpr uint32_t kJAudioFullRingCountOffset = kJAudioDriverSleepOffset + 28;
-constexpr uint32_t kJAudioDriverStartSoundOffset = kJAudioDriverSleepOffset + 32;
-static_assert(jaudio::kDriverParams == DriverBlock::kAddress && jaudio::kDriverBase == kDriverBase);
-
 // Whether `data` starts with the four bytes of `magic`.
 bool StartsWith(std::span<const uint8_t> data, const char* magic)
 {
     return data.size() >= 4 && std::memcmp(data.data(), magic, 4) == 0;
-}
-
-// The offset of a profile's parameter words in the driver block.
-constexpr uint32_t kJAudioParamsOffset = kJAudioParamsAddress - DriverBlock::kAddress;
-
-// A JAudio driver's image: its blob, the address it's loaded at, its entry and its parameter block. Every driver's
-// block is at DriverBlock::kAddress.
-struct JAudioDriverImage
-{
-    std::span<const uint8_t> blob;
-    uint32_t base;
-    uint32_t entry;
-    uint32_t params;
-};
-
-// The image of a profile's driver, or nothing for a driver that WSF doesn't have.
-std::optional<JAudioDriverImage> ImageOf(JAudioDriver driver)
-{
-    switch (driver)
-    {
-    case JAudioDriver::kZ2:
-        return JAudioDriverImage{jaudio::kDriverBlob, jaudio::kDriverBase, jaudio::kDriverEntry, jaudio::kDriverParams};
-    case JAudioDriver::kJungleBeat:
-        return JAudioDriverImage{jungle_beat::kDriverBlob, jungle_beat::kDriverBase, jungle_beat::kDriverEntry,
-                                 jungle_beat::kDriverParams};
-    case JAudioDriver::kPikmin:
-        return JAudioDriverImage{pikmin::kDriverBlob, pikmin::kDriverBase, pikmin::kDriverEntry, pikmin::kDriverParams};
-    case JAudioDriver::kPikmin2:
-        return JAudioDriverImage{pikmin2::kDriverBlob, pikmin2::kDriverBase, pikmin2::kDriverEntry,
-                                 pikmin2::kDriverParams};
-    case JAudioDriver::kGalaxy:
-        return JAudioDriverImage{galaxy::kDriverBlob, galaxy::kDriverBase, galaxy::kDriverEntry, galaxy::kDriverParams};
-    case JAudioDriver::kGalaxy2:
-        return JAudioDriverImage{galaxy2::kDriverBlob, galaxy2::kDriverBase, galaxy2::kDriverEntry,
-                                 galaxy2::kDriverParams};
-    }
-
-    return std::nullopt;
-}
-
-// Fills in driver/jaudio.c's parameters in the driver's block at `params`: the profile's sizes and functions for
-// ntdlib's start-up for Z2, and the Wii's fields.
-void PutZ2DriverParams(uint8_t* params, const JAudioProfile& profile)
-{
-    const auto put = [params](uint32_t offset, uint32_t value)
-    {
-        xsflib::StoreBe32(params + offset, value);
-    };
-
-    const auto word = [params](uint32_t offset)
-    {
-        return xsflib::LoadBe32(params + offset);
-    };
-
-    // A game whose scene manager has no functions for one wave group gets the driver's functions in their place. A
-    // game without a sleep of the calling thread gets the driver's sleep. The block gives the addresses of both. A game
-    // with the functions runs the same instructions as before the driver had them.
-    ntdlib::flipper::z2::Profile z2 = profile.z2;
-    if (!z2.load_se_wave)
-    {
-        z2.load_se_wave = word(kJAudioDriverLoadSeWaveOffset);
-        z2.load_bgm_wave = word(kJAudioDriverLoadBgmWaveOffset);
-        z2.wave_status = word(kJAudioDriverWaveStatusOffset);
-        z2.erase_bgm_wave = word(kJAudioDriverEraseBgmWaveOffset);
-        z2.erase_se_wave = word(kJAudioDriverEraseSeWaveOffset);
-    }
-
-    // A game whose audio driver runs extra DSP frames at its start-up gets the driver's start of the sound. It waits
-    // until those frames have run, then calls the game's start.
-    if (profile.full_ring_count)
-    {
-        put(kJAudioGameStartSoundOffset, z2.start_sound);
-        put(kJAudioFullRingCountOffset, profile.full_ring_count);
-        z2.start_sound = word(kJAudioDriverStartSoundOffset);
-    }
-
-    const std::vector<uint32_t> words = z2.Words();
-    for (std::size_t i = 0; i < words.size(); i++)
-    {
-        put(kJAudioParamsOffset + static_cast<uint32_t>(i * 4), words[i]);
-    }
-
-    put(kJAudioSleepOffset, profile.sleep ? profile.sleep : word(kJAudioDriverSleepOffset));
-    put(kJAudioRetraceTicksOffset, kFrameTicks);
-    put(kJAudioResetDataOffset, profile.reset_data);
-    put(kJAudioResetFlagOffset, profile.reset_flag);
-    const uint32_t alarm[] = {profile.alarm.set_alarm, profile.alarm.disable_interrupts,
-                              profile.alarm.restore_interrupts, profile.alarm.suspend_thread,
-                              profile.alarm.resume_thread};
-    for (std::size_t i = 0; i < std::size(alarm); i++)
-    {
-        put(kJAudioAlarmOffset + static_cast<uint32_t>(i * 4), alarm[i]);
-    }
-
-    const uint32_t wave_arcs[] = {profile.wave_arcs.section_heap, profile.wave_arcs.bank_table, profile.wave_arcs.load,
-                                  profile.wave_arcs.load_tail, profile.wave_arcs.erase};
-    for (std::size_t i = 0; i < std::size(wave_arcs); i++)
-    {
-        put(kJAudioWaveArcsOffset + static_cast<uint32_t>(i * 4), wave_arcs[i]);
-    }
-}
-
-} // namespace
-
-std::vector<uint32_t> Pikmin2Parameters(std::vector<uint32_t> words)
-{
-    ntdlib::jaudio::AppendPikmin2Pieces(words);
-
-    return words;
-}
-
-namespace
-{
-
-// The effects that a JAudio1 name file (.asn) names, by ntdlib::jaudio::AsnNameKey. Throws xsflib::FormatError if the
-// file is too short for its sounds.
-std::map<uint32_t, std::string> ReadEffectNames(std::span<const uint8_t> table)
-{
-    std::map<uint32_t, std::string> names;
-    for (const ntdlib::jaudio::AsnSound& sound : ntdlib::jaudio::ReadAsnSounds(table))
-    {
-        if ((sound.id & ntdlib::jaudio::kAafTypeMask) == ntdlib::jaudio::kAafEffect)
-        {
-            names.try_emplace(ntdlib::jaudio::AsnNameKey(sound.id), sound.name);
-        }
-    }
-
-    return names;
 }
 
 // A Jac game's sound effects, from the catalogue in `dol` (see ReadJacSounds). An effect that the game's code starts
@@ -345,86 +186,6 @@ std::optional<std::vector<std::string>> FindAwFiles(const ntdlib::disc::GameFile
     return paths;
 }
 
-std::optional<std::vector<uint8_t>> BuildJAudioLibrary(const ntdlib::disc::GameFiles& game,
-                                                       const JAudioProfile& profile,
-                                                       const std::vector<std::string>& paths, const Tags& tags,
-                                                       std::string* error)
-{
-    const std::optional<ntdlib::Dol> dol = ntdlib::Dol::Parse(game.dol);
-    if (!dol)
-    {
-        return LibraryError(error, "main.dol isn't a DOL");
-    }
-
-    const std::optional<JAudioDriverImage> image = ImageOf(profile.driver);
-    if (!image || image->params != DriverBlock::kAddress)
-    {
-        return LibraryError(error, "WSF has no driver for this profile");
-    }
-
-    // The driver, with its parameters. driver/jaudio.c (kZ2) takes the profile and the Wii's fields. Another driver
-    // takes the profile's words after the wave list. A .miniwsf fills in the sound and its wave groups.
-    GameLibrary library{.driver = {image->blob.begin(), image->blob.end()},
-                        .base = image->base,
-                        .entry = image->entry,
-                        .main = profile.main,
-                        .ios_version = profile.ios_version,
-                        .paths = paths,
-                        .too_large_advice = "Rip fewer sounds at a time, with --only."};
-    const uint32_t block = image->params - image->base;
-    if (profile.driver == JAudioDriver::kZ2)
-    {
-        PutZ2DriverParams(library.driver.data() + block, profile);
-    }
-    else
-    {
-        // Donkey Kong Jungle Beat's driver takes the table of its chord layers after the profile's words.
-        std::vector<uint32_t> params = profile.params;
-        if (profile.driver == JAudioDriver::kJungleBeat)
-        {
-            ntdlib::jaudio::AppendChordLayers(profile.chord_layers, params);
-        }
-
-        if (block + kJAudioParamsOffset + params.size() * 4 > library.driver.size())
-        {
-            return LibraryError(error, "the profile has more parameters than its driver's block holds");
-        }
-
-        for (std::size_t i = 0; i < params.size(); i++)
-        {
-            xsflib::StoreBe32(library.driver.data() + block + kJAudioParamsOffset + i * 4, params[i]);
-        }
-    }
-
-    return BuildGameLibrary(game, *dol, library, tags, error);
-}
-
-std::vector<uint8_t> BuildJAudioMini(uint32_t sound_id, std::span<const uint32_t> waves, const std::string& lib_name,
-                                     Tags tags, const ntdlib::flipper::z2::PieceState* state, int32_t luigi_word)
-{
-    uint8_t sound[4];
-    xsflib::StoreBe32(sound, sound_id);
-    ProgramBuilder program;
-    program.AddMemory(kJAudioZ2Address + ntdlib::flipper::z2::kSoundOffset, sound, sizeof(sound));
-    const std::vector<uint8_t> list = ntdlib::flipper::WaveList(waves);
-    program.AddMemory(kJAudioZ2Address + ntdlib::flipper::z2::kWaveCountOffset, list.data(), list.size());
-    if (const std::vector<uint8_t> words = state ? state->Bytes() : std::vector<uint8_t>(); !words.empty())
-    {
-        program.AddMemory(kJAudioZ2Address + ntdlib::flipper::z2::kMutedChildrenOffset, words.data(), words.size());
-    }
-
-    if (luigi_word >= 0)
-    {
-        uint8_t on[4];
-        xsflib::StoreBe32(on, 1);
-        program.AddMemory(kJAudioParamsAddress + static_cast<uint32_t>(luigi_word) * 4, on, sizeof(on));
-    }
-
-    tags["_lib"] = lib_name;
-
-    return xsflib::psf::WritePsf(kPsfVersionWsf, {}, program.Data(), tags);
-}
-
 std::vector<JAudioSound> ReadJAudio2Sounds(std::span<const uint8_t> baa)
 {
     std::vector<JAudioSound> sounds;
@@ -483,31 +244,6 @@ std::optional<JAudioFiles> FindJAudioFiles(const ntdlib::disc::GameFiles& game, 
     return files;
 }
 
-std::vector<ntdlib::jaudio::WaveSystem> ReadJacWaveSystems(std::span<const uint8_t> bank_file)
-{
-    constexpr std::size_t kEntry = 8;
-    const xsflib::Reader r(bank_file, true);
-    const uint32_t list = r.U32(0);
-    const uint32_t count = r.U32(4);
-    if (count > bank_file.size() / kEntry)
-    {
-        throw xsflib::FormatError("the bank file lists more wave systems than it can hold");
-    }
-
-    std::vector<ntdlib::jaudio::WaveSystem> systems;
-    for (uint32_t number = 0; number < count; number++)
-    {
-        const uint32_t offset = r.U32(list + number * kEntry);
-        const uint32_t size = r.U32(list + number * kEntry + 4);
-        if (size != 0)
-        {
-            systems.push_back(ntdlib::jaudio::ReadWaveSystem(r.Sub(offset, size), number));
-        }
-    }
-
-    return systems;
-}
-
 std::vector<ntdlib::jaudio::WaveSystem> ReadWaveSystems(JAudioLibrary library, std::span<const uint8_t> start_up)
 {
     switch (library)
@@ -515,7 +251,7 @@ std::vector<ntdlib::jaudio::WaveSystem> ReadWaveSystems(JAudioLibrary library, s
     case JAudioLibrary::kJAudio2:
         return ntdlib::jaudio::ReadWaveSystems(start_up);
     case JAudioLibrary::kJac:
-        return ReadJacWaveSystems(start_up);
+        return ntdlib::jaudio::ReadBxWaveSystems(start_up);
     case JAudioLibrary::kAaf:
         return ntdlib::jaudio::ReadAafWaveSystems(start_up);
     }
@@ -525,7 +261,7 @@ std::vector<ntdlib::jaudio::WaveSystem> ReadWaveSystems(JAudioLibrary library, s
 
 std::vector<JAudioSound> ReadJacSounds(std::span<const uint8_t> dol, const JAudioProfile& profile)
 {
-    constexpr std::size_t kHeader = 0x20, kEntry = 0x20, kEntryNameSize = 14, kSizeOffset = 0x1c;
+    constexpr std::size_t kHeader = 0x20;
 
     // The index runs from the profile's address to the end of the section that holds it.
     const ntdlib::Dol parsed = ntdlib::Dol::ParseMain(dol);
@@ -544,17 +280,16 @@ std::vector<JAudioSound> ReadJacSounds(std::span<const uint8_t> dol, const JAudi
         throw xsflib::FormatError("main.dol's sequence index has " + std::to_string(count) + " files");
     }
 
+    const std::vector<ntdlib::jaudio::BarcEntry> entries = ntdlib::jaudio::ReadBarcEntries(index);
     std::vector<JAudioSound> sounds;
     for (uint32_t number = kJacFirstPiece; number < count; number++)
     {
-        const std::size_t entry = kHeader + std::size_t{number} * kEntry;
-        if (r.U32(entry + kSizeOffset) == 0)
+        if (entries[number].size == 0)
         {
             continue;
         }
 
-        std::string label = r.CString(entry, kEntryNameSize);
-        label = label.substr(0, label.rfind('.'));
+        std::string label = entries[number].name.substr(0, entries[number].name.rfind('.'));
         if (number != profile.parted_piece)
         {
             sounds.push_back({.id = ntdlib::jaudio::kAafSequence | number,
@@ -618,7 +353,7 @@ std::vector<JAudioSound> ReadPikmin2Sounds(std::span<const uint8_t> aaf, std::sp
 
     // The effects, by their names in the name table, or else by their categories and indices.
     const std::map<uint32_t, std::string> named =
-        names.empty() ? std::map<uint32_t, std::string>{} : ReadEffectNames(names);
+        names.empty() ? std::map<uint32_t, std::string>{} : ntdlib::jaudio::ReadAsnNames(names);
     for (const ntdlib::jaudio::SoundEntry& entry : ntdlib::jaudio::ReadAafSounds(aaf))
     {
         if (entry.source == ntdlib::jaudio::SoundEntry::Source::kArchive)
@@ -658,94 +393,6 @@ JAudioSound VariantOf(const JAudioSound& sound, std::string_view suffix)
     return variant;
 }
 
-// Gives the pieces whose tracks the game mutes as it starts them the children to mute (JAudioProfile::muted_starts). A
-// start with a suffix becomes a sound after its piece. The sound's label is the piece's with the suffix, such as
-// "Z2BGM_FIELD_LINK_DAY_riding", and it shares the piece's number.
-void AddMutedStarts(const JAudioProfile& profile, std::vector<JAudioSound>& sounds)
-{
-    if (profile.muted_starts.empty())
-    {
-        return;
-    }
-
-    std::vector<JAudioSound> listed;
-    for (JAudioSound& sound : sounds)
-    {
-        const std::size_t piece = listed.size();
-        listed.push_back(std::move(sound));
-        for (const ntdlib::jaudio::MutedStart& start : profile.muted_starts)
-        {
-            if (start.sound != listed[piece].id || listed[piece].stream)
-            {
-                continue;
-            }
-
-            if (start.suffix.empty())
-            {
-                listed[piece].piece_state.muted_children = start.muted_children;
-                continue;
-            }
-
-            JAudioSound variant = VariantOf(listed[piece], start.suffix);
-            variant.piece_state.muted_children = start.muted_children;
-            listed.push_back(std::move(variant));
-        }
-    }
-
-    sounds = std::move(listed);
-}
-
-// Gives the pieces their states (JAudioProfile::piece_states). A state without a suffix is the piece's. A state with a
-// suffix becomes a sound after the piece and its other starts. The sound's label is the piece's with the suffix, such
-// as "Z2BGM_TOAL_VILLEGE_status1", and it shares the piece's number.
-void AddPieceStates(const JAudioProfile& profile, std::vector<JAudioSound>& sounds)
-{
-    if (profile.piece_states.empty())
-    {
-        return;
-    }
-
-    std::vector<JAudioSound> listed;
-    for (std::size_t i = 0; i < sounds.size(); i++)
-    {
-        const std::size_t piece = listed.size();
-        listed.push_back(std::move(sounds[i]));
-        if (listed[piece].stream || listed[piece].shares_number)
-        {
-            continue;
-        }
-
-        std::vector<JAudioSound> states;
-        for (const ntdlib::jaudio::MusicState& state : profile.piece_states)
-        {
-            if (state.sound != listed[piece].id)
-            {
-                continue;
-            }
-
-            if (state.suffix.empty())
-            {
-                listed[piece].piece_state = ntdlib::flipper::z2::PieceStateOf(state);
-                continue;
-            }
-
-            JAudioSound variant = VariantOf(listed[piece], state.suffix);
-            variant.piece_state = ntdlib::flipper::z2::PieceStateOf(state);
-            states.push_back(std::move(variant));
-        }
-
-        // The piece's other starts stay right after it.
-        while (i + 1 < sounds.size() && sounds[i + 1].shares_number)
-        {
-            listed.push_back(std::move(sounds[++i]));
-        }
-
-        listed.insert(listed.end(), std::make_move_iterator(states.begin()), std::make_move_iterator(states.end()));
-    }
-
-    sounds = std::move(listed);
-}
-
 // Adds the states that the game's code sets for its music during play to `sounds`, each after its piece
 // (JAudioProfile::layer_states). A state's label is the label of the piece, "_" and the suffix of the state, such as
 // "JA_BGM_MAIN_01_combo1". The states share the piece's number.
@@ -756,11 +403,9 @@ void AddLayerStates(const JAudioProfile& profile, std::vector<JAudioSound>& soun
         return;
     }
 
-    std::vector<JAudioSound> listed;
-    for (JAudioSound& sound : sounds)
+    const auto states_of = [&profile](const JAudioSound& base)
     {
-        listed.push_back(std::move(sound));
-        const JAudioSound base = listed.back();
+        std::vector<JAudioSound> states;
         for (const ntdlib::jaudio::JungleBeatState& state : profile.layer_states)
         {
             if (state.piece != base.id)
@@ -770,11 +415,69 @@ void AddLayerStates(const JAudioProfile& profile, std::vector<JAudioSound>& soun
 
             JAudioSound variant = VariantOf(base, std::string("_") + state.suffix);
             variant.id = state.piece | state.bits;
-            listed.push_back(std::move(variant));
+            states.push_back(std::move(variant));
         }
+
+        return states;
+    };
+    ntdlib::flipper::AddVariantsAfterEach(sounds, states_of);
+}
+
+// The words of a Galaxy state's .miniwsf (JAudioProfile::state_word): the state, the tempo ratio, the pitch ratio, the
+// pitched children, the quiet child and its volume (driver/galaxy_state.h). A ratio of 1 leaves the tempo or the
+// pitch as it is.
+ntdlib::flipper::z2::PieceState::Memory GalaxyStateWords(const JAudioProfile& profile,
+                                                         const ntdlib::jaudio::GalaxyState& state)
+{
+    constexpr uint32_t kNone = 0xffffffff;
+    const uint32_t pitched = state.pitch != 1.0f ? state.pitched_children : 0;
+    const std::array<uint32_t, 6> words = {
+        static_cast<uint32_t>(state.state),
+        state.tempo != 1.0f ? std::bit_cast<uint32_t>(state.tempo) : 0,
+        std::bit_cast<uint32_t>(state.pitch),
+        pitched,
+        state.quiet_child >= 0 ? static_cast<uint32_t>(state.quiet_child) : kNone,
+        std::bit_cast<uint32_t>(state.quiet_volume),
+    };
+    ntdlib::flipper::z2::PieceState::Memory memory{.address = kJAudioParamsAddress +
+                                                              static_cast<uint32_t>(profile.state_word) * 4};
+    memory.data.resize(words.size() * 4);
+    for (std::size_t i = 0; i < words.size(); i++)
+    {
+        xsflib::StoreBe32(memory.data.data() + i * 4, words[i]);
     }
 
-    sounds = std::move(listed);
+    return memory;
+}
+
+// Adds the states that the Galaxy games' code gives their music during play to `sounds`, each after its piece and the
+// piece's other variants (JAudioProfile::galaxy_states). A state's label is the piece's with the state's suffix, such
+// as "BGM_TAMAKORO_speed_low". The states share the piece's number.
+void AddGalaxyStates(const JAudioProfile& profile, std::vector<JAudioSound>& sounds)
+{
+    if (profile.galaxy_states.empty() || profile.state_word < 0)
+    {
+        return;
+    }
+
+    const auto states_of = [&profile](const JAudioSound& piece)
+    {
+        std::vector<JAudioSound> states;
+        for (const ntdlib::jaudio::GalaxyState& state : profile.galaxy_states)
+        {
+            if (state.sound != piece.id)
+            {
+                continue;
+            }
+
+            JAudioSound variant = VariantOf(piece, state.suffix);
+            variant.piece_state.memory.push_back(GalaxyStateWords(profile, state));
+            states.push_back(std::move(variant));
+        }
+
+        return states;
+    };
+    ntdlib::flipper::AddPieceVariants(sounds, states_of);
 }
 
 // Adds the chord effects that the game plays beside its music to `sounds`, each after its piece
@@ -787,11 +490,9 @@ void AddChordLayers(const JAudioProfile& profile, std::vector<JAudioSound>& soun
         return;
     }
 
-    std::vector<JAudioSound> listed;
-    for (JAudioSound& sound : sounds)
+    const auto layers_of = [&profile](const JAudioSound& base)
     {
-        listed.push_back(std::move(sound));
-        const JAudioSound base = listed.back();
+        std::vector<JAudioSound> layers;
         for (std::size_t i = 0; i < profile.chord_layers.size(); i++)
         {
             const ntdlib::jaudio::JungleBeatChordLayer& layer = profile.chord_layers[i];
@@ -802,14 +503,62 @@ void AddChordLayers(const JAudioProfile& profile, std::vector<JAudioSound>& soun
 
             JAudioSound variant = VariantOf(base, std::string("_") + layer.suffix);
             variant.id = ntdlib::jaudio::ChordLayerId(layer.piece, static_cast<uint32_t>(i));
-            listed.push_back(std::move(variant));
+            layers.push_back(std::move(variant));
+        }
+
+        return layers;
+    };
+    ntdlib::flipper::AddVariantsAfterEach(sounds, layers_of);
+}
+
+// For each sound in `sounds`, calls `write_for` with the sound ID and adds the write to main memory that it returns, if
+// any, to the mini file of that sound.
+template <typename WriteFor>
+void AddMemoryWrites(std::vector<JAudioSound>& sounds, const WriteFor& write_for)
+{
+    for (JAudioSound& sound : sounds)
+    {
+        if (std::optional<ntdlib::flipper::z2::PieceState::Memory> write = write_for(sound.id))
+        {
+            sound.piece_state.memory.push_back(std::move(*write));
         }
     }
+}
 
-    sounds = std::move(listed);
+// Gives each chord layer whose piece starts with every track off the piece's second state in place of its first
+// (JAudioProfile::state_table). The driver starts a layer's music through the stage's start. That start applies the
+// first state. The piece alone gets the second state from the driver.
+void AddSilentStarts(const ntdlib::disc::GameFiles& game, const JAudioProfile& profile,
+                     std::vector<JAudioSound>& sounds)
+{
+    if (profile.chord_layers.empty() || profile.state_table.rows == 0)
+    {
+        return;
+    }
+
+    const ntdlib::Dol dol = ntdlib::Dol::ParseMain(game.dol);
+    const auto silent_start = [&dol, &profile](uint32_t id)
+    {
+        return ntdlib::jaudio::JungleBeatSilentStart(dol, profile.state_table, id);
+    };
+    AddMemoryWrites(sounds, silent_start);
 }
 
 } // namespace
+
+void AddSurvivalTests(const JAudioProfile& profile, std::vector<JAudioSound>& sounds)
+{
+    if (profile.survival_test == 0)
+    {
+        return;
+    }
+
+    const auto survival_test = [&profile](uint32_t id)
+    {
+        return ntdlib::jaudio::JungleBeatSurvivalTest(profile.chord_layers, profile.survival_test, id);
+    };
+    AddMemoryWrites(sounds, survival_test);
+}
 
 std::optional<std::vector<JAudioSound>> ReadJAudioSounds(const ntdlib::disc::GameFiles& game, const JAudioFiles& files,
                                                          const JAudioProfile* profile,
@@ -821,10 +570,26 @@ std::optional<std::vector<JAudioSound>> ReadJAudioSounds(const ntdlib::disc::Gam
         std::vector<JAudioSound> sounds = ReadJAudio2Sounds(start_up);
         if (profile)
         {
-            AddMutedStarts(*profile, sounds);
-            AddPieceStates(*profile, sounds);
+            ntdlib::flipper::AddMutedStarts(profile->muted_starts, sounds, VariantOf);
+            ntdlib::flipper::AddPieceStates(profile->piece_states, sounds, VariantOf);
             AddChordLayers(*profile, sounds); // before the states, which then come first after each piece
+            AddFightMusic(*profile, sounds);
             AddLayerStates(*profile, sounds);
+            AddGalaxyStates(*profile, sounds);
+            AddSurvivalTests(*profile, sounds);
+            try
+            {
+                AddSilentStarts(game, *profile, sounds);
+            }
+            catch (const xsflib::FormatError& e)
+            {
+                if (error)
+                {
+                    *error = e.what();
+                }
+
+                return std::nullopt;
+            }
         }
 
         return sounds;
@@ -877,6 +642,20 @@ ntdlib::jaudio::GameWatch WatchOf(const JAudioProfile& profile, uint32_t sound_i
     }
 
     return watch;
+}
+
+void AddFightMusic(const JAudioProfile& profile, std::vector<JAudioSound>& sounds)
+{
+    if (profile.stage_table == 0)
+    {
+        return;
+    }
+
+    const auto fight_music = [&profile](uint32_t id)
+    {
+        return ntdlib::jaudio::JungleBeatFightMusic(profile.chord_layers, profile.stage_table, id);
+    };
+    AddMemoryWrites(sounds, fight_music);
 }
 
 } // namespace wsf::rip

@@ -39,7 +39,7 @@
 //                    make no sound, and every JAudio sound is taken to start)
 //   --jobs N         the number of length analyses run in parallel (default: the number of CPU threads, at most 8 in a
 //                    32-bit build)
-//   --game NAME      game tag (default: the profile's name, or else the game's title, or the archive's name)
+//   --game NAME      game tag (default: the game's title, or the archive's name)
 //   --artist NAME, --year YEAR, --copyright TEXT, --by NAME (wsfby)
 //   --version        print the version
 //
@@ -70,6 +70,7 @@
 #include "ntdlib/disc/game.h"
 #include "ntdlib/rsar/formats.h"
 #include "ntdlib/rvl/snd/rsar_options.h"
+#include "ntdlib/sar/formats.h"
 #include "ntdlib/sound_build.h"
 #include "xsflib/ascii.h"
 #include "xsflib/binary.h"
@@ -172,8 +173,8 @@ constexpr char kUsage[] =
     "  --jobs N             the number of length analyses that run at once (default: the number\n"
     "                       of CPU threads, and at most 8 in a 32-bit build)\n"
     "  --game NAME, --artist NAME, --year YEAR, --copyright TEXT, --by NAME\n"
-    "                       tags (the game defaults to the profile's name or else the game's title;\n"
-    "                       for a sound archive, to its file name without the extension)\n"
+    "                       tags (the game defaults to the game's title; for a sound archive,\n"
+    "                       to its file name without the extension)\n"
     "  --version            show the version\n"
     "  -h, --help           show this help\n";
 
@@ -450,7 +451,7 @@ int ReportGameRip(const std::string& input, const fs::path& out_dir, const Archi
 
     if (ripped.matched == 0 && (!o.only_text.empty() || o.bgm) && !ripped.failed)
     {
-        return NoSoundMatches(o);
+        return xsflib::rip::NoSoundMatches(o.only_text, o.bgm);
     }
 
     std::fprintf(stderr, "%s: %s\n", xsflib::rip::InputPath(input).filename().string().c_str(),
@@ -543,7 +544,7 @@ int RipGame(const std::string& input, const fs::path& out_dir, const Options& o,
 
     NoteNoEffectProfile(*code);
 
-    const std::string game_name = o.game_name.empty() ? (profile ? profile->name : game.Title()) : o.game_name;
+    const std::string game_name = o.game_name.empty() ? game.Title() : o.game_name;
     const ArchivesRipped ripped = RipArchives(out_dir, game, archives, mode, profile, *code, game_name, o, registries);
 
     return ReportGameRip(input, out_dir, ripped, profile, other_release, o);
@@ -687,7 +688,7 @@ int RipLooseArchive(const std::string& input, const fs::path& out_dir, const Opt
 
     if (matched == 0 && (!o.only_text.empty() || o.bgm))
     {
-        return NoSoundMatches(o);
+        return xsflib::rip::NoSoundMatches(o.only_text, o.bgm);
     }
 
     if (count > 0)
@@ -744,16 +745,20 @@ int TakeDolInputs(std::vector<std::string>& inputs, Options& o)
 // Rips one input. The output folders take their registries of file names from `registries`. Returns the exit code.
 int RipInput(const std::string& input, const Options& o, xsflib::cli::FileNameRegistries& registries)
 {
-    const std::string head = xsflib::rip::ReadHead(input, 4);
-    if (head.starts_with("CSAR") || head.starts_with("FSAR"))
+    // Another console's sound archive gets an error. RipInput reads an RSAR as a sound archive and any other file as a
+    // game.
+    using Kind = ntdlib::sar::SoundArchiveKind;
+    const Kind kind = ntdlib::sar::SoundArchiveKindOf(xsflib::rip::ReadHead(input, 6));
+    if (kind != Kind::kRsar && kind != Kind::kOther)
     {
-        std::fprintf(stderr, "error: %s is a %s sound archive; WSF rips Wii sound archives (RSAR, .brsar)\n",
-                     input.c_str(), head.starts_with("CSAR") ? "3DS" : "Wii U or Switch");
+        const std::string what(ntdlib::sar::SoundArchiveKindName(kind));
+        std::fprintf(stderr, "error: %s is %s; WSF rips Wii sound archives (RSAR, .brsar)\n", input.c_str(),
+                     what.c_str());
         return 1;
     }
 
     const fs::path out_dir = o.out_dir.empty() ? xsflib::rip::DefaultOutputDir(input, "_wsf") : fs::path(o.out_dir);
-    if (head.starts_with("RSAR"))
+    if (kind == Kind::kRsar)
     {
         return RipLooseArchive(input, out_dir, o, xsflib::cli::NamesIn(registries, out_dir, ".wsflib", ".miniwsf"));
     }
@@ -800,8 +805,7 @@ int ParseOption(const std::string& option, const std::function<std::string()>& n
         if (!assignment || assignment->index < 0 || assignment->index > 31 || assignment->value < INT16_MIN ||
             assignment->value > INT16_MAX)
         {
-            std::fprintf(stderr,
-                         "error: --var takes N=V, with N from 0 to 31 and V from -32768 to 32767, not '%s'\n",
+            std::fprintf(stderr, "error: --var takes N=V, with N from 0 to 31 and V from -32768 to 32767, not '%s'\n",
                          value.c_str());
             return 2;
         }

@@ -434,7 +434,7 @@ void TestEffects()
 
     XSFLIB_CHECK(dry_back && dry_back->effects.setups.empty() && dry_back->effects.sends.empty());
 
-    // An effect of a type that the player doesn't know is skipped. One whose words don't fit its type, or whose bus
+    // An effect of a type that the player doesn't support is skipped. One whose words don't fit its type, or whose bus
     // isn't A, B or C, is skipped too.
     std::vector<uint8_t> odd = raw;
     const std::size_t first_effect = dry.Serialize().size() + 4;

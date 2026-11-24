@@ -6,7 +6,7 @@ WSF is under the MIT licence (`LICENSE`). Its dependencies have the following li
 |---|---|---|
 | xsflib, Copyright (c) 2026 the xsflib authors | MIT (`externals/xsflib/LICENSE`) | In `externals/xsflib`, a submodule, compiled into every WSF program: the PSF container, playback, the length analysis and the tools' frames. |
 | ntdlib, Copyright (c) 2026 the ntdlib authors | MIT (`externals/ntdlib/LICENSE`) | In `externals/ntdlib`, a submodule, compiled into every WSF program: the disc reader, the Broadway CPU, the DSP, the hardware that the GameCube and the Wii share, the sound archive readers, and the channels, sequence player and tables of NintendoWare's sound libraries. Its notices (`externals/ntdlib/THIRD-PARTY-NOTICES.md`) describe the reference material behind its code. |
-| Data from Unicode: CP932.TXT, Microsoft's table of code page 932 | Unicode License v3 (`Unicode-3.0`) | In ntdlib's `src/disc/cp932.h`, compiled into `wsfrip`. The table decodes the Shift-JIS text of Wii discs: the names in their file systems and the titles of Japanese discs. ntdlib's notices give its source. |
+| Data from Unicode: CP932.TXT, Microsoft's table of code page 932 | Unicode License v3 (`Unicode-3.0`) | In ntdlib's `src/disc/cp932.h`, compiled into `wsfrip`. The table decodes the Shift-JIS text of Wii discs: the names in their file systems and the titles of Japanese discs. ntdlib's notices name its source. |
 | seqlib, Copyright (c) 2026 the seqlib authors | MIT (`externals/xsflib/externals/seqlib/LICENSE`) | In `externals/xsflib/externals/seqlib`, a submodule of xsflib. Only the tests use it: their checks come from it, through `xsflib::testing`. |
 | [zlib](https://zlib.net), Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler | zlib | The PSF container, and GCZ disc images. The installed copy is used if there is one. Otherwise v1.4 is downloaded when configuring. |
 | [Zstandard](https://github.com/facebook/zstd), Copyright (c) Meta Platforms, Inc. and affiliates | BSD-3-Clause | RVZ disc images. The installed copy is used if there is one. Otherwise v1.5.7 is downloaded when configuring. |
@@ -14,11 +14,11 @@ WSF is under the MIT licence (`LICENSE`). Its dependencies have the following li
 | [bzip2](https://sourceware.org/bzip2/), Copyright (C) 1996-2019 Julian R Seward | bzip2 (BSD-style) | bzip2 in WIA and RVZ disc images. The installed copy is used if there is one. Otherwise 1.0.8 is downloaded when configuring. |
 | [libFLAC](https://xiph.org/flac/), Copyright the Xiph.Org Foundation | BSD-3-Clause | FLAC output in `wsfplay`. The installed copy is used if there is one. Otherwise 1.5.0 is downloaded when configuring. |
 | [foobar2000 SDK](https://www.foobar2000.org/SDK), Copyright Peter Pawlowski | BSD-style (the SDK's `sdk-license.txt`, and `pfc-license.txt` for its pfc library) | Only for `plugins/foobar2000`. Not included here. The SDK is supplied when building the component. |
-| [XMPlay plugin SDK](https://www.un4seen.com/xmplay.html), from Un4seen Developments | None stated | Only for `plugins/xmplay`. Not included here. The SDK is supplied when building the plugin. CI downloads it from un4seen.com. The plugin uses only the SDK's declarations of XMPlay's interface. |
+| [XMPlay plugin SDK](https://www.un4seen.com/xmplay.html), from Un4seen Developments | None stated | Only for `plugins/xmplay`. Not included here. The SDK is supplied when building the plugin. CI downloads it from un4seen.com. The plugin uses only the declarations of the XMPlay interface in the SDK. |
 
-Binary distributions must include the MIT notices of WSF, xsflib and ntdlib, the Unicode License v3's notice when
-ntdlib's disc reader is linked in (as in `wsfrip`), the Zstandard notice when Zstandard is linked in, and the libFLAC
-notice when libFLAC is linked in. Shipping `LICENSE` and this file does that. The licence texts are at the end of this
+Binary distributions must include the MIT notices of WSF, xsflib and ntdlib, the Unicode notice when the disc reader of
+ntdlib is linked in (as in `wsfrip`), the Zstandard notice when Zstandard is linked in, and the libFLAC notice when
+libFLAC is linked in. Shipping `LICENSE` and this file does that. The licence texts are at the end of this
 file. The licences of zlib, liblzma and bzip2, and those of the foobar2000 SDK and its pfc library, require no notice
 in binaries. seqlib's checks go only into tests. No code from the XMPlay plugin SDK goes into the XMPlay plugin.
 
@@ -36,11 +36,11 @@ in binaries. seqlib's checks go only into tests. No code from the XMPlay plugin 
 Nothing in this repository licenses game data. Rips (`.wsflib`) contain a game's code and sound archive. These belong to
 their copyright holders.
 
-ntdlib's `include/ntdlib/nwsnd/tables.h` holds numeric tables that NW4R SND uses: powers of two, decibel levels, pan
-curves, the envelope's attack multipliers, the LFO's sine, the low-pass filter's cutoffs and the coefficients of the
-biquad filter's presets.
+ntdlib's `include/ntdlib/nwsnd/tables.h` contains numeric tables that NW4R SND uses: powers of two, decibel levels,
+pan curves, the attack multipliers of the envelope, the LFO sine, the low-pass cutoffs and the coefficients of the
+biquad presets.
 The gains of the AX output compressor are in ntdlib's `include/ntdlib/rvl/ax/tables.h`. The DSP coefficient ROM is in
-`include/ntdlib/dsp/coef_rom.h`. Every GameCube and Wii has the same ROM. It holds the 4-tap filters that AX's
+`include/ntdlib/dsp/coef_rom.h`. Every GameCube and Wii has the same ROM. It contains the 4-tap filters that the AX
 resampler reads: 128 phases for each of three cutoffs. The player uses the exact values to reproduce the console's
 output.
 

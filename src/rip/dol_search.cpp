@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "ntdlib/dol.h"
+#include "ntdlib/ppc/branch.h"
 #include "xsflib/bytes.h"
 
 namespace wsf::rip
@@ -33,7 +34,7 @@ uint32_t MaskedWord(uint32_t word)
     const uint32_t opcode = word >> 26;
     if (opcode == 18)
     {
-        return word & 0xfc000003;
+        return word & ntdlib::ppc::kBranchBits;
     }
     if (IsDForm(opcode) && (opcode == 15 || (word >> 16 & 31) != 1))
     {

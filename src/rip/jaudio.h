@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 // Rips of the JAudio games (JAudio1 and JAudio2). They rip only in game mode: one .wsflib with the game code and sound
-// files, and one .miniwsf per sound. The games' driver profiles (jaudio_profiles.cpp), their sound files, their sounds,
-// and the library and minis of a rip (jaudio.cpp).
+// files, and one .miniwsf per sound. The games' driver profiles (jaudio_profiles.cpp), their sound files and their
+// sounds (jaudio.cpp), and the library and minis of a rip (jaudio_library.cpp).
 
 #pragma once
 
@@ -14,6 +14,7 @@
 
 #include "ntdlib/disc/game.h"
 #include "ntdlib/flipper/z2_params.h"
+#include "ntdlib/jaudio/galaxy_states.h"
 #include "ntdlib/jaudio/game_lengths.h"
 #include "ntdlib/jaudio/jac_effects.h"
 #include "ntdlib/jaudio/jungle_beat_states.h"
@@ -212,10 +213,29 @@ struct JAudioProfile
     // piece's states after the piece. Each state shares the piece's number. Other profiles have none.
     std::span<const ntdlib::jaudio::JungleBeatState> layer_states = {};
 
+    // The states that the Galaxy games' code gives a piece of music during play, for driver/galaxy.c and
+    // driver/galaxy2.c. ReadJAudioSounds puts a piece's states after the piece, each named with the state's suffix and
+    // sharing the piece's number. A state's .miniwsf writes the state's words over the words of `params` from index
+    // `state_word` on (driver/galaxy_state.h). -1 for a driver without them.
+    std::span<const ntdlib::jaudio::GalaxyState> galaxy_states = {};
+    int32_t state_word = -1;
+
     // The chord effects that the game plays beside a piece of music while an object keeps them playing, for
-    // driver/jungle_beat.c. ReadJAudioSounds puts a piece's layers after the piece and its states. Each layer shares the
-    // piece's number. The driver's parameters end with the layers' stages and records.
+    // driver/jungle_beat.c. ReadJAudioSounds puts a piece's layers after the piece and its states. Each layer shares
+    // the piece's number. The driver's parameters end with the layers' stages and records.
     std::span<const ntdlib::jaudio::JungleBeatChordLayer> chord_layers = {};
+
+    // The game's stage table in main.dol, or 0. The chord layer of a boss fight writes its piece over the music of the
+    // row of its stage in its mini file (JungleBeatFightMusic in ntdlib).
+    uint32_t stage_table = 0;
+
+    // The BGM player's second table of states in main.dol, for the chord layers. A layer whose piece starts with every
+    // track off writes the piece's second state over its first in its mini file (JungleBeatSilentStart in ntdlib).
+    ntdlib::jaudio::JungleBeatStateTable state_table = {};
+
+    // The game's test for Survival Mode in main.dol, or 0. A chord layer of Survival Mode makes the test answer yes in
+    // its mini file (JungleBeatSurvivalTest in ntdlib).
+    uint32_t survival_test = 0;
 };
 
 const std::vector<JAudioProfile>& KnownJAudioProfiles();
@@ -269,9 +289,9 @@ std::optional<std::vector<uint8_t>> BuildJAudioLibrary(const ntdlib::disc::GameF
 
 // Game mode for a JAudio game: a .miniwsf that plays sound `sound_id` from `lib_name`, with the wave groups `waves`
 // loaded, each (system << 16) | group. `state`, if given, is the state that driver/jaudio.c gives the piece after it
-// starts the sound (JAudioSound::piece_state). With a `luigi_word` of 0 or more, the .miniwsf sets that word of the
-// profile's `params` to 1: it plays the sound's Luigi variant (JAudioProfile::luigi_word). Throws std::invalid_argument
-// for more than ntdlib's 64 groups.
+// starts the sound (JAudioSound::piece_state), and its writes to the game's memory. With a `luigi_word` of 0 or more,
+// the .miniwsf sets that word of the profile's `params` to 1: it plays the sound's Luigi variant
+// (JAudioProfile::luigi_word). Throws std::invalid_argument for more than ntdlib's 64 groups.
 std::vector<uint8_t> BuildJAudioMini(uint32_t sound_id, std::span<const uint32_t> waves, const std::string& lib_name,
                                      Tags tags, const ntdlib::flipper::z2::PieceState* state = nullptr,
                                      int32_t luigi_word = -1);
@@ -311,18 +331,14 @@ std::vector<JAudioSound> ReadJAudio2Sounds(std::span<const uint8_t> baa);
 std::optional<JAudioFiles> FindJAudio1Files(const ntdlib::disc::GameFiles& game, const JAudioProfile& profile);
 
 // The sound files of a JAudio game with a profile, found by the function for the profile's library: FindJAudio1Files
-// for a JAudio1 game, or FindJAudio2Files for a JAudio2 game. Returns nothing and sets `error` if the disc lacks them.
+// for a JAudio1 game, or FindJAudio2Files for a JAudio2 game. Returns nothing and sets `error` if the disc is missing
+// one of them.
 std::optional<JAudioFiles> FindJAudioFiles(const ntdlib::disc::GameFiles& game, const JAudioProfile& profile,
                                            std::string* error = nullptr);
 
-// The wave systems of a Jac game's bank file. The file starts with the offset and the count of the wave systems'
-// entries, then the same for the banks' entries. An entry gives a wave system's or a bank's offset and size in the
-// file. A wave system's number is the entry's place in the list. A size of 0 means none. Throws xsflib::FormatError if
-// the file or a wave system is damaged.
-std::vector<ntdlib::jaudio::WaveSystem> ReadJacWaveSystems(std::span<const uint8_t> bank_file);
-
 // The wave systems of a game whose sound library is `library`, from `start_up`: JAudio2's start-up archive, a Jac
-// game's bank file (ReadJacWaveSystems) or an AAF start-up archive. Throws xsflib::FormatError if the file is damaged.
+// game's bank file (ntdlib::jaudio::ReadBxWaveSystems) or an AAF start-up archive. Throws xsflib::FormatError if the
+// file is damaged.
 std::vector<ntdlib::jaudio::WaveSystem> ReadWaveSystems(JAudioLibrary library, std::span<const uint8_t> start_up);
 
 // A Jac game's sounds: its pieces of music, from the sequence index in `dol` at the profile's `sequence_index`, then
@@ -340,7 +356,7 @@ std::vector<ntdlib::jaudio::WaveSystem> ReadWaveSystems(JAudioLibrary library, s
 // rip plays that type's effects on an event of the quiet type, by the same entry of the table of actions. An other
 // effect is labelled by its kind and its number in hexadecimal, as system-19 or player-800c. The formation's sound is
 // labelled formation. An effect plays the profile's `effect_groups`. Throws xsflib::FormatError if `dol` isn't a DOL,
-// if the index lies outside the DOL's sections, isn't a BARC or ends early, or if the catalogue of effects or the table
+// if the index is outside the DOL's sections, isn't a BARC or ends early, or if the catalogue of effects or the table
 // of actions runs past its section or has a row of an unknown kind.
 std::vector<JAudioSound> ReadJacSounds(std::span<const uint8_t> dol, const JAudioProfile& profile);
 
@@ -352,7 +368,7 @@ std::vector<JAudioSound> ReadJacSounds(std::span<const uint8_t> dol, const JAudi
 // scene loads, or none for a piece that the game never plays. An effect plays in the effects sequence. The name table
 // `names` names it. Without a name there, the effect is named se<category>-<index>. Its wave groups are the profile's
 // `static_waves`. The sequence archive may be compressed with Yaz0. Throws xsflib::FormatError if a file is damaged, or
-// if the sequence archive lacks a piece's file.
+// if the sequence archive has no file for a piece.
 std::vector<JAudioSound> ReadPikmin2Sounds(std::span<const uint8_t> aaf, std::span<const uint8_t> sequence_archive,
                                            std::span<const uint8_t> names, const JAudioProfile& profile);
 
@@ -365,8 +381,18 @@ std::optional<std::vector<JAudioSound>> ReadJAudioSounds(const ntdlib::disc::Gam
                                                          std::span<const uint8_t> start_up,
                                                          std::string* error = nullptr);
 
+// Makes the game's test for Survival Mode answer yes in the mini file of each chord layer of Survival Mode in `sounds`
+// (JAudioProfile::survival_test, JungleBeatSurvivalTest in ntdlib). The stage then starts its music as Survival Mode
+// does. Does nothing for a profile without the test. ReadJAudioSounds calls it.
+void AddSurvivalTests(const JAudioProfile& profile, std::vector<JAudioSound>& sounds);
+
 // What the length analysis watches for sound `sound_id`: the profile's `watch`. Pikmin 2's AutoBgm pieces never repeat.
 // Their root tracks' polls of the game stay moves (see GameWatch's `idle_in_calls`).
 ntdlib::jaudio::GameWatch WatchOf(const JAudioProfile& profile, uint32_t sound_id);
+
+// Writes the piece of each chord layer of a boss fight in `sounds` over the music of the row of its stage, in the
+// layer's mini file (JAudioProfile::stage_table, JungleBeatFightMusic in ntdlib). The stage then starts the fight's
+// music. Does nothing for a profile without the table. ReadJAudioSounds calls it.
+void AddFightMusic(const JAudioProfile& profile, std::vector<JAudioSound>& sounds);
 
 } // namespace wsf::rip

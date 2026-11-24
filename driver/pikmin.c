@@ -51,21 +51,13 @@
  * requires no PowerPC toolchain.
  */
 
-typedef unsigned int u32;
+#include "guest.h"
 
 #define PARAMS_MAGIC 0x57534644u /* 'WSFD' */
 #define PARAMS_VERSION 2u
 
-/* Values of Params.status. They're macros because an enumerator can't hold 0x80000000 before C23. */
-#define STATUS_PLAYING 1u
-#define STATUS_FINISHED 2u
-#define STATUS_ERROR 0x80000000u /* | step number */
-
 /* The polls that the driver makes for the sound library and the disc before it gives up: 10 s at 60 polls a second. */
 #define SETUP_POLLS 600u
-
-/* The most wave groups that a .miniwsf can list. Z2Params has the same limit. */
-#define MAX_WAVES 64u
 
 #include "jaudio/pikmin.h"
 
@@ -96,58 +88,29 @@ struct Params
     u32 music_handle;     /* that slot's root sequence */
     u32 part_track;       /* the name of the root track that a cutscene writes its part to */
     /* the game profile: the addresses of the game's functions and variables */
-    u32 sleep_ticks;        /* void OSSleepTicks(s64 ticks) */
-    u32 alloc_mem1;         /* void* OSAllocFromMEM1ArenaLo(u32 size, u32 align) */
-    u32 set_mem2_arena_lo;  /* void OSSetMEM2ArenaLo(void*) */
-    u32 alloc_mem2;         /* void* OSAllocFromMEM2ArenaLo(u32 size, u32 align) */
-    u32 set_aram_base;      /* the sound library's setter of its "ARAM" block's address */
-    u32 start;              /* void Jac_Start(void* heap, u32 size, u32 aram, char* path) */
-    u32 add_disc_buffer;    /* void Jac_AddDVDBuffer(u8* buffer, u32 size) */
-    u32 boot_ok;            /* the sound library's flag: it's up */
-    u32 ready_bgm;          /* void Jac_ReadyBgm(u32 piece): the sequence, read from the disc */
-    u32 collect_aram;       /* void Collect_AramMotherHeap(void) */
-    u32 set_wave_scene;     /* void WaveScene_Set(u32 system, u32 group) */
-    u32 check_pass;         /* void DVDT_CheckPass(u32 pass, u32* flag, void (*)(u32)) */
-    u32 play_bgm;           /* void Jac_PlayBgm(u32 slot, u32 piece) */
-    u32 handle_to_sequence; /* seqp_* Jaf_HandleToSeq(u32 handle) */
-    u32 get_track_handle;   /* seqp_* Jam_GetTrackHandle(u32 name) */
-    u32 write_port;         /* u32 Jam_WritePortAppDirect(seqp_* track, u32 port, u16 value) */
-    /* the game profile for effects */
-    u32 load_wave_scene;    /* void WaveScene_Load(u32 system, u32 group) */
-    u32 scene;              /* the sound library's variable: the game's scene */
-    u32 menu;               /* the sound library's flag: the menu is open */
-    u32 play_system_effect; /* void Jac_PlaySystemSe(u32 number) */
-    u32 play_player_effect; /* void Jac_PlayOrimaSe(u32 number) */
-    u32 create_event;       /* s32 Jac_CreateEvent(u8 type, Vector3D* position) */
-    u32 play_event_action;  /* u32 Jac_PlayEventAction(s32 event, u32 action) */
-    u32 update_camera;      /* void Jac_UpdateCamera(void) */
-    u32 system_track;       /* the name of the track that plays the system's effects */
-    u32 player_track;       /* the name of the track that plays the player's effects */
-    u32 events_track;       /* the name of the events' root track. Its children play the events */
-    u32 move_formation;     /* void Jac_Orima_Formation(s32 x, s32 y) */
-    u32 formation_track;    /* the name of the effects sequence's track for the formation */
+    u32 sleep_ticks;            /* void OSSleepTicks(s64 ticks) */
+    u32 alloc_mem1;             /* void* OSAllocFromMEM1ArenaLo(u32 size, u32 align) */
+    u32 set_mem2_arena_lo;      /* void OSSetMEM2ArenaLo(void*) */
+    u32 alloc_mem2;             /* void* OSAllocFromMEM2ArenaLo(u32 size, u32 align) */
+    u32 set_aram_base;          /* the sound library's setter of its "ARAM" block's address */
+    u32 start;                  /* void Jac_Start(void* heap, u32 size, u32 aram, char* path) */
+    u32 add_disc_buffer;        /* void Jac_AddDVDBuffer(u8* buffer, u32 size) */
+    u32 boot_ok;                /* the sound library's flag: it's up */
+    u32 ready_bgm;              /* void Jac_ReadyBgm(u32 piece): the sequence, read from the disc */
+    u32 collect_aram;           /* void Collect_AramMotherHeap(void) */
+    u32 set_wave_scene;         /* void WaveScene_Set(u32 system, u32 group) */
+    u32 check_pass;             /* void DVDT_CheckPass(u32 pass, u32* flag, void (*)(u32)) */
+    u32 play_bgm;               /* void Jac_PlayBgm(u32 slot, u32 piece) */
+    u32 handle_to_sequence;     /* seqp_* Jaf_HandleToSeq(u32 handle) */
+    u32 get_track_handle;       /* seqp_* Jam_GetTrackHandle(u32 name) */
+    u32 write_port;             /* u32 Jam_WritePortAppDirect(seqp_* track, u32 port, u16 value) */
+    struct EffectCalls effects; /* the game profile for effects and the formation (jaudio/pikmin.h) */
 };
 
 __attribute__((section(".params"), used)) volatile struct Params driver_params = {
     .magic = PARAMS_MAGIC,
     .version = PARAMS_VERSION,
 };
-
-typedef u32 (*fn0)(void);
-typedef u32 (*fn1)(u32);
-typedef u32 (*fn2)(u32, u32);
-typedef u32 (*fn3)(u32, u32, u32);
-typedef u32 (*fn4)(u32, u32, u32, u32);
-
-static u32 word(u32 address)
-{
-    return *(volatile u32*)address;
-}
-
-static unsigned char byte(u32 address)
-{
-    return *(volatile unsigned char*)address;
-}
 
 /* OSSleepTicks takes an OSTime, a 64-bit count in r3 (high) and r4 (low). */
 static void wait_frame(void)
@@ -164,57 +127,12 @@ __attribute__((noreturn)) static void fail(u32 step)
     }
 }
 
-/* The flag that the disc task's pass sets once the disc has read everything before it, and the sound's track: the
-   piece's root track, or the track that plays the part. The length analysis reads that track through `sound`. */
-static volatile u32 piece_read;
-static volatile u32 piece_root;
-
-/* The end of the sound: once its track is free again. */
-static void check_end(volatile struct Params* p)
-{
-    if (p->status == STATUS_PLAYING && byte(piece_root + TRACK_STATE) == TRACK_FREE)
-    {
-        p->sound = 0;
-        p->status = STATUS_FINISHED;
-    }
-}
-
-/* The wait for ever. */
-__attribute__((noreturn)) static void watch_piece(volatile struct Params* p)
-{
-    for (;;)
-    {
-        check_end(p);
-        wait_frame();
-    }
-}
-
-/* An event's place against the camera, as Jac_CreateEvent takes it: three floats. An event at the camera gets the full
-   volume and the pan of the middle. */
-static const u32 at_camera[3];
-
-/* The first child of the `count` tracks at `parents` that plays, or 0. */
-static u32 playing_child(const u32* parents, u32 count)
-{
-    for (u32 i = 0; i < count; i++)
-    {
-        for (u32 n = 0; n < TRACK_CHILDREN; n++)
-        {
-            const u32 child = word(parents[i] + TRACK_FIRST_CHILD + 4 * n);
-            if (child && byte(child + TRACK_STATE) != TRACK_FREE)
-            {
-                return child;
-            }
-        }
-    }
-
-    return 0;
-}
+#include "jaudio/pikmin_piece.h"
 
 /* One frame of the formation's move, as the game's frame passes the player's move. */
 static void move_formation(volatile struct Params* p)
 {
-    ((fn2)p->move_formation)(FORMATION_X, FORMATION_Y);
+    ((fn2)p->effects.move_formation)(FORMATION_X, FORMATION_Y);
 }
 
 /* Steps 7 to 10: an effect. */
@@ -226,7 +144,8 @@ __attribute__((noreturn)) static void play_effect(volatile struct Params* p)
     for (u32 i = 0; i < p->wave_count; i++)
     {
         const u32 system = p->waves[i] >> 16;
-        ((fn2)(system == EFFECTS_SYSTEM ? p->load_wave_scene : p->set_wave_scene))(system, p->waves[i] & 0xffffu);
+        ((fn2)(system == EFFECTS_SYSTEM ? p->effects.load_wave_scene : p->set_wave_scene))(system,
+                                                                                           p->waves[i] & 0xffffu);
     }
     ((fn3)p->check_pass)(PASS_OF_EFFECTS, (u32)&piece_read, 0);
     for (u32 polls = 0; !piece_read; polls++)
@@ -248,14 +167,14 @@ __attribute__((noreturn)) static void play_effect(volatile struct Params* p)
             fail(8);
         }
         wait_frame();
-        system_track = ((fn1)p->get_track_handle)(p->system_track);
-        player_track = ((fn1)p->get_track_handle)(p->player_track);
-        events_track = ((fn1)p->get_track_handle)(p->events_track);
+        system_track = ((fn1)p->get_track_handle)(p->effects.system_track);
+        player_track = ((fn1)p->get_track_handle)(p->effects.player_track);
+        events_track = ((fn1)p->get_track_handle)(p->effects.events_track);
     }
 
     /* The effect. The track that plays it becomes a child of the track for its kind. One of the system's effects plays
        one of the player's. */
-    *(volatile u32*)p->scene = SCENE_OF_PLAY;
+    *(volatile u32*)p->effects.scene = SCENE_OF_PLAY;
     const u32 number = EFFECT_NUMBER(p->sound_id);
     const u32 kind = EFFECT_KIND(p->sound_id);
     u32 parents[2] = {system_track, player_track};
@@ -265,27 +184,27 @@ __attribute__((noreturn)) static void play_effect(volatile struct Params* p)
     case EFFECT_SYSTEM:
         if (number == EFFECT_CLOSES_MENU)
         {
-            *(volatile u32*)p->menu = 1;
+            *(volatile u32*)p->effects.menu = 1;
         }
-        ((fn1)p->play_system_effect)(number);
+        ((fn1)p->effects.play_system_effect)(number);
         break;
     case EFFECT_PLAYER:
-        ((fn1)p->play_player_effect)(number);
+        ((fn1)p->effects.play_player_effect)(number);
         break;
     case EFFECT_EVENT:
         {
-            const u32 event = ((fn2)p->create_event)(EVENT_TYPE(number), (u32)at_camera);
+            const u32 event = ((fn2)p->effects.create_event)(EVENT_TYPE(number), (u32)at_camera);
             if (event >= TRACK_CHILDREN)
             {
                 fail(9);
             }
-            ((fn2)p->play_event_action)(event, EVENT_ACTION(number));
+            ((fn2)p->effects.play_event_action)(event, EVENT_ACTION(number));
             parents[0] = word(events_track + TRACK_FIRST_CHILD + 4 * event);
             count = 1;
             break;
         }
     case EFFECT_FORMATION:
-        parents[0] = ((fn1)p->get_track_handle)(p->formation_track);
+        parents[0] = ((fn1)p->get_track_handle)(p->effects.formation_track);
         if (!parents[0])
         {
             fail(9);
@@ -308,7 +227,7 @@ __attribute__((noreturn)) static void play_effect(volatile struct Params* p)
         {
             move_formation(p);
         }
-        ((fn0)p->update_camera)();
+        ((fn0)p->effects.update_camera)();
         wait_frame();
     }
 
@@ -319,7 +238,7 @@ __attribute__((noreturn)) static void play_effect(volatile struct Params* p)
         {
             move_formation(p);
         }
-        ((fn0)p->update_camera)();
+        ((fn0)p->effects.update_camera)();
         check_end(p);
         wait_frame();
     }

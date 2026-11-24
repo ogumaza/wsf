@@ -4,7 +4,8 @@
 // template's comment says what the plugin does. plugin_traits.h gives WSF's traits.
 //
 // The player core (src/wsf) does the emulation. Game mode runs the game's sound code on an emulated Wii. Archive mode
-// runs WSF's model of the SDK's sound player. Both modes run the game's AX microcode on the emulated DSP.
+// runs the model of the SDK sound player. Both modes run the DSP program of the game (the AX microcode, or the JAudio
+// program) on the emulated DSP.
 //
 // Build: see plugins/xmplay/README.md (clang-cl for 32-bit Windows, with the XMPlay plugin SDK).
 

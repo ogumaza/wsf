@@ -12,4 +12,4 @@ endif()
 xsflib_add_foobar2000_component(foo_input_wsf SDK ${FOOBAR2000_SDK_DIR} SOURCES foo_input_wsf.cpp LIBRARIES wsf_player
                                 VERSION ${wsf_VERSION} BUNDLE_ID com.foobar2000.foo-input-wsf OPTIONS ${WSF_WARNINGS})
 xsflib_add_version(foo_input_wsf VERSION ${wsf_VERSION} DEFINE WSF_VERSION DESCRIPTION "WSF decoder for foobar2000"
-                   PRODUCT WSF COPYRIGHT "Copyright (c) 2026 the WSF authors. MIT licence.")
+                   PRODUCT WSF COPYRIGHT "${WSF_COPYRIGHT}")

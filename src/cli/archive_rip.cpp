@@ -23,6 +23,7 @@
 #include "ntdlib/rvl/snd/arrangement.h"
 #include "ntdlib/rvl/snd/effect_setup.h"
 #include "ntdlib/rvl/snd/rsar_options.h"
+#include "xsflib/cli/length_analysis.h"
 #include "xsflib/cli/rip.h"
 #include "xsflib/rip/file_names.h"
 
@@ -92,7 +93,8 @@ std::vector<Job> VariantJobs(const std::vector<Job>& jobs, const nw4r::ArchiveEf
 
 // Length analysis runs every selected sequence through the model and AX's microcode on the DSP, in `arrangement`. The
 // sounds are independent. The analysis spreads them over several threads. Each sequence of a piece is measured alone,
-// with the effects of the piece's first sound. The piece then gets the latest end (rip::TimingOfPiece).
+// with the effects of the piece's first sound. The piece then gets the latest end (rip::TimingOfPiece). Music
+// (ntdlib::rsar::IsMusic) runs to the long limit, and so does each sequence of a piece with music in it.
 void AnalyzeLengths(std::vector<Job>& jobs, const ntdlib::rsar::SoundArchive& archive,
                     const std::vector<uint8_t>& archive_bytes, const GameCode& code,
                     const nw4r::Arrangement& arrangement, const nw4r::ArchiveEffects& effects, unsigned threads)
@@ -102,6 +104,7 @@ void AnalyzeLengths(std::vector<Job>& jobs, const ntdlib::rsar::SoundArchive& ar
         uint32_t index;
         uint32_t effects_sound;
         std::string label; // for the warning of a failed analysis
+        xsflib::rip::Limit limit;
         std::optional<rip::Timing> timing;
     };
 
@@ -109,17 +112,23 @@ void AnalyzeLengths(std::vector<Job>& jobs, const ntdlib::rsar::SoundArchive& ar
     for (const Job& job : jobs)
     {
         const std::vector<uint32_t> sounds = job.Sounds();
+        const auto is_music = [&archive](uint32_t sound)
+        {
+            return ntdlib::rsar::IsMusic(archive, sound);
+        };
+        const xsflib::rip::Limit limit =
+            std::ranges::any_of(sounds, is_music) ? xsflib::rip::Limit::kLong : xsflib::rip::Limit::kDefault;
         for (const uint32_t sound : sounds)
         {
             const std::string& label = sounds.size() > 1 ? archive.Sounds()[sound].name : job.label;
-            measures.push_back({sound, sounds.front(), label, std::nullopt});
+            measures.push_back({sound, sounds.front(), label, limit, std::nullopt});
         }
     }
 
     const rip::LengthAnalyzer analyzer(archive_bytes, code.microcode, code.build, arrangement, effects);
     const auto analyze = [&analyzer](Measure& measure)
     {
-        measure.timing = analyzer.Analyze(measure.index, measure.effects_sound);
+        measure.timing = analyzer.Analyze(measure.index, measure.effects_sound, measure.limit);
 
         return true;
     };
@@ -240,47 +249,6 @@ std::size_t SkipMuted(std::vector<Job>& jobs, const ntdlib::rsar::SoundArchive& 
     return std::erase_if(jobs, muted);
 }
 
-// Takes out the sequences whose data isn't all in the archive, and the pieces with such a sequence. They would play
-// with missing instruments or channels. Returns the number taken out.
-std::size_t SkipIncomplete(std::vector<Job>& jobs, const ntdlib::rsar::SoundArchive& archive)
-{
-    const auto incomplete = [&archive](const Job& job)
-    {
-        const std::vector<uint32_t> sounds = job.Sounds();
-        std::string what;
-        for (const uint32_t sound : sounds)
-        {
-            const std::vector<std::string> missing = ntdlib::rsar::MissingData(archive, sound);
-            std::string list;
-            for (std::size_t i = 0; i < missing.size(); i++)
-            {
-                list += (i ? ", " : "") + missing[i];
-            }
-
-            // A piece names each sequence whose data is missing.
-            if (!list.empty() && sounds.size() > 1)
-            {
-                list = archive.Sounds()[sound].name + " (" + list + ")";
-            }
-
-            if (!list.empty())
-            {
-                what += (what.empty() ? "" : "; ") + list;
-            }
-        }
-
-        if (what.empty())
-        {
-            return false;
-        }
-
-        std::fprintf(stderr, "skipped %s: not in this archive: %s\n", job.label.c_str(), what.c_str());
-
-        return true;
-    };
-    return std::erase_if(jobs, incomplete);
-}
-
 // Game mode: finds what the driver loads for each sequence. The driver loads the groups that hold the sequence and its
 // bank. Takes out the sequences that no group holds. Returns the number taken out.
 std::size_t SkipUngrouped(std::vector<Job>& jobs, const ntdlib::rsar::SoundArchive& archive)
@@ -316,7 +284,7 @@ std::size_t MeasureSequences(std::vector<Job>& jobs, const ntdlib::rsar::SoundAr
     if (o.lengths && !jobs.empty())
     {
         AnalyzeLengths(jobs, archive, archive_bytes, code, arrangement, effects, o.jobs);
-        silent += SkipSilent(jobs);
+        silent += xsflib::cli::SkipSilent(jobs);
     }
 
     return silent;
@@ -563,7 +531,11 @@ int RipArchive(const fs::path& out_dir, xsflib::rip::FileNames& names, const std
         return kMicrocodeRejected;
     }
 
-    const std::size_t skipped = SkipIncomplete(jobs, *archive);
+    const auto sounds_of = [](const Job& job)
+    {
+        return job.Sounds();
+    };
+    const std::size_t skipped = ntdlib::rsar::SkipIncomplete(jobs, *archive, sounds_of);
 
     const nw4r::ArchiveEffects effects = EffectsToRip(code, archive_path, *archive, o);
     nw4r::ArchiveEffects analyzed = effects;

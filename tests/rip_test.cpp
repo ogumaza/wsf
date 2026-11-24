@@ -2,14 +2,14 @@
 
 // Tests the length analysis on sequences in which one track plays while another polls or counts a variable or marks
 // beats for the game, on tracks that loop at lengths that don't divide each other, on a track that another track opens
-// again, on a counted loop that outlasts the limit, and on a sequence in an arrangement. TestSilence,
-// TestTracksThatWaitForEver, TestSwells and TestInnerLoops cover sequences that sound late or never, a track 0 that
-// never continues, a track that only swells a note of length 0 and a loop that holds an inner loop. TestJac reads a Jac
-// game's bank file and sequence index, made up in the formats of Pikmin's files. It also checks a piece that plays in
-// parts. TestPikmin2Sounds lists Pikmin 2's sounds from files made up in the game's formats. TestKeepLoadedGroups finds
-// the groups that game mode's driver loads for each sound. TestProgramTooLarge checks the limit on the size of a
-// library's program. TestPieces finds the pieces whose channels are separate sequences, gives a piece its timing and
-// rips it.
+// again, on a counted loop that outlasts the limit, and on a sequence in an arrangement. TestFirstSampleAndPass checks
+// the first sample and the loop's pass that the length tags count from. TestSilence, TestTracksThatWaitForEver,
+// TestSwells and TestInnerLoops cover sequences that sound late or never, a track 0 that never continues, a track that
+// only swells a note of length 0 and a loop that holds an inner loop. TestJac reads a Jac game's bank file and sequence
+// index, made up in the formats of Pikmin's files. It also checks a piece that plays in parts. TestPikmin2Sounds lists
+// Pikmin 2's sounds from files made up in the game's formats. TestKeepLoadedGroups finds the groups that game mode's
+// driver loads for each sound. TestProgramTooLarge checks the limit on the size of a library's program. TestPieces
+// finds the pieces whose channels are separate sequences, gives a piece its timing and rips it.
 
 #include "rip/rip.h"
 
@@ -31,19 +31,26 @@
 #include "ntdlib/rvl/snd/rsar_options.h"
 #include "ntdlib/rvl/snd/util.h"
 #include "ntdlib/sound_build.h"
+#include "ntdlib/testing/byte_writer.h"
 #include "ntdlib/testing/jaudio_files.h"
+#include "ntdlib/testing/jungle_beat_checks.h"
 #include "ntdlib/testing/rsar_files.h"
+#include "seqlib/testing/check.h"
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
+#include "xsflib/psf/program.h"
 #include "xsflib/psf/psf.h"
 #include "xsflib/testing/check.h"
 #include "xsflib/testing/sets.h"
+#include "xsflib/testing/timing.h"
 
 #include "rip/jaudio.h"
 #include "wsf/format.h"
 #include "wsf/models.h"
 
+using seqlib::testing::Throws;
 using xsflib::testing::Check;
+using xsflib::testing::CheckTiming;
 
 using ntdlib::testing::rsar_files::Bytes;
 using ntdlib::testing::rsar_files::MakeArchive;
@@ -67,18 +74,6 @@ std::optional<rip::Timing> Measure(const Bytes& commands, uint32_t tracks, bool 
     const rip::LengthAnalyzer analyzer(MakeArchive(MakeSequence(commands), 0, tracks, loop, sample_rate),
                                        ntdlib::Microcode{}, nw4r::SndBuild{20070608}, arrangement, effects);
     return analyzer.Analyze(0);
-}
-
-// Checks that a sequence sounds and that its length and fade are as given.
-void CheckTiming(const std::string& name, const std::optional<rip::Timing>& timing, long long min_ms, long long max_ms,
-                 long long fade_ms, bool silent = false)
-{
-    const std::string got = timing ? std::to_string(timing->length_ms) + " ms, fade " +
-                                         std::to_string(timing->fade_ms) + " ms" + (timing->silent ? ", silent" : "")
-                                   : "none";
-    Check(timing && timing->length_ms >= min_ms && timing->length_ms <= max_ms && timing->fade_ms == fade_ms &&
-              timing->silent == silent,
-          name + " (" + got + ")");
 }
 
 void TestLengths()
@@ -131,25 +126,25 @@ void TestLengths()
         3);
 
     // Track 0 only polls, and its passes don't count. The sequence loops with track 1: two loops of 24 ticks.
-    CheckTiming("track 1's loops count while track 0 polls", music, 490, 510, 10000);
+    CheckTiming("track 1's loops count while track 0 polls", music, 490, 510, 7000);
 
     // The tied note starts at 500 ms. Nothing changes after that, and its wave loops twice within a few frames.
-    CheckTiming("a still poll and a tied note settle into a loop", hold, 505, 540, 10000);
+    CheckTiming("a still poll and a tied note settle into a loop", hold, 505, 540, 7000);
 
-    // The second note ends at 750 ms, and 500 ms of tail follow. Track 0's polls during the rest aren't loops.
-    CheckTiming("a sequence ends while track 0 polls", end, 1240, 1265, 0);
+    // The second note ends at 750 ms. Track 0's polls during the rest aren't loops.
+    CheckTiming("a sequence ends while track 0 polls", end, 740, 765, 0);
 
     // Track 0's first pass changes its volume, and counts as a loop. Then track 1's loops take over, and the count
     // starts again: two loops of 24 ticks.
-    CheckTiming("the count starts again on another track's loop", move, 490, 510, 10000);
+    CheckTiming("the count starts again on another track's loop", move, 490, 510, 7000);
 
     // No track reads the beats. Track 0's first pass ends at 500 ms. The sequence is steady from then on, and the held
     // note's wave has long since looped twice.
-    CheckTiming("beats that no track reads don't stop a steady loop", beats, 490, 515, 10000);
+    CheckTiming("beats that no track reads don't stop a steady loop", beats, 490, 515, 7000);
 
     // Track 0 isn't still while it counts. Its held note starts after 32 ticks (333 ms), and the sequence is steady
     // soon after.
-    CheckTiming("a counting track isn't still", count, 335, 365, 10000);
+    CheckTiming("a counting track isn't still", count, 335, 365, 7000);
 
     // Track 0 opens tracks 1 and 2, then waits 48 ticks and jumps back, over and over. Track 1, at 17, sets its volume
     // to 100 and to 90, 12 ticks apart, and jumps back. Track 2, at 30, plays a note of 24 ticks over and over (from
@@ -174,17 +169,16 @@ void TestLengths()
 
     // Track 0's passes are idle. Track 1's passes change its volume but play no notes. Neither keeps track 2 from being
     // the main track. Track 2's loops at 48 and 72 ticks count. At 24 ticks, track 0 had made no pass yet.
-    CheckTiming("a track that plays no notes doesn't keep a later one from the loops", quiet, 740, 760, 10000);
+    CheckTiming("a track that plays no notes doesn't keep a later one from the loops", quiet, 740, 760, 7000);
 
-    // A pass that only drops the region's volume is idle (ntdlib's NoteOn), so the first tie's pass isn't a loop. The
-    // note ends at about 0.9 s. A track whose passes play notes isn't stuck then. The pass that starts the note again
-    // ends at 1.25 s and is the first loop. The note ends again at about 1.9 s, and the pass that starts it once more
-    // is the second loop. It ends at 2.25 s.
-    CheckTiming("a still track that plays notes isn't stuck", restart, 2235, 2265, 10000);
+    // A pass that only drops the region's volume is idle (ntdlib's NoteOn). The first tie's pass therefore isn't a
+    // loop. The note ends at about 0.9 s. A track whose passes play notes isn't stuck then. The pass that starts the
+    // note again ends at 1.25 s and is the first loop. The note ends again at about 1.9 s, and the pass that starts it
+    // once more is the second loop. It ends at 2.25 s.
+    CheckTiming("a still track that plays notes isn't stuck", restart, 2235, 2265, 7000);
 
-    // The note runs out at 500 ms, and 500 ms of tail follow. Its track polls, but isn't settled while the note has
-    // length left.
-    CheckTiming("a still track's note that runs out ends the sequence", ending, 990, 1010, 0);
+    // The note runs out at 500 ms. Its track polls, but isn't settled while the note has length left.
+    CheckTiming("a still track's note that runs out ends the sequence", ending, 490, 510, 0);
 }
 
 // Tests the length analysis on sequences that sound late or never.
@@ -202,10 +196,10 @@ void TestSilence()
 
     // Track 0's passes change its volume, but the 24 passes before the note starts at 500 ms don't count. Two passes
     // after it do.
-    CheckTiming("loops before the first sound don't count", late, 500, 550, 10000);
+    CheckTiming("loops before the first sound don't count", late, 500, 550, 7000);
 
-    // A sequence that never sounds gets the tail alone, and the ripper skips it.
-    CheckTiming("a sequence that never sounds is silent", silent, 500, 500, 0, true);
+    // A sequence that never sounds has a length of 0, and the ripper skips it.
+    CheckTiming("a sequence that never sounds is silent", silent, 0, 0, 0, true);
 }
 
 // Tests the length analysis on sequences whose track 0 never continues while track 1 loops. Track 1 doesn't own the
@@ -248,17 +242,17 @@ void TestTracksThatWaitForEver()
                 3);
 
     // Track 1's loops count from the start: two loops of 24 ticks.
-    CheckTiming("a track on a note that never ends doesn't keep a later one from the loops", endless, 490, 510, 10000);
-    CheckTiming("a track that waits out a held note doesn't keep a later one from the loops", held, 490, 510, 10000);
+    CheckTiming("a track on a note that never ends doesn't keep a later one from the loops", endless, 490, 510, 7000);
+    CheckTiming("a track that waits out a held note doesn't keep a later one from the loops", held, 490, 510, 7000);
 
     // Track 1's loops count once track 0 has ended: at 1,000 and 1,250 ms.
-    CheckTiming("a track whose notes end keeps a later one from the loops until then", ends, 1240, 1265, 10000);
+    CheckTiming("a track whose notes end keeps a later one from the loops until then", ends, 1240, 1265, 7000);
 
     // The first note ends at 500 ms, and track 0 with it. Track 1's loops count from then: at 750 and 1,000 ms.
-    CheckTiming("a track that waits on a note with length keeps a later one from the loops", finite, 990, 1010, 10000);
+    CheckTiming("a track that waits on a note with length keeps a later one from the loops", finite, 990, 1010, 7000);
 
     // Track 0 doesn't wait for its note, and the sequence loops with track 0: two loops of 36 ticks.
-    CheckTiming("a track that doesn't wait for its endless note owns the loops", playing, 740, 760, 10000);
+    CheckTiming("a track that doesn't wait for its endless note owns the loops", playing, 740, 760, 7000);
 }
 
 // Tests the length analysis on sequences in which a later track holds a note of length 0 and only changes it.
@@ -283,11 +277,11 @@ void TestSwells()
 
     // Track 0's passes are idle. Track 1's first pass played its note. Its second pass plays no note and only changes
     // the volume of the note of length 0. Two loops of 24 ticks.
-    CheckTiming("a track that only swells its endless note loops", swell, 490, 510, 10000);
+    CheckTiming("a track that only swells its endless note loops", swell, 490, 510, 7000);
 
     // Track 2 plays notes. Track 1's swells therefore don't count. Track 2's loops at 48 and 72 ticks do. At 24 ticks,
     // track 0 had made no pass yet.
-    CheckTiming("a swell doesn't take the loops from a track that plays notes", pad, 740, 760, 10000);
+    CheckTiming("a swell doesn't take the loops from a track that plays notes", pad, 740, 760, 7000);
 }
 
 // Tests the length analysis on a sequence in which a later track's loop holds an inner loop.
@@ -303,7 +297,7 @@ void TestInnerLoops()
                 3);
 
     // The jumps back of the count play no note. Each pass of the outer loop still plays one. Two loops of 24 ticks.
-    CheckTiming("an inner loop doesn't hide the notes of the loop around it", counted, 490, 510, 10000);
+    CheckTiming("an inner loop doesn't hide the notes of the loop around it", counted, 490, 510, 7000);
 }
 
 // Tests the length analysis on a sequence whose tracks loop at lengths that don't divide each other.
@@ -324,15 +318,15 @@ void TestOtherLoops()
     const auto other_sound = Measure(kLoops, 3, true, 32000, {}, {.tracks = {{1, 0x0001}}});
 
     // Track 0's loops at 24 and 48 ticks count. The fade waits for track 1's second loop, at 120 ticks (1,250 ms).
-    CheckTiming("the fade waits for the second loop of a track that loops at another length", both, 1245, 1265, 10000);
+    CheckTiming("the fade waits for the second loop of a track that loops at another length", both, 1245, 1265, 7000);
 
     // A silent track doesn't hold the fade back: two loops of 24 ticks.
-    CheckTiming("a silent track doesn't hold the fade back", alone, 490, 510, 10000);
+    CheckTiming("a silent track doesn't hold the fade back", alone, 490, 510, 7000);
 
     // The tracks that the game plays of the sound narrow the arrangement's. Those of another sound change nothing.
-    CheckTiming("a track that the game silences doesn't hold the fade back", game_alone, 490, 510, 10000);
-    CheckTiming("the game's tracks narrow the arrangement's", both_with_game, 490, 510, 10000);
-    CheckTiming("another sound's tracks change nothing", other_sound, 1245, 1265, 10000);
+    CheckTiming("a track that the game silences doesn't hold the fade back", game_alone, 490, 510, 7000);
+    CheckTiming("the game's tracks narrow the arrangement's", both_with_game, 490, 510, 7000);
+    CheckTiming("another sound's tracks change nothing", other_sound, 1245, 1265, 7000);
 }
 
 // Tests the length analysis on sequences whose track 0 opens track 1 again in each of its loops. Track 1 never loops.
@@ -351,11 +345,11 @@ void TestReopen()
 
     // Track 0's loops end at 48 and 96 ticks. Track 1's note ends at both, and track 1 starts its part again from the
     // open (1,000 ms).
-    CheckTiming("a track opened again makes a pass as it starts again", note_ends, 990, 1010, 10000);
+    CheckTiming("a track opened again makes a pass as it starts again", note_ends, 990, 1010, 7000);
 
     // The opens keep track 1's wait. Track 1 starts again at 120 ticks, where its wait runs out, and at 144 ticks,
     // where its note ends as track 0 opens it again (1,500 ms).
-    CheckTiming("a track opened again during a wait makes a pass when the wait runs out", waiting, 1490, 1510, 10000);
+    CheckTiming("a track opened again during a wait makes a pass when the wait runs out", waiting, 1490, 1510, 7000);
 }
 
 // Tests the length analysis on a sequence whose second track repeats its part in a counted loop that outlasts the
@@ -371,7 +365,7 @@ void TestLongCountedLoops()
 
     // The analysis reaches its limit inside track 1's loop. It then takes that loop as endless. Track 1's passes then
     // count, and the fade starts after two loops of 480 ticks (5 s each).
-    CheckTiming("a counted loop that outlasts the limit counts as endless", counted, 9990, 10010, 10000);
+    CheckTiming("a counted loop that outlasts the limit counts as endless", counted, 9990, 10010, 7000);
 }
 
 void TestArrangement()
@@ -379,9 +373,34 @@ void TestArrangement()
     // Track 0 plays a note of 24 ticks over and over (from 6). Two loops take 500 ms, and half as long at twice the
     // tempo. The fade stays the same.
     const Bytes kLoop = {0xD1, 0x7F, 0xD2, 0x7F, 0xD3, 0x7F, 60, 127, 24, 0x89, 0x00, 0x00, 6, 0xFF};
-    CheckTiming("two loops of 24 ticks", Measure(kLoop, 1), 490, 510, 10000);
+    CheckTiming("two loops of 24 ticks", Measure(kLoop, 1), 490, 510, 7000);
     CheckTiming("two loops of 24 ticks at twice the tempo", Measure(kLoop, 1, true, 32000, {.tempo_ratio = 2.0f}), 240,
-                260, 10000);
+                260, 7000);
+}
+
+// Tests the first sample and the loop's pass that the length tags count from.
+void TestFirstSampleAndPass()
+{
+    // Track 0 plays a note of 24 ticks over and over (from 6), as in TestArrangement.
+    const Bytes kLoop = {0xD1, 0x7F, 0xD2, 0x7F, 0xD3, 0x7F, 60, 127, 24, 0x89, 0x00, 0x00, 6, 0xFF};
+
+    const std::optional<rip::Timing> timing = Measure(kLoop, 1);
+
+    // The note sounds from the first frame. Without the DSP, the first sample is the start of the frame in which a
+    // note first plays. A pass of 24 ticks lasts 83 frames of 3 ms, and the two passes end the length.
+    const auto got = [&timing]
+    {
+        if (!timing || !timing->first_sample_ms || !timing->loop)
+        {
+            return std::string("no first sample or pass");
+        }
+
+        return "first sample " + std::to_string(*timing->first_sample_ms) + " ms, pass from " +
+               std::to_string(timing->loop->start_ms) + " ms for " + std::to_string(timing->loop->length_ms) + " ms";
+    };
+    Check(timing && timing->first_sample_ms == 0 && timing->loop == xsflib::rip::LoopPass{0, 249} &&
+              timing->length_ms == 498,
+          "a loop counts from its first sample, with its pass (" + got() + ")");
 }
 
 // Tests the pieces whose channels are separate sequences (rip::FindPieces), the timing of a piece (rip::TimingOfPiece),
@@ -464,31 +483,7 @@ void TestPieces()
           "a mini of one sound is the same either way");
 }
 
-// Appends `value` to `data`, big-endian.
-void Put32(std::vector<uint8_t>& data, uint32_t value)
-{
-    uint8_t word[4];
-    xsflib::StoreBe32(word, value);
-    data.insert(data.end(), word, word + 4);
-}
-
-// Whether `read` throws xsflib::FormatError.
-template <typename Read>
-bool ThrowsFormatError(const Read& read)
-{
-    try
-    {
-        read();
-    }
-    catch (const xsflib::FormatError&)
-    {
-        return true;
-    }
-
-    return false;
-}
-
-// Tests the readers of a Jac game's bank file and sequence index (rip::ReadJacWaveSystems, rip::ReadJacSounds).
+// Tests the readers of a Jac game's bank file and sequence index (rip::ReadWaveSystems, rip::ReadJacSounds).
 void TestJac()
 {
     // A bank file with three wave systems' entries: none for system 0, and a wave system for each of 1 and 2. It has no
@@ -497,16 +492,15 @@ void TestJac()
     const std::vector<uint8_t> two = ntdlib::testing::jaudio_files::WaveSystemFile(2, 1, "two_0.aw");
     constexpr uint32_t kList = 0x10, kSystems = 3;
     const uint32_t first = kList + kSystems * 8;
-    std::vector<uint8_t> banks;
+    ntdlib::testing::ByteWriter bank_file;
     for (const uint32_t word : {kList, kSystems, first, 0u, 0u, 0u, first, uint32_t(one.size()),
                                 first + uint32_t(one.size()), uint32_t(two.size())})
     {
-        Put32(banks, word);
+        bank_file.U32(word);
     }
-    banks.insert(banks.end(), one.begin(), one.end());
-    banks.insert(banks.end(), two.begin(), two.end());
+    const std::vector<uint8_t> banks = bank_file.Append(one).Append(two).Take();
 
-    const std::vector<ntdlib::jaudio::WaveSystem> systems = rip::ReadJacWaveSystems(banks);
+    const std::vector<ntdlib::jaudio::WaveSystem> systems = rip::ReadWaveSystems(rip::JAudioLibrary::kJac, banks);
     Check(systems.size() == 2 && systems[0].number == 1 && systems[1].number == 2,
           "a bank file's wave systems take their places in its list as their numbers");
     Check(systems.size() == 2 && systems[0].groups.size() == 1 && systems[0].groups[0].archive == "one_0.aw" &&
@@ -516,9 +510,9 @@ void TestJac()
 
     std::vector<uint8_t> too_many = banks;
     xsflib::StoreBe32(&too_many[4], 0x10000000);
-    Check(ThrowsFormatError([&] { rip::ReadJacWaveSystems(too_many); }),
+    Check(Throws<xsflib::FormatError>([&] { rip::ReadWaveSystems(rip::JAudioLibrary::kJac, too_many); }),
           "a bank file that lists more wave systems than it can hold is refused");
-    Check(ThrowsFormatError([&] { rip::ReadJacWaveSystems(std::vector<uint8_t>(6)); }),
+    Check(Throws<xsflib::FormatError>([&] { rip::ReadWaveSystems(rip::JAudioLibrary::kJac, std::vector<uint8_t>(6)); }),
           "a bank file shorter than its header is refused");
 
     // A main.dol with one section at 0x80300000. The section holds a sequence index of six files: the effects, the
@@ -528,31 +522,22 @@ void TestJac()
     std::vector<uint8_t> dol(0x100);
     xsflib::StoreBe32(&dol[0x1c], 0x100);    // the first data section's file offset
     xsflib::StoreBe32(&dol[0x64], kSection); // its address
-    std::vector<uint8_t> section(0x20);
-    const auto add_file = [&section](const std::string& name, uint32_t offset, uint32_t size)
+    ntdlib::testing::ByteWriter section;
+    section.PadTo(0x20).Text("BARC----").U32(0).U32(6).Text("test.arc").PadTo(0x20 + 0x20);
+    const auto add_file = [&section](const char* name, uint32_t offset, uint32_t size)
     {
-        std::vector<uint8_t> entry(0x20);
-        std::copy(name.begin(), name.end(), entry.begin());
-        xsflib::StoreBe32(&entry[0x18], offset);
-        xsflib::StoreBe32(&entry[0x1c], size);
-        section.insert(section.end(), entry.begin(), entry.end());
+        const std::size_t entry = section.Size();
+        section.Text(name).PadTo(entry + 0x18).U32(offset).U32(size);
     };
 
-    const std::string header = "BARC----";
-    section.insert(section.end(), header.begin(), header.end());
-    Put32(section, 0);
-    Put32(section, 6);
-    const std::string archive = "test.arc";
-    section.insert(section.end(), archive.begin(), archive.end());
-    section.resize(0x20 + 0x20);
     add_file("se.jam", 0, 0x100);
     add_file("sysevent.jam", 0x100, 0x100);
     add_file("song.jam", 0x200, 0x40);
     add_file("dummy", 0, 0);
     add_file("tune", 0x240, 0x20);
     add_file("fourteen.chars", 0x260, 0x20);
-    xsflib::StoreBe32(&dol[0xac], static_cast<uint32_t>(section.size())); // the first data section's size
-    dol.insert(dol.end(), section.begin(), section.end());
+    xsflib::StoreBe32(&dol[0xac], static_cast<uint32_t>(section.Size())); // the first data section's size
+    dol.insert(dol.end(), section.Data().begin(), section.Data().end());
 
     rip::JAudioProfile profile{};
     profile.library = rip::JAudioLibrary::kJac;
@@ -584,8 +569,8 @@ void TestJac()
 
     // A second section at 0x80310000 holds a catalogue of six effects, their names, and the first entries of the event
     // types with the table of actions. The rows: the system's effect 5, the player's effect 0x8003, action 1 of event
-    // type 2, action 0 of type 3, action 0 of type 7, and the system's effect 0, which the profile leaves out. Actions
-    // 3 and 4 play the same effect. Type 7 is the sounding type, and type 1 the quiet type.
+    // type 2, action 0 of type 3, action 0 of type 7, and the system's effect 0. The profile leaves out the last row.
+    // Actions 3 and 4 play the same effect. Type 7 is the sounding type, and type 1 the quiet type.
     constexpr uint32_t kEffects = 0x80310000, kRows = kEffects, kNames = kEffects + 0x80, kOffsets = kEffects + 0xc0;
     std::vector<uint8_t> effects_dol = dol;
     std::vector<uint8_t> effects(0x140);
@@ -651,24 +636,26 @@ void TestJac()
 
     std::vector<uint8_t> bad_kind = effects_dol;
     xsflib::StoreBe32(&bad_kind[bad_kind.size() - effects.size() + 16], 9);
-    Check(ThrowsFormatError([&] { rip::ReadJacSounds(bad_kind, profile); }),
+    Check(Throws<xsflib::FormatError>([&] { rip::ReadJacSounds(bad_kind, profile); }),
           "a catalogue's row of an unknown kind is refused");
     profile.jac_effects.count = 17;
-    Check(ThrowsFormatError([&] { rip::ReadJacSounds(effects_dol, profile); }),
+    Check(Throws<xsflib::FormatError>([&] { rip::ReadJacSounds(effects_dol, profile); }),
           "a catalogue that runs past its section is refused");
     profile = rip::JAudioProfile{.library = rip::JAudioLibrary::kJac, .sequence_index = kIndex};
 
     // The index holds the count of files at offset 0xc. Seven files run past the end of the section.
     std::vector<uint8_t> short_index = dol;
     xsflib::StoreBe32(&short_index[0x100 + 0x20 + 0xc], 7);
-    Check(ThrowsFormatError([&] { rip::ReadJacSounds(short_index, profile); }),
+    Check(Throws<xsflib::FormatError>([&] { rip::ReadJacSounds(short_index, profile); }),
           "an index whose files run past the end of its section is refused");
 
     profile.sequence_index = kSection;
-    Check(ThrowsFormatError([&] { rip::ReadJacSounds(dol, profile); }), "an index without its magic is refused");
+    Check(Throws<xsflib::FormatError>([&] { rip::ReadJacSounds(dol, profile); }),
+          "an index without its magic is refused");
     profile.sequence_index = 0x80400000;
-    Check(ThrowsFormatError([&] { rip::ReadJacSounds(dol, profile); }), "an index outside main.dol is refused");
-    Check(ThrowsFormatError([&] { rip::ReadJacSounds(std::vector<uint8_t>(0x10), profile); }),
+    Check(Throws<xsflib::FormatError>([&] { rip::ReadJacSounds(dol, profile); }),
+          "an index outside main.dol is refused");
+    Check(Throws<xsflib::FormatError>([&] { rip::ReadJacSounds(std::vector<uint8_t>(0x10), profile); }),
           "a main.dol that isn't a DOL is refused");
 }
 
@@ -813,11 +800,12 @@ void TestPikmin2Sounds()
           "a listed effect's ID gives its draws from bit 20, and the others' IDs stay as they are");
 
     const std::vector<uint8_t> short_names(names.begin(), names.begin() + 0x10 + 17 * 0x20);
-    Check(
-        ThrowsFormatError([&] { rip::ReadPikmin2Sounds(aaf, files::RarcFile(archive_files), short_names, *profile); }),
-        "a name table shorter than its categories' records is refused");
+    Check(Throws<xsflib::FormatError>(
+              [&] { rip::ReadPikmin2Sounds(aaf, files::RarcFile(archive_files), short_names, *profile); }),
+          "a name table shorter than its categories' records is refused");
     archive_files.pop_back();
-    Check(ThrowsFormatError([&] { rip::ReadPikmin2Sounds(aaf, files::RarcFile(archive_files), names, *profile); }),
+    Check(Throws<xsflib::FormatError>(
+              [&] { rip::ReadPikmin2Sounds(aaf, files::RarcFile(archive_files), names, *profile); }),
           "a sequence archive without a piece is refused");
 
     // The pieces whose conductors pick what the tracks play never repeat.
@@ -829,13 +817,28 @@ void TestPikmin2Sounds()
           "the root tracks of the other pieces, their variants and the effects idle in calls");
 }
 
+// Whether the .miniwsf `mini` holds a MEM chunk that writes `payload` to `address`.
+bool MiniWrites(const std::vector<uint8_t>& mini, uint32_t address, const std::vector<uint8_t>& payload)
+{
+    xsflib::psf::PsfFile file;
+    xsflib::psf::ProgramChunks chunks;
+    if (xsflib::psf::ParsePsf(mini, file) || xsflib::psf::ParseProgram(file.program, chunks))
+    {
+        return false;
+    }
+
+    const auto writes = [address, &payload](const xsflib::psf::MemChunk& chunk)
+    {
+        return chunk.address == address && chunk.data == payload;
+    };
+    return std::ranges::any_of(chunks.memory, writes);
+}
+
 // Tests the chord layers of the profiles (JAudioProfile::chord_layers).
 void TestChordLayers()
 {
-    // Only New Play Control! Donkey Kong Jungle Beat's profile lists chord layers, at most as many as the driver's table
-    // holds. Each belongs to a piece of music, 0x01000000 plus an index below 0x100, and names a stage and one or two
-    // records of the chord database below 0x100. A piece's layers have different suffixes, and none is the suffix of a
-    // layer state.
+    // Only New Play Control! Donkey Kong Jungle Beat's profile lists chord layers. ntdlib's CheckChordLayers checks the
+    // list and its suffixes against the profile's layer states.
     for (const rip::JAudioProfile& profile : rip::KnownJAudioProfiles())
     {
         if (profile.chord_layers.empty())
@@ -844,37 +847,75 @@ void TestChordLayers()
         }
 
         Check(profile.driver == rip::JAudioDriver::kJungleBeat, profile.name + ": the driver of chord layers");
-        Check(profile.chord_layers.size() <= ntdlib::jaudio::kMaxChordLayers,
-              profile.name + ": the number of chord layers");
-        for (std::size_t i = 0; i < profile.chord_layers.size(); i++)
+        Check(profile.state_table.rows != 0, profile.name + ": the table of states for the chord layers");
+        ntdlib::testing::CheckChordLayers(profile.name, profile.chord_layers, profile.layer_states);
+    }
+
+    // A layer whose piece starts silent writes the piece's second state over its first in its .miniwsf.
+    const std::vector<uint8_t> next = {0x13, 0x33, 0, 0, 0, 0, 0, 0};
+    const ntdlib::flipper::z2::PieceState state = {.memory = {{0x803acc44, next}}};
+    const std::vector<uint32_t> waves = {0x00010000};
+    Check(MiniWrites(
+              rip::BuildJAudioMini(ntdlib::jaudio::ChordLayerId(0x01000006, 126), waves, "game.wsflib", {}, &state),
+              0x803acc44, next),
+          "the mini writes the second state over the first");
+}
+
+// Tests the layers of Survival Mode (AddSurvivalTests): New Play Control! Donkey Kong Jungle Beat's profile names the
+// game's test for Survival Mode, and only a layer of Survival Mode patches it to answer yes (li r3, 1 and blr).
+void TestSurvivalTests()
+{
+    const std::vector<rip::JAudioProfile>& profiles = rip::KnownJAudioProfiles();
+    for (const rip::JAudioProfile& profile : profiles)
+    {
+        Check((profile.survival_test != 0) == (profile.game_id == "R49E01"),
+              profile.name + ": only Jungle Beat's Wii release has a test for Survival Mode");
+    }
+
+    const auto profile = std::find_if(profiles.begin(), profiles.end(),
+                                      [](const rip::JAudioProfile& p) { return p.game_id == "R49E01"; });
+    if (!Check(profile != profiles.end() && profile->survival_test == 0x80265190,
+               "Jungle Beat's Wii profile has the test for Survival Mode at 0x80265190"))
+    {
+        return;
+    }
+
+    std::vector<rip::JAudioSound> sounds = {{.id = 0x0100004b}};
+    for (std::size_t i = 0; i < profile->chord_layers.size(); i++)
+    {
+        sounds.push_back(
+            {.id = ntdlib::jaudio::ChordLayerId(profile->chord_layers[i].piece, static_cast<uint32_t>(i))});
+    }
+
+    std::vector<rip::JAudioSound> unpatched = sounds;
+    rip::AddSurvivalTests(*profile, sounds);
+    const std::vector<uint8_t> yes = {0x38, 0x60, 0x00, 0x01, 0x4e, 0x80, 0x00, 0x20};
+    std::size_t patched = 0;
+    for (std::size_t i = 0; i < sounds.size(); i++)
+    {
+        const bool survival = i > 0 && profile->chord_layers[i - 1].survival;
+        const std::vector<ntdlib::flipper::z2::PieceState::Memory>& memory = sounds[i].piece_state.memory;
+        Check(memory.size() == (survival ? 1u : 0u),
+              "sound " + std::to_string(i) + ": a patch only for a layer of Survival Mode");
+        if (survival && memory.size() == 1)
         {
-            const ntdlib::jaudio::JungleBeatChordLayer& layer = profile.chord_layers[i];
-            const std::string name = profile.name + ": chord layer " + std::to_string(i);
-            Check((layer.piece & 0xffffff00) == 0x01000000 && layer.stage != 0 && layer.stage < 0x100 &&
-                      layer.record != 0 && layer.record < 0x100 && layer.second < 0x100 && layer.suffix &&
-                      *layer.suffix,
-                  name);
-
-            // The sound ID gives the index back, in bits 16 to 22 and bit 15, and the piece's ID.
-            const uint32_t id = ntdlib::jaudio::ChordLayerId(layer.piece, static_cast<uint32_t>(i));
-            Check(
-                ((id >> 16 & 0x7f) | (id >> 8 & 0x80)) == i &&
-                    (id & ~(ntdlib::jaudio::kChordLayer | 0x7f0000u | ntdlib::jaudio::kChordLayerHigh)) == layer.piece,
-                name + ": its sound ID");
-            for (std::size_t j = 0; j < i; j++)
-            {
-                Check(profile.chord_layers[j].piece != layer.piece ||
-                          std::string(profile.chord_layers[j].suffix) != layer.suffix,
-                      name + ": its suffix");
-            }
-
-            for (const ntdlib::jaudio::JungleBeatState& state : profile.layer_states)
-            {
-                Check(state.piece != layer.piece || std::string(state.suffix) != layer.suffix,
-                      name + ": its suffix and the states'");
-            }
+            patched++;
+            Check(memory[0].address == 0x80265190 && memory[0].data == yes, "the patch makes the test answer yes");
+            const std::vector<uint32_t> waves = {0x00010000};
+            Check(MiniWrites(rip::BuildJAudioMini(sounds[i].id, waves, "game.wsflib", {}, &sounds[i].piece_state),
+                             0x80265190, yes),
+                  "the layer's mini writes the patch");
         }
     }
+
+    Check(patched == 3, "three layers of Survival Mode");
+
+    rip::JAudioProfile without = *profile;
+    without.survival_test = 0;
+    rip::AddSurvivalTests(without, unpatched);
+    Check(std::all_of(unpatched.begin(), unpatched.end(),
+                      [](const rip::JAudioSound& sound) { return sound.piece_state.memory.empty(); }),
+          "no patch without the profile's test");
 }
 
 // Tests the copy of an archive for a game-mode library (rip::KeepLoadedGroups): the groups that the driver loads for
@@ -911,9 +952,67 @@ void TestKeepLoadedGroups()
 
     Check(keeps(rip::KeepLoadedGroups(archive, {0}), {true}), "a sound in one group keeps that group");
     Check(keeps(rip::KeepLoadedGroups(archive, {2}), {true, true}),
-          "a sound whose bank lies in a second group keeps both groups");
+          "a sound whose bank is in a second group keeps both groups");
     Check(keeps(rip::KeepLoadedGroups(archive, {0, 1}), {true, true}), "two sounds keep the groups of both");
     Check(keeps(rip::KeepLoadedGroups(archive, {}), {}), "a copy for no sound keeps only the archive's tables");
+}
+
+// Tests the chord layers of boss fights (AddFightMusic): New Play Control! Donkey Kong Jungle Beat's profile names the
+// game's stage table, and only the GoroPig fights' layer (134) writes JA_BGM_BOSS_GOROPY_B over the music of the row of
+// VsGoroPig1 (0x2e). The Wii's list leaves out the GameCube's layer of the final fight.
+void TestFightMusic()
+{
+    const std::vector<rip::JAudioProfile>& profiles = rip::KnownJAudioProfiles();
+    for (const rip::JAudioProfile& profile : profiles)
+    {
+        Check((profile.stage_table != 0) == (profile.game_id == "R49E01"),
+              profile.name + ": only Jungle Beat's Wii release has a stage table");
+    }
+
+    const auto profile = std::find_if(profiles.begin(), profiles.end(),
+                                      [](const rip::JAudioProfile& p) { return p.game_id == "R49E01"; });
+    if (!Check(profile != profiles.end() && profile->stage_table == 0x803aafb0,
+               "Jungle Beat's Wii profile has the stage table at 0x803aafb0"))
+    {
+        return;
+    }
+
+    // The piece, then every layer: layer 134 is sound 135.
+    std::vector<rip::JAudioSound> sounds = {{.id = 0x01000044}};
+    for (std::size_t i = 0; i < profile->chord_layers.size(); i++)
+    {
+        sounds.push_back(
+            {.id = ntdlib::jaudio::ChordLayerId(profile->chord_layers[i].piece, static_cast<uint32_t>(i))});
+    }
+
+    std::vector<rip::JAudioSound> unpatched = sounds;
+    rip::AddFightMusic(*profile, sounds);
+    const std::vector<uint8_t> music = {0x01, 0x00, 0x00, 0x44};
+    std::size_t patched = 0;
+    for (std::size_t i = 0; i < sounds.size(); i++)
+    {
+        const bool fight = i == 135;
+        const std::vector<ntdlib::flipper::z2::PieceState::Memory>& memory = sounds[i].piece_state.memory;
+        Check(memory.size() == (fight ? 1u : 0u), "sound " + std::to_string(i) + ": a row only for a fight's layer");
+        if (fight && memory.size() == 1)
+        {
+            patched++;
+            Check(memory[0].address == 0x803ab290 && memory[0].data == music, "B at the row of 0x2e");
+            const std::vector<uint32_t> waves = {0x00010000};
+            Check(MiniWrites(rip::BuildJAudioMini(sounds[i].id, waves, "game.wsflib", {}, &sounds[i].piece_state),
+                             0x803ab290, music),
+                  "the layer's mini writes the row");
+        }
+    }
+
+    Check(patched == 1 && sounds.size() == 136, "one layer of a fight");
+
+    rip::JAudioProfile without = *profile;
+    without.stage_table = 0;
+    rip::AddFightMusic(without, unpatched);
+    Check(std::all_of(unpatched.begin(), unpatched.end(),
+                      [](const rip::JAudioSound& sound) { return sound.piece_state.memory.empty(); }),
+          "no row without the profile's table");
 }
 
 // Tests the limit on a library's program (rip::ProgramTooLarge).
@@ -940,11 +1039,14 @@ int main()
         TestReopen();
         TestLongCountedLoops();
         TestArrangement();
+        TestFirstSampleAndPass();
         TestPieces();
         TestJac();
         TestPikmin2Sounds();
         TestChordLayers();
+        TestSurvivalTests();
         TestKeepLoadedGroups();
+        TestFightMusic();
         TestProgramTooLarge();
     };
     return xsflib::testing::RunTest("rip", tests);

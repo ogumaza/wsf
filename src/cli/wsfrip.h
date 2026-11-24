@@ -20,6 +20,7 @@
 #include "xsflib/cli/rip.h"
 #include "xsflib/psf/psf.h"
 #include "xsflib/rip/file_names.h"
+#include "xsflib/rip/length_tags.h"
 
 #include "rip/profiles.h"
 #include "wsf/format.h"
@@ -131,42 +132,11 @@ inline std::string Counted(std::size_t count, const std::string& noun)
     return std::to_string(count) + " " + noun + (count == 1 ? "" : "s");
 }
 
-// Reports that --only or --bgm selected no sound. This is an error. Nothing is written.
-inline int NoSoundMatches(const Options& o)
-{
-    if (o.only_text.empty())
-    {
-        std::fprintf(stderr, "error: no music sequences found (--bgm)\n");
-    }
-    else
-    {
-        std::fprintf(stderr, "error: no %s matches '%s'\n", o.bgm ? "music" : "sound", o.only_text.c_str());
-    }
-
-    return 1;
-}
-
-// Takes out the sequences that the length analysis found never sound. Returns the number taken out.
-template <typename J>
-std::size_t SkipSilent(std::vector<J>& jobs)
-{
-    const auto silent = [](const J& job)
-    {
-        if (!job.timing || !job.timing->silent)
-        {
-            return false;
-        }
-
-        std::fprintf(stderr, "skipped %s: it makes no sound\n", job.label.c_str());
-
-        return true;
-    };
-    return std::erase_if(jobs, silent);
-}
-
 // Writes a rip's set into `out_dir`: the library `lib` (see xsflib::cli::WriteLibrary), then a mini for each of `jobs`
-// with the tags `tags`. `build(lib_name, job, tags)` makes a job's mini. Then prints how many minis the rip of `source`
-// wrote, and `skipped_text` (see xsflib::cli::SkippedText). Returns that number, or -1 after printing an error.
+// with the tags `tags`. Each length tag counts from the job's first sample that isn't 0
+// (xsflib::rip::LengthFrom::kFirstSound). `build(lib_name, job, tags)` makes a job's mini. Then prints how many minis
+// the rip of `source` wrote, and `skipped_text` (see xsflib::cli::SkippedText). Returns that number, or -1 after
+// printing an error.
 template <typename J, typename Build>
 int WriteSet(const std::filesystem::path& out_dir, xsflib::rip::FileNames& names, const std::string& lib_base,
              const std::vector<uint8_t>& lib, const std::vector<J>& jobs, const Tags& tags, const Build& build,
@@ -182,7 +152,8 @@ int WriteSet(const std::filesystem::path& out_dir, xsflib::rip::FileNames& names
     {
         return build(*lib_name, job, mini_tags);
     };
-    const int count = xsflib::cli::WriteMinis(out_dir, names, jobs, tags, "wsf_sound", build_mini);
+    const int count = xsflib::cli::WriteMinis(out_dir, names, jobs, tags, xsflib::rip::LengthFrom::kFirstSound,
+                                              "wsf_sound", build_mini);
     if (count >= 0)
     {
         std::fprintf(stderr, "%s: %s%s\n", source.c_str(), Counted(count, "miniwsf file").c_str(),

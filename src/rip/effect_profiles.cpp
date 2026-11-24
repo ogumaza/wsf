@@ -502,8 +502,8 @@ nw4r::ArchiveEffects MarioKartEffects(const std::string& name, const ntdlib::rsa
 // scene but Mii Maestro's, bus A has the standard reverb of 2008 with row 0 of the parameters at 0x8059fe20. Mii
 // Maestro has FxReverbHi with row 2 of the parameters at 0x8059fd58. The names of its sounds start with RP_OCS_. The
 // game sets the longest pre-delay of both to 0.09 (0x803cdfb4). Some scenes put a reverb on bus B too. No sequence
-// sends anything to bus B there. The game sets sends on the instruments of a jam session by stage. A rip doesn't know
-// the stage and leaves those sends out.
+// sends anything to bus B there. The game sets sends on the instruments of a jam session by stage. A rip has no
+// stage and leaves those sends out.
 //
 // The main menu and Pitch Perfect play some of the tracks of their music (nw4r::kWiiMusicStarts). A rip plays the
 // tracks of the menu's state 0, at full volume, and those of Pitch Perfect's lowest levels. Each piece also rips once
@@ -787,7 +787,7 @@ const std::vector<EffectProfile>& KnownEffectProfiles()
             .append_effect = 0x80031d5c,
             .clear_effect = 0x80031f60,
             // SeqSound::WriteVariable (0x8003f9c8) passes the SeqPlayer at +0xd8 to SeqPlayer::SetLocalVariable
-            // (0x8003e830). The local variables lie at +0xf8 of the SeqPlayer.
+            // (0x8003e830). The local variables are at +0xf8 of the SeqPlayer.
             .seq_variables = 0xd8 + 0xf8,
             .classes =
                 {
@@ -941,7 +941,7 @@ const std::vector<EffectProfile>& KnownEffectProfiles()
             .seq_tracks = 0x100 + 0x114, // SeqSound's SeqPlayer (0x8009a990), and its tracks (0x800997e0)
             .track_volume = 0x8,         // SeqTrack::SetVolume (0x8009bdd0)
             // SeqSound::WriteVariable (0x8009a9b0) passes the SeqPlayer at +0x100 to SeqPlayer::SetLocalVariable
-            // (0x80099760). The local variables lie at +0x154 of the SeqPlayer.
+            // (0x80099760). The local variables are at +0x154 of the SeqPlayer.
             .seq_variables = 0x100 + 0x154,
             .classes =
                 {

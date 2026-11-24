@@ -836,6 +836,9 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
             .files = {"AudioRes/Seqs/JaiSeq.arc", "AudioRes/Info/JaiChord.arc", "AudioRes/Info/ChordSeDataBase.csd"},
             .layer_states = ntdlib::jaudio::kJungleBeatWiiStates,
             .chord_layers = ntdlib::jaudio::kJungleBeatWiiChordLayers,
+            .stage_table = ntdlib::jaudio::kJungleBeatWiiStageTable,
+            .state_table = ntdlib::jaudio::kJungleBeatWiiStateTable,
+            .survival_test = ntdlib::jaudio::kJungleBeatWiiSurvivalTest,
         },
         // New Play Control! Pikmin (USA). The game's sound library is the early JAudio1 of the GameCube release. The
         // game calls the library through C functions (Jac, Jaf, Jaq and Jam). The game's code holds the sequence index.
@@ -1142,6 +1145,15 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                     0x8002b490, // AudSoundObject::setCutoffToPort
                     0x80031fc8, // AudSceneMgr::setPlayerModeLuigi
                     0,          // Luigi mode: set by a Luigi variant's .miniwsf
+                    0x803f97cc, // MR::setStageBGMState
+                    0x8049a24c, // JAISoundParamsMove::movePitch
+                    0x0,        // no child's volume
+                    0xffffffff, // the music's state: set by a state's .miniwsf, with the words below
+                    0,          // the tempo ratio
+                    0,          // the pitch ratio
+                    0,          // the children that take the pitch
+                    0xffffffff, // the child at another volume
+                    0,          // its volume
                 },
             // AudSystem::startSound (0x80026d54) calls AudSystem::switchToLuigi (0x80027024). In Luigi mode, that
             // function writes 20 to port 0xc of a sound of group 1, the player's voices.
@@ -1149,6 +1161,8 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
             .luigi_group = 0x0001,
             .files = {"AudioRes/Seqs/JaiSeq.arc", "AudioRes/Info/JaiChord.arc", "AudioRes/Info/JaiMe.arc",
                       "AudioRes/Info/JaiRemixSeq.arc"},
+            .galaxy_states = ntdlib::jaudio::kGalaxyStates,
+            .state_word = 46,
         },
         {
             // Super Mario Galaxy's European release. Its main.dol links the USA release's code, some of it at other
@@ -1226,6 +1240,15 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                     0x8002b490, // AudSoundObject::setCutoffToPort
                     0x80031fc8, // AudSceneMgr::setPlayerModeLuigi
                     0,          // Luigi mode: set by a Luigi variant's .miniwsf
+                    0x803f97e8, // MR::setStageBGMState
+                    0x8049a24c, // JAISoundParamsMove::movePitch
+                    0x0,        // no child's volume
+                    0xffffffff, // the music's state: set by a state's .miniwsf, with the words below
+                    0,          // the tempo ratio
+                    0,          // the pitch ratio
+                    0,          // the children that take the pitch
+                    0xffffffff, // the child at another volume
+                    0,          // its volume
                 },
             // AudSceneMgr::setPlayerModeLuigi and AudSystem::switchToLuigi are at the USA addresses. Their code is the
             // USA code, apart from the targets of switchToLuigi's calls.
@@ -1233,6 +1256,8 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
             .luigi_group = 0x0001,
             .files = {"AudioRes/Seqs/JaiSeq.arc", "AudioRes/Info/JaiChord.arc", "AudioRes/Info/JaiMe.arc",
                       "AudioRes/Info/JaiRemixSeq.arc"},
+            .galaxy_states = ntdlib::jaudio::kGalaxyStates,
+            .state_word = 46,
         },
         {
             // Super Mario Galaxy's Japanese release. Its addresses were found as for the European release. The sizes
@@ -1309,6 +1334,15 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                     0x8002b490, // AudSoundObject::setCutoffToPort
                     0x80031fc8, // AudSceneMgr::setPlayerModeLuigi
                     0,          // Luigi mode: set by a Luigi variant's .miniwsf
+                    0x803f97c8, // MR::setStageBGMState
+                    0x8049a22c, // JAISoundParamsMove::movePitch
+                    0x0,        // no child's volume
+                    0xffffffff, // the music's state: set by a state's .miniwsf, with the words below
+                    0,          // the tempo ratio
+                    0,          // the pitch ratio
+                    0,          // the children that take the pitch
+                    0xffffffff, // the child at another volume
+                    0,          // its volume
                 },
             // AudSceneMgr::setPlayerModeLuigi and AudSystem::switchToLuigi are at the USA addresses. Their code is the
             // USA code, apart from the targets of switchToLuigi's calls.
@@ -1316,6 +1350,8 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
             .luigi_group = 0x0001,
             .files = {"AudioRes/Seqs/JaiSeq.arc", "AudioRes/Info/JaiChord.arc", "AudioRes/Info/JaiMe.arc",
                       "AudioRes/Info/JaiRemixSeq.arc"},
+            .galaxy_states = ntdlib::jaudio::kGalaxyStates,
+            .state_word = 46,
         },
         {
             // The game loads its sound files and its audio data tables through its file loader. The audio system
@@ -1399,6 +1435,15 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                     0x95c,      // AudSystem's AudSceneMgr
                     0x800858d0, // AudSceneMgr::setPlayerModeLuigi
                     0,          // Luigi mode: set by a Luigi variant's .miniwsf
+                    0x8001b1f0, // MR::setStageBGMState
+                    0x80596c50, // JAISoundParamsMove::movePitch
+                    0x8001b2a0, // MR's function at 0x8001b2a0: a child's volume through the stage's BGM
+                    0xffffffff, // the music's state: set by a state's .miniwsf, with the words below
+                    0,          // the tempo ratio
+                    0,          // the pitch ratio
+                    0,          // the children that take the pitch
+                    0xffffffff, // the child at another volume
+                    0,          // its volume
                 },
             // AudSystem::startSound (0x80078cc0) calls AudSystem::switchToLuigi (0x80079000), as in Galaxy.
             .luigi_word = 49,
@@ -1409,10 +1454,12 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                       "AudioRes/Info/JaiRemixSeq.arc", "AudioRes/Info/SoundIdToInstList.arc",
                       "AudioRes/SpkRes/SpkRes.arc", "AudioRes/Info/BgmParam.arc", "AudioRes/Info/MultiBgmInfo.arc",
                       "AudioRes/Info/StageBgmInfo.arc"},
+            .galaxy_states = ntdlib::jaudio::kGalaxy2States,
+            .state_word = 53,
         },
         {
             // Super Mario Galaxy 2's European release. Its main.dol has the USA release's code at the same addresses.
-            // Its data and variables lie elsewhere. The sizes are the USA release's. The language is English, one of
+            // Its data and variables are elsewhere. The sizes are the USA release's. The language is English, one of
             // the disc's six. The disc holds no translated sound files.
             .name = "Super Mario Galaxy 2 (Europe)",
             .game_id = "SB4P01",
@@ -1492,6 +1539,15 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                     0x95c,      // AudSystem's AudSceneMgr
                     0x800858d0, // AudSceneMgr::setPlayerModeLuigi
                     0,          // Luigi mode: set by a Luigi variant's .miniwsf
+                    0x8001b1f0, // MR::setStageBGMState
+                    0x80596c50, // JAISoundParamsMove::movePitch
+                    0x8001b2a0, // MR's function at 0x8001b2a0: a child's volume through the stage's BGM
+                    0xffffffff, // the music's state: set by a state's .miniwsf, with the words below
+                    0,          // the tempo ratio
+                    0,          // the pitch ratio
+                    0,          // the children that take the pitch
+                    0xffffffff, // the child at another volume
+                    0,          // its volume
                 },
             // AudSceneMgr::setPlayerModeLuigi and AudSystem::switchToLuigi are the USA code at the USA addresses.
             .luigi_word = 49,
@@ -1502,6 +1558,8 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                       "AudioRes/Info/JaiRemixSeq.arc", "AudioRes/Info/SoundIdToInstList.arc",
                       "AudioRes/SpkRes/SpkRes.arc", "AudioRes/Info/BgmParam.arc", "AudioRes/Info/MultiBgmInfo.arc",
                       "AudioRes/Info/StageBgmInfo.arc"},
+            .galaxy_states = ntdlib::jaudio::kGalaxy2States,
+            .state_word = 53,
         },
         {
             // Super Mario Galaxy 2's Japanese release. Its addresses were found as for the European release. The
@@ -1584,6 +1642,15 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                     0x95c,      // AudSystem's AudSceneMgr
                     0x800858d0, // AudSceneMgr::setPlayerModeLuigi
                     0,          // Luigi mode: set by a Luigi variant's .miniwsf
+                    0x8001b1f0, // MR::setStageBGMState
+                    0x80596c50, // JAISoundParamsMove::movePitch
+                    0x8001b2a0, // MR's function at 0x8001b2a0: a child's volume through the stage's BGM
+                    0xffffffff, // the music's state: set by a state's .miniwsf, with the words below
+                    0,          // the tempo ratio
+                    0,          // the pitch ratio
+                    0,          // the children that take the pitch
+                    0xffffffff, // the child at another volume
+                    0,          // its volume
                 },
             // AudSceneMgr::setPlayerModeLuigi and AudSystem::switchToLuigi are the USA code at the USA addresses.
             .luigi_word = 49,
@@ -1594,6 +1661,8 @@ const std::vector<JAudioProfile>& KnownJAudioProfiles()
                       "AudioRes/Info/JaiRemixSeq.arc", "AudioRes/Info/SoundIdToInstList.arc",
                       "AudioRes/SpkRes/SpkRes.arc", "AudioRes/Info/BgmParam.arc", "AudioRes/Info/MultiBgmInfo.arc",
                       "AudioRes/Info/StageBgmInfo.arc"},
+            .galaxy_states = ntdlib::jaudio::kGalaxy2States,
+            .state_word = 53,
         },
     };
     return kProfiles;

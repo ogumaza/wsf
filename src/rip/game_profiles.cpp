@@ -13,6 +13,8 @@
 
 #include "ntdlib/disc/game.h"
 #include "ntdlib/dol.h"
+#include "ntdlib/ppc/branch.h"
+#include "ntdlib/ppc/load_address.h"
 #include "ntdlib/rvl/snd/game_setups.h"
 #include "xsflib/bytes.h"
 #include "xsflib/sha1.h"
@@ -58,11 +60,8 @@ constexpr std::array<uint32_t GameProfile::*, kProfileFunctions> kProfileFields 
 constexpr std::size_t kSetupFunction = 11;
 static_assert(kProfileFields[kSetupFunction] == &GameProfile::player_setup);
 
-// Words of PowerPC code: blr, and the opcode and the AA and LK bits of b and bl, which kBranchBits selects.
+// A word of PowerPC code: blr.
 constexpr uint32_t kBlr = 0x4e800020;
-constexpr uint32_t kBranchBits = 0xfc000003;
-constexpr uint32_t kB = 0x48000000;
-constexpr uint32_t kBl = 0x48000001;
 
 // The word at the load address `address` in `dol`, if a section holds all four bytes.
 std::optional<uint32_t> WordAt(const ntdlib::Dol& dol, uint32_t address)
@@ -79,18 +78,11 @@ std::optional<uint32_t> WordAt(const ntdlib::Dol& dol, uint32_t address)
 // The function that the word `word` at `address` calls, if it's a relative bl.
 std::optional<uint32_t> CallTarget(std::optional<uint32_t> word, uint32_t address)
 {
-    if (!word || (*word & kBranchBits) != kBl)
-    {
-        return std::nullopt;
-    }
-
-    const int32_t offset = (static_cast<int32_t>(*word << 6) >> 6) & ~3;
-
-    return address + static_cast<uint32_t>(offset);
+    return word ? ntdlib::ppc::CallTarget(address, *word) : std::nullopt;
 }
 
-// The base of the small data area, which CodeWarrior's start-up code puts in r13. The entry point calls
-// __init_registers, which loads r13 with lis, then ori or addi. Returns nothing if none of the functions that the entry
+// The base of the small data area. CodeWarrior's start-up code puts it in r13: the entry point calls __init_registers,
+// and __init_registers loads r13 with lis, then ori or addi. Returns nothing if none of the functions that the entry
 // point's first 400 words call does that in its first 40 words.
 std::optional<uint32_t> SmallDataBase(const ntdlib::Dol& dol)
 {
@@ -108,15 +100,9 @@ std::optional<uint32_t> SmallDataBase(const ntdlib::Dol& dol)
                 break;
             }
 
-            const uint32_t low_opcode = *low >> 26;
-            const bool loads_high = *high >> 26 == 15 && (*high >> 21 & 31) == kR13 && (*high >> 16 & 31) == 0;
-            const bool adds_low =
-                (low_opcode == 14 || low_opcode == 24) && (*low >> 21 & 31) == kR13 && (*low >> 16 & 31) == kR13;
-            if (loads_high && adds_low)
+            if (const std::optional<uint32_t> base = ntdlib::ppc::LoadedAddress(*high, *low, kR13))
             {
-                const uint32_t base = *high << 16;
-                return low_opcode == 24 ? base | (*low & 0xffff)
-                                        : base + static_cast<uint32_t>(static_cast<int16_t>(*low & 0xffff));
+                return base;
             }
         }
     }
@@ -125,7 +111,7 @@ std::optional<uint32_t> SmallDataBase(const ntdlib::Dol& dol)
 }
 
 // The game's main. __start, at the entry point, ends with bl main, then b exit. The function after it starts within
-// 400 words, and the first blr lies in that function. Returns the last bl before the first blr that a b follows, or
+// 400 words, and the first blr is in that function. Returns the last bl before the first blr that a b follows, or
 // nothing if no blr comes in the first 400 words.
 std::optional<uint32_t> FindMain(const ntdlib::Dol& dol)
 {
@@ -146,7 +132,7 @@ std::optional<uint32_t> FindMain(const ntdlib::Dol& dol)
         }
 
         const std::optional<uint32_t> callee = CallTarget(word, at);
-        if (callee && (*next & kBranchBits) == kB)
+        if (callee && (*next & ntdlib::ppc::kBranchBits) == ntdlib::ppc::kB)
         {
             main = callee;
         }
@@ -156,8 +142,8 @@ std::optional<uint32_t> FindMain(const ntdlib::Dol& dol)
 }
 
 // The address of the sound system's flag that SoundArchivePlayer::Setup at `setup` checks in a 2008 build of NW4R SND
-// (GameProfile::init_flag). Setup's first `size` bytes call IsInitializedSoundSystem, which reads the flag relative to
-// r13: lbz r3, d(r13), then blr. Returns nothing if no call there reaches such a function.
+// (GameProfile::init_flag). Setup's first `size` bytes call IsInitializedSoundSystem. That function reads the flag
+// relative to r13: lbz r3, d(r13), then blr. Returns nothing if no call there reaches such a function.
 std::optional<uint32_t> FindInitFlag(const ntdlib::Dol& dol, uint32_t setup, uint32_t size)
 {
     constexpr uint32_t kLbzR3FromR13 = 0x886d0000;

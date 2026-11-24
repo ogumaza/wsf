@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 
+// The model of IOS (see ios.h): the IPC registers, and the devices that the games open: STM, the file system and its
+// files, the disc drive and ES.
+
 #include "wii/ios.h"
 
 #include <algorithm>
@@ -104,8 +107,8 @@ std::string PathAt(ntdlib::dsp::WiiMemory& memory, uint32_t address)
 
 // The buffers of an Ioctlv's vectors in the table at `table`: `in_count` inputs, then `io_count` buffers that IOS
 // writes. A vector is an address and a size. A table that isn't in memory gives no buffers.
-std::pair<std::vector<std::span<uint8_t>>, std::vector<std::span<uint8_t>>>
-IoctlvBuffers(ntdlib::dsp::WiiMemory& memory, uint32_t table, uint32_t in_count, uint32_t io_count)
+std::pair<std::vector<std::span<uint8_t>>, std::vector<std::span<uint8_t>>> IoctlvBuffers(
+    ntdlib::dsp::WiiMemory& memory, uint32_t table, uint32_t in_count, uint32_t io_count)
 {
     std::vector<std::span<uint8_t>> in;
     std::vector<std::span<uint8_t>> io;

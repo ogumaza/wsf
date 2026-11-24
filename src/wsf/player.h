@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 // WSF player core. Loads a .wsflib/.miniwsf set and produces its audio. Game mode runs the game's code, including its
-// sound code and OS, on an emulated Wii. Archive mode uses WSF's model of the SDK's sound player. Both modes run the
-// game's AX microcode on the emulated DSP. Portable C++ with no platform audio or UI. wsfplay, wsfrip's JAudio
-// analysis, the foobar2000 component and the XMPlay plugin use it.
+// sound code and OS, on an emulated Wii. Archive mode uses the model of the SDK sound player. Both modes run the DSP
+// program of the game (the AX microcode, or the JAudio program) on the emulated DSP. Portable C++ with no platform
+// audio or UI. wsfplay, wsfrip's JAudio analysis, the foobar2000 component and the XMPlay plugin use it.
 
 #pragma once
 
@@ -44,6 +44,9 @@ public:
 
     // The rate players report, the audio interface's DMA rate: 32,000 Hz.
     static constexpr int kSampleRate = kPlayerSampleRate;
+
+    // The length tags count from the first sample that isn't 0 (docs/wsf.md, "Tags").
+    static constexpr xsflib::player::LengthOrigin kLengthOrigin = xsflib::player::LengthOrigin::kFirstSound;
 
     Player();
     ~Player();

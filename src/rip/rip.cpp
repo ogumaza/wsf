@@ -14,6 +14,7 @@
 #include "ntdlib/disc/containers.h"
 #include "ntdlib/disc/image.h"
 #include "ntdlib/dol.h"
+#include "ntdlib/ppc/branch.h"
 #include "xsflib/bytes.h"
 #include "xsflib/psf/psf.h"
 
@@ -46,8 +47,7 @@ std::nullopt_t LibraryError(std::string* error, const std::string& message)
 std::optional<std::vector<uint8_t>> BuildGameLibrary(const ntdlib::disc::GameFiles& game, const ntdlib::Dol& dol,
                                                      const GameLibrary& library, const Tags& tags, std::string* error)
 {
-    // The game's code and data, then the driver. The game's main becomes a branch to the driver's entry (b, primary
-    // opcode 18, with the offset in bits 6 to 29).
+    // The game's code and data, then the driver. The game's main becomes a branch to the driver's entry.
     ProgramBuilder program;
     for (const ntdlib::Dol::Section& section : dol.Sections())
     {
@@ -56,7 +56,7 @@ std::optional<std::vector<uint8_t>> BuildGameLibrary(const ntdlib::disc::GameFil
 
     program.AddMemory(library.base, library.driver);
     uint8_t branch[4];
-    xsflib::StoreBe32(branch, 0x48000000 | ((library.entry - library.main) & 0x03fffffc));
+    xsflib::StoreBe32(branch, ntdlib::ppc::Branch(library.main, library.entry));
     program.AddMemory(library.main, branch, sizeof(branch));
 
     // The partition's header and the disc's files.

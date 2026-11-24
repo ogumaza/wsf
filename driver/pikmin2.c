@@ -49,23 +49,13 @@
  * requires no PowerPC toolchain.
  */
 
-typedef unsigned int u32;
-typedef unsigned short u16;
-typedef unsigned char u8;
+#include "guest.h"
 
 #define PARAMS_MAGIC 0x57534644u /* 'WSFD' */
 #define PARAMS_VERSION 2u
 
-/* Values of Params.status. They're macros because an enumerator can't hold 0x80000000 before C23. */
-#define STATUS_PLAYING 1u
-#define STATUS_FINISHED 2u
-#define STATUS_ERROR 0x80000000u /* | step number */
-
 /* The frames that the driver waits for a scene's resources before it gives up. */
 #define LOAD_FRAMES 600u
-
-/* The most wave groups that a .miniwsf lists. ntdlib's Z2Params has the same limit. */
-#define MAX_WAVES 64u
 
 #include "jaudio/pikmin2.h"
 
@@ -84,19 +74,19 @@ struct Params
     u32 wave_count;       /* the wave groups to load; patched by each .miniwsf */
     u32 waves[MAX_WAVES]; /* each the wave system in the high half and the group in the low half */
     /* the game profile: sizes */
-    u32 frame_ticks;      /* time-base ticks between the sound layer's frames */
-    u32 max_heaps;        /* each root heap's maximum of standard heaps */
-    u32 system_heap_size; /* JFWSystem's system heap */
-    u32 aram_audio_size;  /* "ARAM" for the sound library: the game keeps its "ARAM" in MEM2 */
-    u32 aram_graph_size;  /* "ARAM" for graphics */
-    u32 aram_priorities;  /* the ARAM manager's three thread priorities, a byte each, from bit 16 down */
-    u32 thread_size;      /* a JKRThread, for the main thread's */
-    u32 heap_margin;      /* the root heap's space that the sound heap leaves free */
-    u32 file_heap_size;   /* the heap that holds the start-up archive while the sound system starts */
-    u32 factory_size;     /* PSM::Factory */
-    u32 sound_memory;     /* the factory's heap size: the sound library's "ARAM" */
-    u32 scene_info_size;  /* PSGame::SceneInfo */
-    u32 scene_type;       /* the type of the piece's scene: one that the game plays with no game objects */
+    u32 frame_ticks;           /* time-base ticks between the sound layer's frames */
+    u32 max_heaps;             /* each root heap's maximum of standard heaps */
+    u32 system_heap_size;      /* JFWSystem's system heap */
+    u32 aram_audio_size;       /* "ARAM" for the sound library: the game keeps its "ARAM" in MEM2 */
+    u32 aram_graph_size;       /* "ARAM" for graphics */
+    u32 aram_priorities;       /* the ARAM manager's three thread priorities, a byte each, from bit 16 down */
+    u32 thread_size;           /* a JKRThread, for the main thread's */
+    u32 heap_margin;           /* the root heap's space that the sound heap leaves free */
+    u32 file_heap_size;        /* the heap that holds the start-up archive while the sound system starts */
+    u32 factory_size;          /* PSM::Factory */
+    u32 sound_memory;          /* the factory's heap size: the sound library's "ARAM" */
+    u32 scene_info_size;       /* PSGame::SceneInfo */
+    u32 scene_type;            /* the type of the piece's scene: one that the game plays with no game objects */
     u32 battle_directors_size; /* PSM::DirectorMgr_2PBattle */
     u32 directed_bgm_size;     /* PSSystem::DirectedBgm */
     u32 auto_bgm_size;         /* PSAutoBgm::AutoBgm */
@@ -123,30 +113,7 @@ struct Params
     u32 audio_folder;          /* the folder of the game's sound files */
     u32 get_resource;          /* void* JKRFileLoader::getGlbResource(const char* name, JKRFileLoader*) */
     u32 start_up_archive;      /* the start-up archive's name in that folder */
-    u32 factory_ctor;          /* PSGame::SysFactory::SysFactory() */
-    u32 factory_vtable;        /* PSM::Factory's vtable */
-    u32 make_se;               /* PSM::SeSound::makeSeSound, the factory's maker of effects */
-    u32 new_sound_system;      /* void PSGame::SysFactory::newSoundSystem() */
-    u32 scene_manager;         /* the variable that holds the scene manager, a PSM::SceneMgr */
-    u32 system_interface;      /* the variable that holds the sound system, a PSSystem::SysIF */
-    u32 main_loop;             /* void PSSystem::SysIF::mainLoop(): the sound layer's frame work */
-    u32 new_bgm_seq;           /* BgmSeq* PikSceneMgr::newBgmSeq(const char* bms, SoundInfo&) */
-    u32 new_main_bgm;          /* BgmSeq* PSM::SceneMgr::newMainBgm(const char* bms, SoundInfo&) */
-    u32 new_directed_bgm;      /* BgmSeq* PSM::SceneMgr::newDirectedBgm(const char* bms, SoundInfo&) */
-    u32 new_auto_bgm;          /* BgmSeq* PSM::SceneMgr::newAutoBgm(cnd, bms, SoundInfo&, AccessMode, SceneInfo&, ..) */
-    u32 new_game_scene;        /* Scene* PSM::SceneMgr::newGameScene(u8 wave_scene, SceneInfo*) */
-    u32 append_seq;            /* void PSSystem::Scene::appendSeq(SeqBase*) */
-    u32 adapt_child_scene;     /* void PSSystem::Scene::adaptChildScene(Scene*) */
-    u32 scene_info_ctor;       /* PSGame::SceneInfo::SceneInfo() */
-    u32 directed_bgm_ctor;     /* DirectedBgm::DirectedBgm(const char* bms, const SoundInfo&, DirectorMgrBase*) */
-    u32 auto_bgm_ctor;         /* AutoBgm::AutoBgm(const char* cnd, const char* bms, const SoundInfo&, mode, ..) */
-    u32 battle_directors_ctor; /* PSM::DirectorMgr_2PBattle::DirectorMgr_2PBattle() */
-    u32 adapt_directors;       /* void PSSystem::DirectorMgrBase::initAndAdaptToBgm(DirectedBgm&) */
-    u32 start_jump_bgm;        /* void PSSystem::JumpBgmSeq::startSeq(u16 start_point) */
-    u32 conductor_heap;        /* the variable that holds the heap of the conductors' objects */
-    u32 play_system_se;        /* void PSSystem::SysIF::playSystemSe(u32 id, JAISound** handle, u32 flag) */
-    u32 play_data;             /* the variable that holds the game's play data, Game::PlayData */
-    u32 rappas;                /* PSGame::Rappa::sRappa: the two captains' marching horns */
+    struct SoundLayer layer;   /* the sound layer's functions and variables (jaudio/pikmin2.h) */
     u32 big_boss;              /* PSM::EnemyBigBoss::sBigBoss: the final boss's sound object */
     u32 load_wave_scene;       /* void PSSystem::WaveScene::load(u8 wave_system, u8 group, u8 area, TaskChecker*) */
     u32 menu_waves;            /* the Home Button menu's wave group: (wave system << 16) | group */
@@ -161,19 +128,8 @@ __attribute__((section(".params"), used)) volatile struct Params driver_params =
     .version = PARAMS_VERSION,
 };
 
-typedef u32 (*fn0)(void);
-typedef u32 (*fn1)(u32);
-typedef u32 (*fn2)(u32, u32);
-typedef u32 (*fn3)(u32, u32, u32);
-typedef u32 (*fn4)(u32, u32, u32, u32);
-typedef u32 (*fn5)(u32, u32, u32, u32, u32);
-typedef u32 (*fn6)(u32, u32, u32, u32, u32, u32);
-typedef u32 (*fn7)(u32, u32, u32, u32, u32, u32, u32);
-
-/* More offsets of the game's objects that the driver reads and writes (jaudio/pikmin2.h gives the others), and the
-   size of a boss that the driver gives the sound layer. */
+/* More offsets of the game's objects that the driver reads and writes (jaudio/pikmin2.h gives the others). */
 #define LOADER_WAVE_SCENE 0x08 /* WaveLoader's WaveScene: the wave groups of its two areas */
-#define BOSS_SIZE 0x100        /* enough of a boss for the sound layer: onJump sets the byte at +0xff */
 
 /* A TaskChecker. It counts a scene's loads in flight. */
 static u32 task[8] __attribute__((aligned(8)));
@@ -192,18 +148,9 @@ static u32 rappas[2][RAPPA_SIZE / 4];
 /* A stand-in for the boss of a boss's music. As the music jumps to an attack, the game's onJump (MiddleBossSeq's at
    0x804e1b54, BigBossSeq's at 0x804e2168) marks the boss with the byte at +0xff. Without a boss, onJump stops the game
    with an assertion, and the attack plays nothing. Every byte of the stand-in starts clear. It also stands in for the
-   final boss's sound object: the game only tests that sBigBoss is set. */
-static u32 boss[BOSS_SIZE / 4];
-
-static u32 word(u32 address)
-{
-    return *(volatile u32*)address;
-}
-
-static u8 byte(u32 address)
-{
-    return *(volatile u8*)address;
-}
+   final boss's sound object: the game only tests that sBigBoss is set. The stand-in covers the byte. */
+#define STAND_IN_BOSS_SIZE 0x100
+static u32 stand_in_boss[STAND_IN_BOSS_SIZE / 4];
 
 static void wait_frame(void)
 {
@@ -257,85 +204,7 @@ static int load_scene(u32 scene)
     return wait_for_loads();
 }
 
-/* Makes the piece's object in the current heap, `heap`, the way the game makes it. Returns 0 if the game made none. */
-static u32 make_piece(volatile struct Piece* piece, u32 manager, u32 info, u32 heap)
-{
-    volatile struct Params* p = &driver_params;
-    const u32 sequence = (u32)piece->sequence;
-    const u32 sound_info = (u32)piece->info;
-    u32 seq = 0;
-    switch (piece->kind & 0xff)
-    {
-    case PIECE_PLAIN:
-        seq = ((fn3)p->new_bgm_seq)(manager, sequence, sound_info);
-        break;
-    case PIECE_MAIN:
-        seq = ((fn3)p->new_main_bgm)(manager, sequence, sound_info);
-        break;
-    case PIECE_DIRECTED:
-        seq = ((fn3)p->new_directed_bgm)(manager, sequence, sound_info);
-        break;
-    case PIECE_BIG_BOSS:
-    case PIECE_BIG_BOSS_NEAR:
-        /* The game makes the final boss's music only while the boss's sound object exists (initBossBgm, 0x803b5740).
-           The music's directors then take tracks 14 and 15 in place of 10 and 11 (0x804f5d24). */
-        *(volatile u32*)p->big_boss = (u32)boss;
-        seq = ((fn3)p->new_directed_bgm)(manager, sequence, sound_info);
-        break;
-    case PIECE_AUTO:
-        /* newAndSetCurrentScene gives the conductors the current heap first. */
-        *(volatile u32*)p->conductor_heap = heap;
-        seq = ((fn7)p->new_auto_bgm)(manager, (u32)piece->conductor, sequence, sound_info,
-                                     byte(manager + MANAGER_ACCESS_MODE), info, 0);
-        break;
-    case PIECE_AUTO_FREE:
-        /* newAutoBgm would look up the piece's directors in a track map, and the game has none for these pieces. */
-        *(volatile u32*)p->conductor_heap = heap;
-        seq = ((fn1)p->alloc)(p->auto_bgm_size);
-        if (!seq)
-        {
-            return 0;
-        }
-        ((fn6)p->auto_bgm_ctor)(seq, (u32)piece->conductor, sequence, sound_info, byte(manager + MANAGER_ACCESS_MODE),
-                                0);
-        call_virtual(seq, SEQ_VTABLE, SEQ_INIT, 0);
-        break;
-    case PIECE_BATTLE:
-    case PIECE_FREE:
-        {
-            u32 directors = 0;
-            if ((piece->kind & 0xff) == PIECE_BATTLE)
-            {
-                directors = ((fn1)p->alloc)(p->battle_directors_size);
-                if (!directors)
-                {
-                    return 0;
-                }
-                ((fn1)p->battle_directors_ctor)(directors);
-            }
-            seq = ((fn1)p->alloc)(p->directed_bgm_size);
-            if (!seq)
-            {
-                return 0;
-            }
-            ((fn4)p->directed_bgm_ctor)(seq, sequence, sound_info, directors);
-            call_virtual(seq, SEQ_VTABLE, SEQ_INIT, 0);
-            if (directors)
-            {
-                ((fn2)p->adapt_directors)(directors, seq);
-            }
-            break;
-        }
-    }
-
-    /* The game slows the swing of some pieces' root tracks. */
-    const u32 beat = piece->kind >> 16;
-    if (seq && beat)
-    {
-        *(volatile u16*)(word(seq + BGM_ROOT_TRACK) + ROOT_BEAT_INTERVAL) = (u16)beat;
-    }
-    return seq;
-}
+#include "jaudio/pikmin2_steps.h"
 
 __attribute__((noreturn)) void driver_main(void)
 {
@@ -356,19 +225,9 @@ __attribute__((noreturn)) void driver_main(void)
         fail(1);
     }
     volatile struct Piece* piece = &p->pieces[effect ? 0 : number];
-
-    /* The draws that an effect's value names, and the effect's ID without them. A sequence's command draws a random
-       number from the sound library's generator. From the state at the game's start, the first draw ends some effects
-       at once. In the game, every earlier draw moves the generator on. The draws come before the set-up. The sound
-       then starts at the same time as without them. */
     if (effect)
     {
-        const u32 draws = p->sound_id >> DRAWS_SHIFT & DRAWS_MASK;
-        for (u32 i = 0; i < draws; i++)
-        {
-            ((fn0)p->get_random)();
-        }
-        p->sound_id &= ~(DRAWS_MASK << DRAWS_SHIFT);
+        pikmin2_draw_randoms();
     }
 
     /* The disc. The game's main enters the game's folder, and the game's paths start there. */
@@ -379,8 +238,7 @@ __attribute__((noreturn)) void driver_main(void)
     }
 
     /* JFWSystem::init's heaps: MEM1's root heap, then MEM2's root heap, then the system heap in MEM2's root heap. The
-       game's root heap is the one in MEM2. Then the ARAM manager and the main thread's JKRThread. The game's start-up
-       then makes that heap current. The game's system object makes a heap for the sound system. */
+       game's root heap is the one in MEM2. Then the ARAM manager, the main thread's JKRThread and the sound heap. */
     ((fn2)p->create_mem1_root_heap)(p->max_heaps, 0);
     const u32 root = ((fn2)p->create_root_heap)(p->max_heaps, 0);
     const u32 system = root ? ((fn3)p->create_exp_heap)(p->system_heap_size, root, 0) : 0;
@@ -391,26 +249,9 @@ __attribute__((noreturn)) void driver_main(void)
     ((fn1)p->become_system_heap)(system);
     ((fn5)p->create_aram)(p->aram_audio_size, p->aram_graph_size, (p->aram_priorities >> 16) & 0xff,
                           (p->aram_priorities >> 8) & 0xff, p->aram_priorities & 0xff);
-    const u32 thread = ((fn1)p->alloc)(p->thread_size);
-    if (thread)
-    {
-        ((fn3)p->thread_ctor)(thread, ((fn0)p->get_current_thread)(), 4);
-    }
-    ((fn1)p->become_current_heap)(root);
-    const u32 free = ((fn1)p->get_free_size)(root);
-    if (free <= p->heap_margin)
-    {
-        fail(2);
-    }
-    const u32 sound = ((fn3)p->create_exp_heap)(free - p->heap_margin, root, 1);
-    if (!sound)
-    {
-        fail(2);
-    }
-    ((fn1)p->become_current_heap)(sound);
+    const u32 sound = pikmin2_sound_heap(root);
 
-    /* System::createSoundSystem: the start-up archive, read into a heap of its own, and the factory. The factory makes
-       the sound system in the sound heap. Then the global scene, in a solid heap. The start-up archive's heap goes. */
+    /* System::createSoundSystem: the start-up archive, read into a heap of its own, then the sound system. */
     const u32 files = ((fn3)p->create_exp_heap)(p->file_heap_size, root, 1);
     if (!files)
     {
@@ -423,30 +264,8 @@ __attribute__((noreturn)) void driver_main(void)
     {
         fail(3);
     }
-    const u32 factory = ((fn1)p->alloc)(p->factory_size);
-    if (!factory)
-    {
-        fail(3);
-    }
-    ((fn1)p->factory_ctor)(factory);
-    *(volatile u32*)(factory + FACTORY_VTABLE) = p->factory_vtable;
-    *(volatile u32*)(factory + FACTORY_MAKE_SE) = p->make_se;
-    *(volatile u32*)(factory + FACTORY_HEAP) = sound;
-    *(volatile u32*)(factory + FACTORY_HEAP_SIZE) = p->sound_memory;
-    *(volatile u32*)(factory + FACTORY_ARCHIVE) = archive;
-    ((fn1)p->new_sound_system)(factory);
-    const u32 manager = word(p->scene_manager);
-    const u32 sys_if = word(p->system_interface);
-    if (!manager || !sys_if)
-    {
-        fail(3);
-    }
-    u32 solid = ((fn3)p->create_solid_heap)(((fn1)p->get_free_size)(sound), sound, 1);
-    ((fn1)p->become_current_heap)(solid);
-    call_virtual(manager, 0, MANAGER_NEW_GLOBAL, 0);
-    ((fn1)p->adjust_size)(solid);
-    ((fn1)p->become_current_heap)(sound);
-    ((fn1)p->destroy_heap)(files);
+    u32 sys_if;
+    const u32 manager = pikmin2_sound_system(archive, sound, files, &sys_if);
 
     /* System::loadSoundResource: the global scene's resources, in a solid heap. The global scene's scene1stLoadSync
        loads the Home Button menu's wave group as well, in the scene's second area. */
@@ -456,12 +275,12 @@ __attribute__((noreturn)) void driver_main(void)
     {
         fail(4);
     }
-    solid = ((fn3)p->create_solid_heap)(((fn1)p->get_free_size)(sound), sound, 1);
+    const u32 solid = ((fn3)p->create_solid_heap)(((fn1)p->get_free_size)(sound), sound, 1);
     ((fn1)p->become_current_heap)(solid);
     start_loads();
     call_virtual(global, 0, SCENE_LOAD, (u32)task);
-    ((fn5)p->load_wave_scene)(global_loader + LOADER_WAVE_SCENE, p->menu_waves >> 16, p->menu_waves & 0xffff,
-                              MENU_AREA, (u32)task);
+    ((fn5)p->load_wave_scene)(global_loader + LOADER_WAVE_SCENE, p->menu_waves >> 16, p->menu_waves & 0xffff, MENU_AREA,
+                              (u32)task);
     if (!wait_for_loads())
     {
         fail(4);
@@ -469,16 +288,10 @@ __attribute__((noreturn)) void driver_main(void)
     ((fn1)p->adjust_size)(solid);
     ((fn1)p->become_current_heap)(sound);
 
-    /* The game's objects that the sequences ask about. */
-    *(volatile u32*)p->play_data = (u32)play_data;
-    for (u32 i = 0; i < 2; i++)
-    {
-        *(volatile u16*)((u32)rappas[i] + RAPPA_WAIT) = (u16)RAPPA_SHORTEST_WAIT;
-        *(volatile u32*)(p->rappas + 4 * i) = (u32)rappas[i];
-    }
+    pikmin2_game_objects();
 
     /* The scene's wave groups: the .miniwsf's groups other than those of the global scene, one in each of the scene's
-       two areas. A scene loads groups of wave system 0. An effect's waves all lie in the global scene's groups. */
+       two areas. A scene loads groups of wave system 0. An effect's waves are all in the global scene's groups. */
     u32 areas[2] = {NO_WAVE_SCENE, NO_WAVE_SCENE};
     u32 area_count = 0;
     for (u32 i = 0; i < p->wave_count && i < MAX_WAVES; i++)
@@ -495,97 +308,8 @@ __attribute__((noreturn)) void driver_main(void)
         areas[area_count++] = wave;
     }
 
-    /* A piece's scene, with a scene information of the profile's type, and the piece's object in it. */
-    u32 seq = 0;
-    if (!effect)
-    {
-        const u32 info = ((fn1)p->alloc)(p->scene_info_size);
-        if (!info)
-        {
-            fail(5);
-        }
-        ((fn1)p->scene_info_ctor)(info);
-        *(volatile u8*)(info + INFO_SCENE_TYPE) = (u8)p->scene_type;
-        const u32 scene = ((fn3)p->new_game_scene)(manager, areas[0], info);
-        if (!scene)
-        {
-            fail(5);
-        }
-        seq = make_piece(piece, manager, info, sound);
-        if (!seq)
-        {
-            fail(5);
-        }
-        ((fn2)p->append_seq)(scene, seq);
-        if (areas[1] != NO_WAVE_SCENE)
-        {
-            const u32 loader = word(scene + SCENE_WAVE_LOADER);
-            if (!loader)
-            {
-                fail(5);
-            }
-            *(volatile u8*)(loader + LOADER_SECOND_SCENE) = (u8)areas[1];
-        }
-        ((fn2)p->adapt_child_scene)(global, scene);
-
-        /* The scene's resources, then the piece. The game starts a boss's music when the boss appears, at the part of
-           the music that the boss gives. The scene starts the other pieces. */
-        if (!load_scene(scene))
-        {
-            fail(6);
-        }
-        const u32 start_point = (piece->kind >> 8) & 0xff;
-        if (start_point)
-        {
-            *(volatile u32*)(seq + BOSS_SEQ_BOSS) = (u32)boss;
-            ((fn2)p->start_jump_bgm)(seq, start_point);
-        }
-        else
-        {
-            call_virtual(scene, 0, SCENE_START, 0);
-        }
-    }
-
-    /* An effect starts as the game's system effects start: in two dimensions, with no actor. The sound library keeps
-       the effect's JAISound in `sound`, and clears it when the effect ends. */
-    u32 handle = (u32)&p->sound;
-    u32 tension = 0;
-    if (effect)
-    {
-        ((fn4)p->play_system_se)(sys_if, p->sound_id, handle, 0);
-    }
-    else
-    {
-        handle = call_virtual(seq, SEQ_VTABLE, SEQ_HANDLE, 0);
-        if ((piece->kind & 0xff) == PIECE_BIG_BOSS_NEAR)
-        {
-            tension = word(word(word(seq + BGM_DIRECTORS) + DIRECTORS_LIST) + 4 * TENSION_DIRECTOR);
-        }
-    }
-    p->sound = word(handle);
-    if (!p->sound)
-    {
-        fail(7);
-    }
-    p->status = STATUS_PLAYING;
-
-    for (;;)
-    {
-        ((fn1)p->main_loop)(sys_if);
-        /* The game turns the tension director on while a captain stands within 300 units of the boss (0x804f2130).
-           directOn does nothing until the sequence has linked the director's track and the frame work has powered the
-           director on. It does nothing once the director is on. */
-        if (tension)
-        {
-            call_virtual(tension, 0, DIRECTOR_ON, 0);
-        }
-        p->sound = word(handle);
-        if (p->status == STATUS_PLAYING && p->sound == 0)
-        {
-            p->status = STATUS_FINISHED;
-        }
-        wait_frame();
-    }
+    const u32 seq = effect ? 0 : pikmin2_start_piece(piece, manager, global, sound, areas);
+    pikmin2_play(effect, piece, seq, sys_if);
 }
 
 __attribute__((naked, section(".text.entry"))) void driver_entry(void)

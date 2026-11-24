@@ -22,14 +22,13 @@
 #include "ntdlib/disc/game.h"
 #include "ntdlib/dol.h"
 #include "ntdlib/nwsnd/length_model.h"
-#include "ntdlib/nwsnd/sequence.h"
 #include "ntdlib/rsar/cut.h"
 #include "ntdlib/rsar/formats.h"
-#include "ntdlib/rvl/ax/pb.h"
 #include "ntdlib/rvl/ax/system.h"
 #include "ntdlib/rvl/snd/arrangement.h"
 #include "ntdlib/rvl/snd/effect_setup.h"
 #include "ntdlib/rvl/snd/engine.h"
+#include "ntdlib/rvl/snd/length_model.h"
 #include "ntdlib/rvl/snd/rsar_options.h"
 #include "ntdlib/rvl/snd/sequence.h"
 #include "ntdlib/rvl/snd/util.h"
@@ -78,14 +77,14 @@ static_assert(kParamsEffectsOffset + DriverBlock::kMaxEffects * DriverBlock::kEf
 constexpr uint32_t kNoBus = 0xffffffff;
 
 // The tracks that the game silences on the sound (see EffectProfile): the offsets of the SeqPlayer's track pointers
-// in SeqSound and of the volume in SeqTrack, then the tracks, which a .miniwsf patches.
+// in SeqSound and of the volume in SeqTrack, then the tracks. A .miniwsf patches the tracks.
 constexpr uint32_t kParamsSeqTracksOffset = kParamsEffectsEnd;
 constexpr uint32_t kParamsTrackVolumeOffset = kParamsEffectsEnd + 4;
 constexpr uint32_t kParamsSilencedTracksOffset = kParamsEffectsEnd + 8;
 
 // The variables that the game sets on the sound (see EffectProfile): the offset of the SeqPlayer's local variables in
-// SeqSound, then the variables that are set, a bit for each, and their values, which a .miniwsf patches. The driver
-// writes local variables only.
+// SeqSound, then the variables that are set, a bit for each, and their values. A .miniwsf patches the variables and
+// their values. The driver writes local variables only.
 constexpr uint32_t kParamsSeqVariablesOffset = kParamsEffectsEnd + 12;
 constexpr uint32_t kParamsSetVariablesOffset = kParamsEffectsEnd + 16;
 constexpr uint32_t kParamsVariablesOffset = kParamsEffectsEnd + 20;
@@ -698,7 +697,7 @@ namespace
 {
 
 // The length analysis's rules. The model runs in 3 ms AX frames. xsflib's defaults count in frames of that length. They
-// give two loops and a 10 s fade, or the end, for at most 600 s. A sequence that stays busy without a sound for 180 s
+// give two loops and a 7 s fade, or the end, for at most 600 s. A sequence that stays busy without a sound for 180 s
 // has ended. No music rests that long. Some sound effects come close. WSF counts a loop's point, a loop's sound and a
 // steady sequence's loop from the frame that runs them. A sequence that ends does so at its last sound.
 xsflib::rip::LengthRules LengthRules()
@@ -712,193 +711,46 @@ xsflib::rip::LengthRules LengthRules()
     return rules;
 }
 
-// The model of NW4R SND and AX for the length analysis. With the DSP, a frame has sound if it mixed anything louder
-// than silence. Without the DSP, a frame has sound if any note plays. The model also counts each track's passes that
-// change the sound, and each start of a track that another track opens again. A looping sequence's fade then waits for
-// the tracks that loop at other lengths than the main track (OthersLooped).
-class LengthModel
-{
-public:
-    // `tracks` gives the tracks that play, a bit for each (nw4r::Arrangement). The others play at a volume of 0.
-    LengthModel(nw4r::ArchiveModel& model, nw4r::SeqPlayer& player, bool dsp, uint16_t tracks)
-        : model_(model), player_(player), dsp_(dsp), tracks_(tracks), passes_(*model.engine, player)
-    {
-    }
-
-    bool RunFrame()
-    {
-        ++frames_;
-        samples_.clear();
-        if (!dsp_)
-        {
-            model_.RunFrameWithoutDsp();
-
-            return true;
-        }
-
-        if (!model_.RunFrame(samples_))
-        {
-            return false;
-        }
-
-        ringing_frames_ = xsflib::rip::Audible(samples_) ? kRingingFrames : std::max(ringing_frames_ - 1, 0);
-
-        return true;
-    }
-
-    bool Sounded() const
-    {
-        return dsp_ ? xsflib::rip::Audible(samples_) : model_.engine->Channels().ActiveCount() > 0;
-    }
-
-    // The frames run so far.
-    uint64_t Frames() const
-    {
-        return frames_;
-    }
-
-    // Effects ring on after the notes have ended. A delay's echo can return after a quiet gap. The analysis therefore
-    // waits for a second without sound before a sequence with effects ends.
-    bool Ringing() const
-    {
-        return model_.engine->HasEffects() && ringing_frames_ > 0;
-    }
-
-    std::size_t VoiceCount() const
-    {
-        return model_.ax.VoiceCount();
-    }
-
-    xsflib::rip::VoicePlace Voice(std::size_t index) const
-    {
-        const ax::Pb pb = model_.ax.ReadPb(static_cast<uint32_t>(index));
-        return {pb.state == static_cast<uint16_t>(ax::VoiceState::kRun), pb.addr.loop_flag != 0,
-                ax::Join(pb.addr.current_address_hi, pb.addr.current_address_lo)};
-    }
-
-    bool Active() const
-    {
-        return player_.IsActive();
-    }
-
-    bool Settled() const
-    {
-        return player_.IsSettled(*model_.engine);
-    }
-
-    bool Stuck() const
-    {
-        return player_.IsStuck(*model_.engine);
-    }
-
-    bool Moving() const
-    {
-        return player_.IsMoving();
-    }
-
-    uint64_t ChangedAt() const
-    {
-        return player_.ChangedAt();
-    }
-
-    bool Busy() const
-    {
-        return model_.engine->IsBusy();
-    }
-
-    bool ChannelsChanging() const
-    {
-        return model_.engine->Channels().AnyChanging();
-    }
-
-    int ActiveChannels() const
-    {
-        return model_.engine->Channels().ActiveCount();
-    }
-
-    // Sets the hooks for the loops of the analysis and for the passes of every track
-    // (ntdlib::nwsnd::TrackPasses::SetHooks).
-    template <typename Function>
-    void OnLoop(Function function)
-    {
-        model_.engine->SetLoopHook(std::move(function));
-        passes_.SetHooks();
-    }
-
-    // Whether every other track that plays has made kLengthLoops passes that changed the sound
-    // (ntdlib::nwsnd::TrackPasses::OthersLooped). A track that plays at a volume of 0 doesn't hold the fade back.
-    bool OthersLooped(int track) const
-    {
-        return passes_.OthersLooped(track, tracks_);
-    }
-
-private:
-    static constexpr int kRingingFrames = 334; // 1 s
-
-    nw4r::ArchiveModel& model_;
-    nw4r::SeqPlayer& player_;
-    bool dsp_;
-    uint16_t tracks_;
-    std::vector<int16_t> samples_;
-    uint64_t frames_ = 0;
-    int ringing_frames_ = 0;
-
-    // On the Wii an open keeps the track's wait (SeqTrack::Open, 0x8003ffcc).
-    ntdlib::nwsnd::TrackPasses<nw4r::Engine, nw4r::SeqPlayer, true> passes_;
-};
-
-// Measures a sequence in `arrangement` on the model (xsflib::rip::MeasureLength), with the effects of `effects_sound`.
-// With `dsp` set, the microcode runs on the DSP. Otherwise the model runs without the DSP. The counted loops in
-// `endless_loops` loop for ever.
+// Measures a sequence in `arrangement` on the model (ntdlib::nwsnd::MeasureSequence) under WSF's rules, with the
+// effects of `effects_sound`. With `dsp` set, the microcode runs on the DSP. Otherwise the model runs without the DSP
+// (ntdlib::rvl::snd::ArrangedLengthConsole). Only the arrangement's tracks hold a loop's fade back. A measure that
+// reaches the limit inside counted loops runs again with each track's outermost counted loop endless. With `limit`
+// kLong, it runs again under xsflib's 3,600 s.
 std::optional<Timing> MeasureSequence(const ntdlib::rsar::SoundArchive& archive, const ntdlib::Microcode& microcode,
                                       nw4r::SndBuild build, uint32_t sound_index, uint32_t effects_sound,
                                       const nw4r::Arrangement& arrangement, const nw4r::ArchiveEffects& effects,
-                                      bool dsp, const ntdlib::nwsnd::CountedLoopSet& endless_loops = {})
+                                      bool dsp, xsflib::rip::Limit limit)
 {
-    auto model = std::make_unique<nw4r::ArchiveModel>();
-    model->build = build;
-    if (dsp)
+    using Console = nw4r::ArrangedLengthConsole;
+    const auto make_model = [&archive, &microcode, build, &arrangement, &effects, effects_sound,
+                             dsp]() -> std::unique_ptr<Console::Model>
     {
+        auto model = std::make_unique<Console::Model>();
+        model->build = build;
+        model->without_dsp = !dsp;
+        model->tracks = arrangement.tracks;
+        if (!dsp)
+        {
+            model->StartWithoutDsp(archive);
+            return model;
+        }
+
         if (!model->Start(microcode, archive))
         {
-            return std::nullopt;
+            return nullptr;
         }
 
         // The effects process the microcode's mix of the aux buses. Without the DSP, nothing reaches them.
         model->engine->SetEffects(effects.setups, effects.sends, effects_sound);
-    }
-    else
+
+        return model;
+    };
+    const auto start = [sound_index, &arrangement](Console::Model& model)
     {
-        model->StartWithoutDsp(archive);
-    }
+        return model.engine->StartSequence(sound_index, arrangement);
+    };
 
-    model->engine->SetEndlessLoops(endless_loops);
-    nw4r::SeqPlayer* player = model->engine->StartSequence(sound_index, arrangement);
-    if (!player)
-    {
-        return std::nullopt;
-    }
-
-    LengthModel length_model(*model, *player, dsp, arrangement.tracks);
-    const xsflib::rip::LengthRules rules = LengthRules();
-    const std::optional<Timing> timing = xsflib::rip::MeasureLength(length_model, rules);
-
-    // A track can repeat its part in a counted loop that the game plays for longer than the limit, such as 127 passes
-    // of a whole piece. The loop's passes don't count. The fade then waits for that track until the limit. When the
-    // measure reaches the limit with tracks in counted loops, it runs again with each track's outermost loop endless
-    // where that loop is a counted one (ntdlib::nwsnd::OutermostCountedLoops). The passes of those loops then count as
-    // those of a loop of count 0 do. A track whose outermost loop is endless keeps its inner loops. It then plays as in
-    // the game. Up to the limit, the tracks play the same.
-    if (timing && endless_loops.empty() && length_model.Frames() >= rules.max_frames)
-    {
-        if (const auto running = ntdlib::nwsnd::OutermostCountedLoops(*player); !running.empty())
-        {
-            return MeasureSequence(archive, microcode, build, sound_index, effects_sound, arrangement, effects, dsp,
-                                   running);
-        }
-    }
-
-    return timing;
+    return ntdlib::nwsnd::MeasureSequence<Console>(make_model, start, LengthRules(), {}, limit);
 }
 
 } // namespace
@@ -931,7 +783,8 @@ LengthAnalyzer::LengthAnalyzer(const std::vector<uint8_t>& archive_bytes, const 
 
 LengthAnalyzer::~LengthAnalyzer() = default;
 
-std::optional<Timing> LengthAnalyzer::Analyze(uint32_t sound_index, std::optional<uint32_t> effects_sound) const
+std::optional<Timing> LengthAnalyzer::Analyze(uint32_t sound_index, std::optional<uint32_t> effects_sound,
+                                              xsflib::rip::Limit limit) const
 {
     // The tracks that the game plays of the sound narrow the arrangement's. The variables that the game sets on the
     // sound fill in those that the arrangement doesn't set.
@@ -941,10 +794,10 @@ std::optional<Timing> LengthAnalyzer::Analyze(uint32_t sound_index, std::optiona
 
     // A sequence that the model can't play, such as one with a damaged bank, gets no length (xsflib::rip::TryMeasure).
     const uint32_t effects_of = effects_sound.value_or(sound_index);
-    const auto measure = [this, sound_index, effects_of, &arrangement]
+    const auto measure = [this, sound_index, effects_of, &arrangement, limit]
     {
         return MeasureSequence(impl_->archive, impl_->microcode, impl_->build, sound_index, effects_of, arrangement,
-                               impl_->effects, impl_->dsp);
+                               impl_->effects, impl_->dsp, limit);
     };
     return xsflib::rip::TryMeasure(measure);
 }

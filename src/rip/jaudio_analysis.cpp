@@ -6,20 +6,18 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <set>
 #include <span>
 #include <string>
-#include <utility>
 #include <vector>
 
-#include "ntdlib/dsp/memory.h"
+#include "ntdlib/flipper/game_source.h"
 #include "ntdlib/flipper/z2_params.h"
+#include "ntdlib/jaudio/beside_tracks.h"
 #include "ntdlib/jaudio/game_lengths.h"
 #include "ntdlib/jaudio/jungle_beat_states.h"
 #include "ntdlib/ppc/cpu.h"
-#include "xsflib/bytes.h"
 
 #include "wii/system.h"
 #include "wsf/format.h"
@@ -33,39 +31,6 @@ namespace
 // The names of the set's files, for the player's reader.
 constexpr char kLibName[] = "analysis.wsflib";
 constexpr char kMiniName[] = "analysis.miniwsf";
-
-// The most levels of parents that the test of a track's sound climbs.
-constexpr int kMaxTrackDepth = 16;
-
-// The CPU for ntdlib's analysis: the registers, and the watch of the game's code. The watch leaves out the events at
-// the places for which `skip` returns true. The registers keep the name that ntdlib::ppc::Cpu gives them. The analysis
-// reads them by that name.
-class AnalysisCpu
-{
-public:
-    AnalysisCpu(ntdlib::ppc::Cpu& cpu, std::function<bool(uint32_t pc)> skip)
-        : state_(cpu.state_), cpu_(cpu), skip_(std::move(skip))
-    {
-    }
-
-    void Watch(std::vector<uint32_t> pcs, std::function<void(uint32_t pc)> on_watch)
-    {
-        cpu_.Watch(std::move(pcs),
-                   [this, on_watch = std::move(on_watch)](uint32_t pc)
-                   {
-                       if (!skip_(pc))
-                       {
-                           on_watch(pc);
-                       }
-                   });
-    }
-
-    ntdlib::ppc::State& state_;
-
-private:
-    ntdlib::ppc::Cpu& cpu_;
-    std::function<bool(uint32_t pc)> skip_;
-};
 
 // WSF's player as the machine that ntdlib's analysis watches: its output, the emulated Wii's memory at CPU addresses,
 // and its CPU. For sound `sound_id`.
@@ -88,110 +53,71 @@ public:
 
     uint32_t Word(uint32_t address)
     {
-        const uint8_t* p = system_.Memory().At(ntdlib::dsp::ToPhysical(address), 4);
-        return p ? xsflib::LoadBe32(p) : 0;
+        return ntdlib::flipper::WordAt(system_.Memory(), address).value_or(0);
     }
 
     std::optional<uint8_t> Byte(uint32_t address)
     {
-        const uint8_t* p = system_.Memory().At(ntdlib::dsp::ToPhysical(address), 1);
-        return p ? std::optional<uint8_t>(*p) : std::nullopt;
+        return ntdlib::flipper::ByteAt(system_.Memory(), address);
     }
 
-    AnalysisCpu& Cpu()
+    ntdlib::jaudio::SkippingCpu<ntdlib::ppc::Cpu>& Cpu()
     {
         return cpu_;
     }
 
 private:
     // Whether the watched instruction at `pc` parses a track of the sound that the driver plays beside the ripped one
-    // (see JAudioProfile::background_sound), or of a chord layer's effect (JAudioProfile::chord_layers). A track
-    // belongs to that sound if it or one of its parents is the sound's root track. The register that holds the track
-    // is the one that ntdlib's analysis reads.
+    // (see JAudioProfile::background_sound), or of a chord layer's effect (JAudioProfile::chord_layers). A chord
+    // layer's effects play beside the music that the driver reports. The analysis follows the music alone.
     bool OnBackgroundTrack(uint32_t pc)
     {
-        const ntdlib::jaudio::GameWatch& watch = profile_.watch;
-        const bool conditional = watch.conditional_jump != 0 && pc == watch.conditional_jump;
-        if (profile_.background_sound < 0 || (pc != watch.parse_command && pc != watch.jump_handler && !conditional))
+        if (profile_.background_sound < 0)
         {
             return false;
         }
 
-        const uint32_t reg = pc == watch.parse_command ? watch.command_track_register
-                             : conditional             ? watch.conditional_track_register
-                                                       : watch.jump_track_register;
-        const uint32_t track = system_.Cpu().state_.gpr[reg];
+        const std::optional<uint32_t> track = ntdlib::jaudio::ParsedTrack(profile_.watch, pc, system_.Cpu().state_.gpr);
+        if (!track)
+        {
+            return false;
+        }
+
+        const auto word = [this](uint32_t address)
+        {
+            return Word(address);
+        };
         const uint32_t sound = Word(kJAudioParamsAddress + 4 * static_cast<uint32_t>(profile_.background_sound));
-        if (sound == 0 || Word(sound + watch.vtable_offset) != watch.sequence_vtable)
-        {
-            return chord_layer_ && OnEffect(track);
-        }
-
-        const uint32_t root = sound + watch.sequence_track_offset;
-        uint32_t t = track;
-        for (int level = 0; t != 0 && level < kMaxTrackDepth; level++)
-        {
-            if (t == root)
-            {
-                return true;
-            }
-
-            t = Word(t + profile_.track_parent_offset);
-        }
-
-        return false;
-    }
-
-    // The root of `track`: the track that its parents lead to, or 0.
-    uint32_t RootOf(uint32_t track)
-    {
-        for (int level = 0; track != 0 && level < kMaxTrackDepth; level++)
-        {
-            const uint32_t parent = Word(track + profile_.track_parent_offset);
-            if (parent == 0)
-            {
-                return track;
-            }
-
-            track = parent;
-        }
-
-        return 0;
-    }
-
-    // Whether `track` belongs to an effect. A chord layer's effects play beside the music that the driver reports. The
-    // analysis follows the music alone.
-    bool OnEffect(uint32_t track)
-    {
-        const ntdlib::jaudio::GameWatch& watch = profile_.watch;
-        const uint32_t root = RootOf(track);
-        return root != 0 && Word(root - watch.effect_track_offset + watch.vtable_offset) == watch.effect_vtable;
+        return ntdlib::jaudio::IsTrackBeside(profile_.watch, sound, *track, profile_.track_parent_offset, chord_layer_,
+                                             word);
     }
 
     Player& player_;
     wii::System& system_;
     const JAudioProfile& profile_;
     bool chord_layer_;
-    AnalysisCpu cpu_;
+    ntdlib::jaudio::SkippingCpu<ntdlib::ppc::Cpu> cpu_;
 };
 
-// The analysis's rules at WSF's output rate.
-ntdlib::jaudio::GameLengthRules JAudioLengthRules()
+// The analysis's rules at WSF's output rate. With `limit` kLong, the analysis runs to xsflib's 3,600 s. A sound at
+// either limit gets 600 s.
+ntdlib::jaudio::GameLengthRules JAudioLengthRules(xsflib::rip::Limit limit)
 {
     ntdlib::jaudio::GameLengthRules rules;
     rules.sample_rate = Player::kSampleRate;
 
-    return rules;
+    return ntdlib::jaudio::WithLimit(rules, limit);
 }
 
 // Runs ntdlib's analysis of the game's code (see AnalyzeJAudioSound) on the set of `library` and a mini for sound
 // `sound_id`, with `waves` loaded and the piece's `state`. With `lookups_sound`, each lookup of a wave counts as a
-// sound (see FindJAudioWaves). With `luigi`, the mini plays the sound's Luigi variant.
+// sound (see FindJAudioWaves). With `luigi`, the mini plays the sound's Luigi variant. `limit` sets the analysis's
+// limit (JAudioLengthRules).
 std::optional<xsflib::rip::Timing> PlayAndWatch(const std::vector<uint8_t>& library, const JAudioProfile& profile,
                                                 uint32_t sound_id, std::span<const uint32_t> waves,
                                                 std::set<ntdlib::jaudio::WaveUse>* found, bool lookups_sound,
                                                 std::string* start_error, const ntdlib::flipper::z2::PieceState* state,
-                                                bool luigi)
+                                                bool luigi, xsflib::rip::Limit limit)
 {
     // The reader copies the library straight into the player's set. A copy in a map of files first would hold a
     // second copy of the library for each analysis that runs.
@@ -221,9 +147,10 @@ std::optional<xsflib::rip::Timing> PlayAndWatch(const std::vector<uint8_t>& libr
     }
 
     Machine machine(player, *player.GameSystem(), profile, sound_id);
+
     // For a JAudio1 game, the sound's ID distinguishes a sequence from an effect.
     return ntdlib::jaudio::AnalyzeGameSound(machine, kJAudioZ2Address + ntdlib::flipper::z2::kHandleOffset,
-                                            WatchOf(profile, sound_id), JAudioLengthRules(), found, lookups_sound,
+                                            WatchOf(profile, sound_id), JAudioLengthRules(limit), found, lookups_sound,
                                             sound_id);
 }
 
@@ -233,15 +160,17 @@ std::optional<xsflib::rip::Timing> AnalyzeJAudioSound(const std::vector<uint8_t>
                                                       uint32_t sound_id, std::span<const uint32_t> waves,
                                                       std::set<ntdlib::jaudio::WaveUse>* found,
                                                       std::string* start_error,
-                                                      const ntdlib::flipper::z2::PieceState* state, bool luigi)
+                                                      const ntdlib::flipper::z2::PieceState* state, bool luigi,
+                                                      xsflib::rip::Limit limit)
 {
-    return PlayAndWatch(library, profile, sound_id, waves, found, false, start_error, state, luigi);
+    return PlayAndWatch(library, profile, sound_id, waves, found, false, start_error, state, luigi, limit);
 }
 
 bool FindJAudioWaves(const std::vector<uint8_t>& library, const JAudioProfile& profile, uint32_t sound_id,
                      std::set<ntdlib::jaudio::WaveUse>& found, const ntdlib::flipper::z2::PieceState* state, bool luigi)
 {
-    return PlayAndWatch(library, profile, sound_id, {}, &found, true, nullptr, state, luigi).has_value();
+    const auto limit = xsflib::rip::Limit::kDefault;
+    return PlayAndWatch(library, profile, sound_id, {}, &found, true, nullptr, state, luigi, limit).has_value();
 }
 
 } // namespace wsf::rip

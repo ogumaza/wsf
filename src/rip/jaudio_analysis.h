@@ -27,13 +27,15 @@ namespace wsf::rip
 // works out its length. The waves that the sound's notes look up go in `found` if it isn't null. Returns nothing if the
 // set can't start or a render fails. When the set can't start, `start_error` gets the player's message if it isn't
 // null. `state`, if given, is the piece's state, as in BuildJAudioMini. With `luigi`, the sound plays as its Luigi
-// variant (JAudioProfile::luigi_word).
+// variant (JAudioProfile::luigi_word). The analysis stops at 600 s, or with `limit` kLong at 3,600 s
+// (xsflib::rip::Limit). A sound at the limit gets 600 s and the fade under either limit.
 std::optional<xsflib::rip::Timing> AnalyzeJAudioSound(const std::vector<uint8_t>& library, const JAudioProfile& profile,
                                                       uint32_t sound_id, std::span<const uint32_t> waves,
                                                       std::set<ntdlib::jaudio::WaveUse>* found = nullptr,
                                                       std::string* start_error = nullptr,
                                                       const ntdlib::flipper::z2::PieceState* state = nullptr,
-                                                      bool luigi = false);
+                                                      bool luigi = false,
+                                                      xsflib::rip::Limit limit = xsflib::rip::Limit::kDefault);
 
 // Wave discovery: plays sound `sound_id` of `library` with no wave group loaded, and puts the waves that its notes
 // look up in `found`. The notes play no samples then. Each lookup counts as sound instead. Returns false if the set

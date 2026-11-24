@@ -23,6 +23,7 @@
 #include "ntdlib/flipper/wave_list.h"
 #include "ntdlib/flipper/z2_params.h"
 #include "ntdlib/jaudio/wave_system.h"
+#include "xsflib/cli/length_analysis.h"
 #include "xsflib/cli/rip.h"
 #include "xsflib/rip/file_names.h"
 #include "xsflib/rip/tool.h"
@@ -56,6 +57,7 @@ struct JAudioJob
 
     bool luigi = false;    // the sound's Luigi variant (rip::JAudioProfile::luigi_word)
     bool as_mario = false; // a Luigi variant that looks up the same waves as its sound
+    bool music = false;    // music (rip::JAudioSound::music): its length analysis runs to the long limit
 
     // The seconds that the search for the sound's waves took, or infinity if no search played the sound
     // (DiscoverWaves). The length analysis starts the sounds whose search took longest first.
@@ -115,6 +117,7 @@ std::vector<JAudioJob> SelectJAudioSounds(const std::vector<rip::JAudioSound>& s
         {
             jobs.push_back(
                 {index, sound.id, sound.label, sound_label, std::nullopt, sound.waves, {}, sound.piece_state});
+            jobs.back().music = sound.music;
         }
 
         const std::string luigi = sound.label + "_Luigi";
@@ -123,6 +126,7 @@ std::vector<JAudioJob> SelectJAudioSounds(const std::vector<rip::JAudioSound>& s
         {
             jobs.push_back(
                 {index, sound.id, luigi, sound_label, std::nullopt, sound.waves, {}, sound.piece_state, true});
+            jobs.back().music = sound.music;
         }
     }
 
@@ -234,7 +238,7 @@ void ListJAudioGame(const std::string& game_id, const rip::JAudioFiles& files,
     }
 }
 
-// Refuses a rip of a JAudio game for its options or the lack of a profile. The check comes before the rip parses the
+// Refuses a rip of a JAudio game for its options or a missing profile. The check comes before the rip parses the
 // start-up archive. Returns the exit code after the error, or nothing for a rip that can go on. --archive is a usage
 // error (exit code 2) and comes first. A game without a profile can't be ripped at all. The profile's error therefore
 // comes before the one for --mode archive.
@@ -360,8 +364,9 @@ void AnalyzeLengths(std::vector<JAudioJob>& jobs, const std::vector<uint8_t>& li
     const auto analyze = [&](JAudioJob& job)
     {
         std::set<ntdlib::jaudio::WaveUse> played;
+        const xsflib::rip::Limit limit = job.music ? xsflib::rip::Limit::kLong : xsflib::rip::Limit::kDefault;
         job.timing = rip::AnalyzeJAudioSound(lib, profile, job.sound_id, job.waves, &played, &job.start_error,
-                                             &job.piece_state, job.luigi);
+                                             &job.piece_state, job.luigi, limit);
         if (!job.start_error.empty())
         {
             return false;
@@ -390,9 +395,9 @@ void AnalyzeLengths(std::vector<JAudioJob>& jobs, const std::vector<uint8_t>& li
 // The sounds of a JAudio game. `baa` gets the start-up archive, or a Jac game's bank file. Prints an error and returns
 // nothing if the file can't be read or its sounds can't be listed.
 std::optional<std::vector<rip::JAudioSound>> ReadGameSounds(const ntdlib::disc::GameFiles& game,
-                                                             const rip::JAudioFiles& files,
-                                                             const rip::JAudioProfile* profile,
-                                                             std::vector<uint8_t>& baa)
+                                                            const rip::JAudioFiles& files,
+                                                            const rip::JAudioProfile* profile,
+                                                            std::vector<uint8_t>& baa)
 {
     if (!rip::ReadSoundFile(game, files.baa, baa))
     {
@@ -456,7 +461,7 @@ std::string MeasureLengths(std::vector<JAudioJob>& jobs, const std::vector<uint8
     {
         AnalyzeLengths(jobs, lib, profile, systems, o.jobs);
         unstartable = SkipUnstartable(jobs);
-        silent = SkipSilent(jobs);
+        silent = xsflib::cli::SkipSilent(jobs);
     }
 
     return xsflib::cli::SkippedText(unstartable, "can't start", silent, "sound");
@@ -495,7 +500,7 @@ int RipJAudioGame(const std::string& input, const fs::path& out_dir, const ntdli
     {
         if (!o.only_text.empty() || o.bgm)
         {
-            return NoSoundMatches(o);
+            return xsflib::rip::NoSoundMatches(o.only_text, o.bgm);
         }
 
         std::fprintf(stderr, "%s: nothing to rip\n", files.baa.c_str());
@@ -509,7 +514,7 @@ int RipJAudioGame(const std::string& input, const fs::path& out_dir, const ntdli
         return 1;
     }
 
-    const std::string game_name = o.game_name.empty() ? profile->name : o.game_name;
+    const std::string game_name = o.game_name.empty() ? game.Title() : o.game_name;
     const Tags common = xsflib::cli::RipTags(o, game_name, "wsf", "game");
     std::string error;
     const auto lib = rip::BuildJAudioLibrary(game, *profile, paths, common, &error);

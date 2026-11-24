@@ -88,7 +88,7 @@ std::unique_ptr<NativeEffects> NativeEffects::Attach(wii::System& system)
             return nullptr;
         }
 
-        // A class that the models don't know, or a block from a ripper that didn't fill these words in, leaves the
+        // A class that the models don't support, or a block from a ripper that didn't fill these words in, leaves the
         // effects to the game's code.
         c.type = static_cast<nw4r::EffectType>(type);
         const int words = nw4r::EffectParamWords(c.type);

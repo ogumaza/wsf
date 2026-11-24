@@ -2,7 +2,7 @@
 
 // What the ripper's files share. rip.cpp holds the parts that every game shares. game_profiles.cpp, effect_profiles.cpp
 // and jaudio_profiles.cpp hold the profiles of the games. The file of each sound library holds the rest: nw4r.cpp for
-// NW4R SND, and jaudio.cpp for JAudio2, JAudio1 and Jac.
+// NW4R SND, and jaudio.cpp with jaudio_library.cpp for JAudio2, JAudio1 and Jac.
 // The length analysis of a JAudio game plays the game's code on the player. jaudio_analysis.cpp holds it, in a separate
 // library that links the player.
 
@@ -58,7 +58,7 @@ std::optional<std::vector<uint8_t>> BuildGameLibrary(const ntdlib::disc::GameFil
 // A library that can't be built: sets `*error` to `message` unless `error` is null, and returns nothing.
 std::nullopt_t LibraryError(std::string* error, const std::string& message);
 
-// JAudio2, JAudio1 and Jac (jaudio.cpp)
+// JAudio2, JAudio1 and Jac (jaudio.cpp and jaudio_library.cpp)
 
 // Pikmin 2's driver parameters: the profile's `words`, then the number of pieces and the pieces (driver/pikmin2.c's
 // Piece).

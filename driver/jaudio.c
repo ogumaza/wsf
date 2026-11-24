@@ -17,7 +17,7 @@
  *   - the sound's start, once the DSP's extra frames of the audio driver's start-up have run (see start_sound).
  * `driver_params.status` reports the driver's progress to the player (see docs/wsf.md).
  *
- * Some games lack functions that the profile names. Link's Crossbow Training has no JFWDisplay::threadSleep. The
+ * Some games are missing functions that the profile names. Link's Crossbow Training has no JFWDisplay::threadSleep. The
  * game's scene manager has no function that loads one wave group either. This file has replacements for them, and the
  * block gives their addresses. For such a game, the ripper puts the addresses in the profile. The driver's sleep works
  * like threadSleep. It sets an alarm of the OS and suspends the thread. The driver's functions for one wave group call
@@ -74,15 +74,15 @@ struct Params
     u32 erase_wave_arc;     /* bool JASWaveArc::erase(void) */
     /* the driver's replacements, for the ripper: the sleep, and the functions for one wave group */
     sleep_fn driver_sleep;
-    z2_fn2 driver_load_se_wave;
-    z2_fn2 driver_load_bgm_wave;
-    z2_fn3 driver_wave_status;
-    z2_fn2 driver_erase_bgm_wave;
-    z2_fn2 driver_erase_se_wave;
+    fn2 driver_load_se_wave;
+    fn2 driver_load_bgm_wave;
+    fn3 driver_wave_status;
+    fn2 driver_erase_bgm_wave;
+    fn2 driver_erase_se_wave;
     /* the sound's start (see start_sound) */
     u32 game_start_sound; /* bool Z2AudioMgr::startSound(JAISoundID, JAISoundHandle*, const TVec3*) */
     u32 full_ring_count;  /* JASDriver::finishDSPFrame's count of the frames that found the DSP's buffers full */
-    z2_fn4 driver_start_sound;
+    fn4 driver_start_sound;
 };
 
 static void alarm_sleep(u32 object, u32 pad, u32 high, u32 low);
@@ -130,7 +130,7 @@ static void z2_wait_frame(volatile struct Z2Params* p)
 {
     /* threadSleep is a member function that doesn't use its object (r3). Its OSTime, a 64-bit count, starts at the
        next odd register: r5 (high) and r6 (low). */
-    ((z2_fn4)driver_params.sleep)(0, 0, 0, p->frame_retraces * driver_params.retrace_ticks);
+    ((fn4)driver_params.sleep)(0, 0, 0, p->frame_retraces * driver_params.retrace_ticks);
 }
 
 /* The alarm's handler: the sleeping thread runs again. */
@@ -138,7 +138,7 @@ static void wake(u32 alarm_address, u32 context)
 {
     (void)alarm_address;
     (void)context;
-    ((z2_fn1)driver_params.resume_thread)(sleeper);
+    ((fn1)driver_params.resume_thread)(sleeper);
 }
 
 /* The driver's sleep, with threadSleep's arguments. With interrupts off, the alarm can't go off before the thread is
@@ -148,21 +148,21 @@ static void alarm_sleep(u32 object, u32 pad, u32 high, u32 low)
 {
     (void)object;
     (void)pad;
-    const u32 enabled = ((z2_fn0)driver_params.disable_interrupts)();
-    sleeper = ((z2_fn0)driver_params.z2.get_current_thread)();
-    ((z2_fn5)driver_params.set_alarm)((u32)alarm, 0, high, low, (u32)wake);
-    ((z2_fn1)driver_params.suspend_thread)(sleeper);
-    ((z2_fn1)driver_params.restore_interrupts)(enabled);
+    const u32 enabled = ((fn0)driver_params.disable_interrupts)();
+    sleeper = ((fn0)driver_params.z2.get_current_thread)();
+    ((fn5)driver_params.set_alarm)((u32)alarm, 0, high, low, (u32)wake);
+    ((fn1)driver_params.suspend_thread)(sleeper);
+    ((fn1)driver_params.restore_interrupts)(enabled);
 }
 
 /* The wave archive of group `group` of wave bank `bank`, or 0. Twilight Princess's scene manager finds it the same
    way. */
 static u32 wave_arc(u32 bank, u32 group)
 {
-    const u32 heap = z2_word(driver_params.section_heap);
+    const u32 heap = word(driver_params.section_heap);
     const u32 table = heap + driver_params.wave_bank_table;
-    const u32 wave_bank = heap && bank < z2_word(table + 4) ? z2_word(z2_word(table) + 4 * bank) : 0;
-    return wave_bank ? ((z2_fn2)z2_word(z2_word(wave_bank) + WAVE_BANK_GET_ARC))(wave_bank, group) : 0;
+    const u32 wave_bank = heap && bank < word(table + 4) ? word(word(table) + 4 * bank) : 0;
+    return wave_bank ? ((fn2)word(word(wave_bank) + WAVE_BANK_GET_ARC))(wave_bank, group) : 0;
 }
 
 /* The driver's functions for one wave group, with the scene manager's arguments. They don't use the first. */
@@ -170,35 +170,35 @@ static u32 load_se_wave(u32 scene, u32 group)
 {
     (void)scene;
     const u32 arc = wave_arc(0, group);
-    return arc ? ((z2_fn2)driver_params.load_wave_arc)(arc, 0) : 0;
+    return arc ? ((fn2)driver_params.load_wave_arc)(arc, 0) : 0;
 }
 
 static u32 load_bgm_wave(u32 scene, u32 group)
 {
     (void)scene;
     const u32 arc = wave_arc(1, group);
-    return arc ? ((z2_fn2)driver_params.load_wave_arc_tail)(arc, 0) : 0;
+    return arc ? ((fn2)driver_params.load_wave_arc_tail)(arc, 0) : 0;
 }
 
 static u32 wave_status(u32 scene, u32 group, u32 bank)
 {
     (void)scene;
     const u32 arc = wave_arc(bank, group);
-    return arc ? z2_word(arc + WAVE_ARC_STATUS) : Z2_WAVE_NONE;
+    return arc ? word(arc + WAVE_ARC_STATUS) : Z2_WAVE_NONE;
 }
 
 static u32 erase_bgm_wave(u32 scene, u32 group)
 {
     (void)scene;
     const u32 arc = wave_arc(1, group);
-    return arc ? ((z2_fn1)driver_params.erase_wave_arc)(arc) : 0;
+    return arc ? ((fn1)driver_params.erase_wave_arc)(arc) : 0;
 }
 
 static u32 erase_se_wave(u32 scene, u32 group)
 {
     (void)scene;
     const u32 arc = wave_arc(0, group);
-    return arc ? ((z2_fn1)driver_params.erase_wave_arc)(arc) : 0;
+    return arc ? ((fn1)driver_params.erase_wave_arc)(arc) : 0;
 }
 
 /* The driver's start of the sound, for a game whose profile names finishDSPFrame's count. The Wii's
@@ -212,24 +212,24 @@ static u32 erase_se_wave(u32 scene, u32 group)
 static u32 start_sound(u32 manager, u32 id, u32 handle, u32 position)
 {
     volatile struct Params* p = &driver_params;
-    for (u32 frames = 0; z2_word(p->full_ring_count) < FULL_RING_SETTLED && frames < Z2_SETUP_FRAMES; frames++)
+    for (u32 frames = 0; word(p->full_ring_count) < FULL_RING_SETTLED && frames < SETUP_FRAMES; frames++)
     {
-        ((z2_fn1)p->z2.audio_frame)(manager);
+        ((fn1)p->z2.audio_frame)(manager);
         z2_wait_frame(&p->z2);
     }
 
-    return ((z2_fn4)p->game_start_sound)(manager, id, handle, position);
+    return ((fn4)p->game_start_sound)(manager, id, handle, position);
 }
 
 static void z2_create_aram(volatile struct Z2Params* p)
 {
-    ((z2_fn5)p->create_aram)(p->aram_audio_size, p->aram_graph_size, p->aram_priorities >> 16 & 0xff,
-                             p->aram_priorities >> 8 & 0xff, p->aram_priorities & 0xff);
+    ((fn5)p->create_aram)(p->aram_audio_size, p->aram_graph_size, p->aram_priorities >> 16 & 0xff,
+                          p->aram_priorities >> 8 & 0xff, p->aram_priorities & 0xff);
 }
 
 static void z2_set_aram_buffer(volatile struct Z2Params* p, u32 system_heap)
 {
-    ((z2_fn3)p->set_aram_buffer)(0, p->aram_buffer_size, system_heap);
+    ((fn3)p->set_aram_buffer)(0, p->aram_buffer_size, system_heap);
 }
 
 __attribute__((noreturn)) void driver_main(void)
@@ -237,7 +237,7 @@ __attribute__((noreturn)) void driver_main(void)
     volatile struct Params* p = &driver_params;
     if (p->magic != PARAMS_MAGIC || p->version != PARAMS_VERSION)
     {
-        p->status = Z2_STATUS_ERROR | 1;
+        p->status = STATUS_ERROR | 1;
         for (;;)
         {
         }

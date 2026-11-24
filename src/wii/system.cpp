@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+// The emulated Wii of game mode (see system.h): the boot state, the Hollywood registers, and snapshots.
+
 #include "wii/system.h"
 
 #include <algorithm>

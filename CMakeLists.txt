@@ -3,7 +3,10 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for wsfrip, wsfplay, the foobar2000 component, the XMPlay plugin, Windows file properties and macOS
 # bundles (xsflib_add_version below). For a release, update it here and add notes in docs/release-notes/.
-project(wsf VERSION 1.12.0 LANGUAGES C CXX)
+project(wsf VERSION 1.13.0 LANGUAGES C CXX)
+
+# The copyright line in the version information of the programs and the plugins (xsflib_add_version).
+set(WSF_COPYRIGHT "Copyright (c) 2026 the WSF authors. MIT licence.")
 
 # xsflib: the code that WSF shares with the other PSF players and with the converters, as a submodule. Its
 # XsflibProject.cmake sets what the projects built on it start with: C++20, a release build by default, the static C
@@ -15,13 +18,6 @@ if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/externals/xsflib/CMakeLists.txt")
 endif()
 include(externals/xsflib/cmake/XsflibProject.cmake)
 xsflib_project(CHECK_COMPILERS NAME WSF PREFIX WSF NOMINMAX)
-
-# clang-cl's /W4 warns when a designated initializer leaves out a field (-Wmissing-designated-field-initializers). The
-# Mac's -Wall -Wextra doesn't. WSF leaves out the fields whose default member initializers give their values. Writing
-# those values into each initializer would copy the defaults, and the copies could drift from them.
-if (WSF_CLANG_CL)
-    list(APPEND WSF_WARNINGS -Wno-missing-designated-field-initializers)
-endif()
 
 # ntdlib: a library for the hardware and formats of Nintendo's consoles, as a second submodule. It builds on xsflib.
 # xsflib provides the compression libraries that ntdlib's image formats require: zlib (GCZ), Zstandard (RVZ), liblzma
@@ -68,6 +64,7 @@ add_library(wsf_rip STATIC
     src/rip/game_profiles.cpp
     src/rip/jaudio.cpp
     src/rip/jaudio.h
+    src/rip/jaudio_library.cpp
     src/rip/jaudio_driver_blob.h
     src/rip/jaudio_profiles.cpp
     src/rip/jungle_beat_driver_blob.h
@@ -100,7 +97,7 @@ add_executable(wsfplay src/cli/wsfplay.cpp)
 target_link_libraries(wsfplay PRIVATE wsf_player xsflib::cli)
 target_compile_options(wsfplay PRIVATE ${WSF_WARNINGS})
 xsflib_add_version(wsfplay VERSION ${wsf_VERSION} DEFINE WSF_VERSION DESCRIPTION "WSF renderer" PRODUCT WSF
-                   COPYRIGHT "Copyright (c) 2026 the WSF authors. MIT licence.")
+                   COPYRIGHT "${WSF_COPYRIGHT}")
 
 # Game mode's length analysis and wave discovery for JAudio games: the rip's sets play on the player while ntdlib's
 # analysis watches the game's code.
@@ -120,7 +117,9 @@ add_executable(wsfrip
 target_link_libraries(wsfrip PRIVATE wsf_jaudio_analysis wsf_rip xsflib::cli xsflib::rip Threads::Threads)
 target_compile_options(wsfrip PRIVATE ${WSF_WARNINGS})
 xsflib_add_version(wsfrip VERSION ${wsf_VERSION} DEFINE WSF_VERSION DESCRIPTION "WSF ripper" PRODUCT WSF
-                   COPYRIGHT "Copyright (c) 2026 the WSF authors. MIT licence.")
+                   COPYRIGHT "${WSF_COPYRIGHT}")
+# 32-bit Windows: wsfrip may use more than 2 GB of memory.
+xsflib_large_address_aware(wsfrip)
 
 foreach (tool wsfrip wsfplay)
     # Windows: UTF-8 as the tools' code page. macOS: a droplet app for each tool (wsfrip.app, wsfplay.app).

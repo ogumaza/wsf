@@ -7,7 +7,17 @@
 //                      folder). Only valid with a single input.
 //   --length T         override the length tag (seconds, m:s or h:m:s)
 //   --fade T           override the fade tag
-//   --default T        the length when there's no length tag (default and fade: PlaybackOptions)
+//   --fade-exponent P  the fade's curve, from 0.5 to 4 (default 2)
+//   --default T        the length when there's no length tag (default 2:30, with a 7 s fade)
+//   --keep-opening     keep the silence before the first sound
+//   --start-silence T  silence before the track (default 0.5 s)
+//   --end-silence T    silence after the track (default 1 s)
+//   --loops N          passes of a loop with loop tags (default: as tagged)
+//   --loop-fade T      fade a loop out over T (default: as tagged)
+//   --one-pass-over T  one pass of a loop whose two passes take longer than T
+//   --ignore-tags      play every file for the default length and fade
+//   --keep-ending      keep the silence at the end of a piece that ends
+//   --raw              play the file as it is: no skip and no added silence
 //   --info             print the tags and loaded files without rendering
 //   --version          print the version
 //
